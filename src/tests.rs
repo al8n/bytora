@@ -40,6 +40,34 @@ fn static_windows_keep_the_original_pointer_for_every_handle_width() {
 }
 
 #[test]
+fn short_and_empty_static_ranges_keep_their_pointers_after_slicing() {
+  struct Field(u8);
+  static FIELDS: [Field; 5] = [Field(0), Field(1), Field(2), Field(3), Field(4)];
+
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: AssocInlineSize,
+  {
+    let mut header = SliceN::<Field, BYTES>::try_from_static(&FIELDS).unwrap();
+    header.advance(1);
+    let pair = header.slice(1..=2);
+    assert_eq!(pair.as_slice().as_ptr(), FIELDS[2..].as_ptr());
+    assert_eq!(pair.len(), 2);
+    let field = pair.slice(..1);
+    let empty = pair.slice(2..);
+    header.advance(header.len());
+    assert_eq!(field.as_slice()[0].0, 2);
+    assert_eq!(field.as_slice().as_ptr(), FIELDS[2..].as_ptr());
+    assert!(empty.is_empty());
+    assert_eq!(empty.as_slice().as_ptr(), FIELDS[4..].as_ptr());
+    assert_eq!(header.slice(..).as_slice().as_ptr(), FIELDS[5..].as_ptr());
+  }
+  check::<{ 3 * size_of::<usize>() }>();
+  check::<32>();
+  check::<4104>();
+}
+
+#[test]
 fn static_storage_supports_noncopy_and_overaligned_elements() {
   #[repr(align(64))]
   struct Aligned(u8);
@@ -68,6 +96,10 @@ fn static_zero_sized_windows_cover_the_external_length_limit() {
   assert!(Slice::<Aligned>::try_from_static(&VALUES).is_none());
   let mut values = Slice::from_static(&VALUES[..MAX]);
   assert_eq!(values.len(), MAX);
+  let tail = values.slice(MAX - 2..=MAX - 1);
+  assert_eq!(tail.len(), 2);
+  assert_eq!(tail.slice(1..).as_slice().as_ptr(), VALUES.as_ptr());
+  assert!(tail.slice(2..).is_empty());
   values.advance(MAX - 1);
   let last = values.clone();
   values.advance(1);
@@ -177,6 +209,36 @@ fn inline_clones_preserve_the_window_and_advance_independently() {
   check::<8>();
   check::<24>();
   check::<4104>();
+}
+
+#[test]
+fn inline_ranges_preserve_absolute_cursors_and_own_their_elements() {
+  use core::ops::Bound::{Excluded, Included};
+
+  fn check<const BYTES: usize>(start: usize, end: usize)
+  where
+    [u8; BYTES]: AssocInlineSize,
+  {
+    let data = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
+    let capacity = SliceN::<u8, BYTES>::INLINE_CAPACITY;
+    let mut source = SliceN::<u8, BYTES>::try_from_slice(&data[..capacity]).unwrap();
+    source.advance(start);
+    let mut window = black_box(source.slice((Excluded(0), Included(end - start - 1))));
+    assert_eq!(window.as_slice(), &data[start + 1..end]);
+    assert_eq!(
+      window.as_slice().as_ptr(),
+      ptr::from_ref(&window).cast::<u8>().wrapping_add(start + 1)
+    );
+    let nested = window.slice(1..window.len() - 1);
+    window.advance(window.len());
+    assert_eq!(source.as_slice(), &data[start..capacity]);
+    assert_eq!(nested.as_slice(), &data[start + 2..end - 1]);
+    assert!(window.slice(..).is_empty());
+    assert!(source.slice(source.len()..).is_empty());
+  }
+  check::<8>(2, 7);
+  check::<32>(7, 26);
+  check::<536>(254, 513);
 }
 
 #[test]
@@ -335,8 +397,11 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
   let mut original = SliceN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
   original.advance(1);
   let cloned = black_box(original.clone());
+  let ranged = black_box(cloned.slice(..=0));
   original.advance(1);
   assert_eq!(cloned.as_slice()[0].byte, 5);
   assert!(ptr::eq(cloned.as_slice()[0].number, &numbers[1]));
   assert_eq!(*cloned.as_slice()[0].number, 17);
+  assert_eq!(ranged.as_slice()[0].byte, 5);
+  assert!(ptr::eq(ranged.as_slice()[0].number, &numbers[1]));
 }

@@ -1,6 +1,6 @@
 use super::{ExternalPrefix, InlineSize, Layout};
 use crate::Slice;
-use core::{ptr, slice};
+use core::{ops::Range, ptr, slice};
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 use std::{sync::Arc, vec::Vec};
 
@@ -122,6 +122,23 @@ impl<T, S: InlineSize> Slice<T, S> {
     // reference. data and len describe a checked window of the original slice,
     // including a non-null, aligned pointer for empty or ZST windows.
     unsafe { slice::from_raw_parts(data, self.len()) }
+  }
+
+  #[track_caller]
+  pub(crate) fn slice_shared(&self, range: Range<usize>) -> Self {
+    let window = &self.shared_slice()[range];
+    let owner = self.layout.external_prefix().owner;
+    let layout = Layout::try_external(window.as_ptr(), owner, window.len())
+      .expect("a subrange fits its source descriptor");
+    // Only the static table makes the data immortal. Other tagged owners can
+    // have retain/release callbacks, and an untagged owner holds a shared Vec.
+    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+    if !ptr::eq(owner, STATIC_VTABLE.tagged_owner()) {
+      // SAFETY: The source holds this external owner live. Its validated
+      // subwindow keeps the same owner and needs its own reference.
+      unsafe { Self::retain(owner) };
+    }
+    Self { layout }
   }
 
   #[track_caller]

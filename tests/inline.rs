@@ -164,3 +164,29 @@ fn failed_advances_leave_the_window_intact() {
     check::<536>(&wide, start);
   }
 }
+
+#[test]
+fn owned_ranges_validate_both_bounds_against_the_current_window() {
+  use core::ops::Bound::{Excluded, Included, Unbounded};
+
+  let inline = SliceN::<u8, 32>::try_from_slice(b"abcdef").unwrap();
+  let external = SliceN::<u8, 32>::try_from_static(b"abcdef").unwrap();
+  for mut source in [inline, external] {
+    source.advance(2);
+    for bounds in [
+      (Included(3), Excluded(2)),
+      (Included(5), Unbounded),
+      (Unbounded, Included(4)),
+      (Unbounded, Excluded(usize::MAX)),
+      (Excluded(usize::MAX), Unbounded),
+      (Unbounded, Included(usize::MAX)),
+    ] {
+      assert!(std::panic::catch_unwind(|| source.slice(bounds)).is_err());
+      assert_eq!(source.as_slice(), b"cdef");
+    }
+    assert_eq!(source.slice(..).as_slice(), b"cdef");
+    assert_eq!(source.slice(1..=2).as_slice(), b"de");
+    assert!(source.slice((Excluded(3), Unbounded)).is_empty());
+    assert!(source.slice(..0).is_empty());
+  }
+}
