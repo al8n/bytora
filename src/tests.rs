@@ -384,6 +384,11 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
     byte: 5,
     number: &numbers[1],
   };
+  let compact = SliceN::<Padded<'_>, 32>::try_from_slice(&[second]).unwrap();
+  let copy = black_box(compact.clone());
+  assert_eq!(copy.as_slice()[0].byte, 5);
+  assert!(ptr::eq(copy.as_slice()[0].number, &numbers[1]));
+
   let mut values = SliceMutN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
   values.advance(1);
   let mut moved = black_box(Some(values)).unwrap();

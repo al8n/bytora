@@ -118,7 +118,7 @@ impl<T, S: InlineSize> Slice<T, S> {
 impl<T, S: InlineSize> Clone for Slice<T, S> {
   #[inline]
   fn clone(&self) -> Self {
-    if Self::EXTERNAL_FILLS_PAYLOAD {
+    if Layout::<T, S>::COMPACT_EXTERNAL {
       return self.clone_compact();
     }
     if !self.layout.is_inline() {

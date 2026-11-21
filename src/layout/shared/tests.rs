@@ -39,9 +39,20 @@ fn tagged_owner_dispatches_its_storage_operations_for_each_handle() {
     assert_eq!(empty.as_slice().as_ptr(), data[9..].as_ptr());
   }
   check::<{ 3 * size_of::<usize>() }>();
+  check::<32>();
   check::<4104>();
-  assert_eq!(RETAINS.load(Relaxed), 8);
-  assert_eq!(RELEASES.load(Relaxed), 10);
+  {
+    static UNITS: [(); isize::MAX as usize] = [(); isize::MAX as usize];
+    let mut huge = Slice::<()> {
+      layout: Layout::try_external(UNITS.as_ptr(), OPS.tagged_owner(), UNITS.len()).unwrap(),
+    };
+    // Shrinking across the high length byte must retain the custom owner.
+    let short = huge.slice(UNITS.len() - 1..);
+    huge.advance(UNITS.len());
+    let _peer = short.clone();
+  }
+  assert_eq!(RETAINS.load(Relaxed), 14);
+  assert_eq!(RELEASES.load(Relaxed), 18);
 }
 
 #[test]
@@ -107,6 +118,7 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
     assert!(weak.upgrade().is_none());
   }
   check::<24>();
+  check::<32>();
   check::<4104>();
 }
 
@@ -122,11 +134,16 @@ fn shared_storage_supports_overaligned_elements_and_zero_sized_windows() {
   let max = isize::MAX as usize;
   let mut zsts = Slice::<()>::try_from_vec(vec![(); max]).ok().unwrap();
   assert_eq!(zsts.as_slice().len(), max);
+  let short = zsts.slice(max - 2..);
+  assert_ne!(short.layout.tag, COMPACT_STATIC);
   zsts.advance(max - 1);
+  assert_ne!(zsts.layout.tag, COMPACT_STATIC);
   let last = zsts.clone();
   zsts.advance(1);
   assert_eq!(last.as_slice(), &[()]);
   assert!(zsts.as_slice().is_empty());
+  drop(zsts);
+  assert_eq!(short.as_slice(), &[(), ()]);
   let too_long = Slice::<()>::try_from_vec(vec![(); max + 1]).err().unwrap();
   assert_eq!(too_long.len(), max + 1);
 }

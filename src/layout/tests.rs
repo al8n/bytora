@@ -41,6 +41,29 @@ fn external_lengths_round_trip_on_every_descriptor_tier() {
 }
 
 #[test]
+fn compact_static_windows_cross_the_fast_tag_length_boundary() {
+  const BOUNDARY: usize = 1 << (usize::BITS - 8);
+  static DATA: [(); BOUNDARY + 1] = [(); BOUNDARY + 1];
+  fn check<S: InlineSize>() {
+    let mut source = crate::Slice::<(), S>::try_from_static(&DATA).unwrap();
+    assert_ne!(source.layout.tag, COMPACT_STATIC);
+    assert_eq!(source.clone().len(), BOUNDARY + 1);
+    source.advance(1);
+    assert_ne!(source.layout.tag, COMPACT_STATIC);
+    assert_eq!(source.len(), BOUNDARY);
+    let subrange = source.slice(1..);
+    assert_eq!(subrange.layout.tag, COMPACT_STATIC);
+    assert!(!subrange.layout.is_inline());
+    assert_eq!(subrange.clone().len(), BOUNDARY - 1);
+    source.advance(1);
+    assert_eq!(source.layout.tag, COMPACT_STATIC);
+    assert_eq!(source.as_slice().len(), BOUNDARY - 1);
+  }
+  check::<crate::DefaultSize>();
+  check::<U32>();
+}
+
+#[test]
 fn moved_external_prefix_preserves_pointer_provenance() {
   fn check<S: InlineSize>() {
     let values = [11u16, 13];
