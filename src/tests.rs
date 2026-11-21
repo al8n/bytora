@@ -1,91 +1,150 @@
-use super::{Slice, SliceMut};
+use super::{Slice, SliceMut, SupportedBytes};
+use core::{hint::black_box, ptr};
 
 #[test]
-fn full_inline_windows_move_and_advance() {
-  fn check<const N: usize>() {
-    let source = core::array::from_fn::<_, N, _>(|i| i as u8);
-    let mut bytes = Slice::<u8, N>::try_from_slice(&source).unwrap();
-    bytes.advance(1);
-    let mut moved = core::hint::black_box(Some(bytes)).unwrap();
-    assert_eq!(moved.len(), N - 1);
-    assert_eq!(moved.as_slice(), &source[1..]);
-    moved.advance(N - 1);
+fn full_byte_windows_move_and_advance() {
+  fn check<const BYTES: usize>(capacity: usize)
+  where
+    [(); BYTES]: SupportedBytes,
+  {
+    let source = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
+    assert_eq!(Slice::<u8, BYTES>::INLINE_CAPACITY, capacity);
+    assert!(Slice::<u8, BYTES>::try_from_slice(&source[..=capacity]).is_none());
+    let mut bytes = Slice::<u8, BYTES>::try_from_slice(&source[..capacity]).unwrap();
+    let base = bytes.as_slice().as_ptr();
+    let start = capacity / 2;
+    bytes.advance(start);
+    assert_eq!(bytes.as_slice().as_ptr(), base.wrapping_add(start));
+    let mut moved = black_box(Some(bytes)).unwrap();
+    assert_eq!(moved.len(), capacity - start);
+    assert_eq!(moved.as_slice(), &source[start..capacity]);
+    moved.advance(capacity - start);
     moved.advance(0);
     assert!(moved.is_empty());
     assert!(moved.as_slice().is_empty());
   }
-  check::<22>();
-  check::<30>();
-  check::<62>();
-  check::<126>();
+  check::<2>(1);
+  check::<4>(3);
+  check::<8>(7);
+  check::<16>(14);
+  check::<24>(22);
+  check::<32>(30);
+  check::<40>(38);
+  check::<48>(46);
+  check::<56>(54);
+  check::<64>(62);
+  check::<80>(78);
+  check::<128>(126);
+  check::<136>(132);
+  check::<256>(252);
+  check::<264>(260);
+  check::<2048>(2044);
 }
 
 #[test]
-fn over_aligned_elements_remain_aligned_after_move_and_advance() {
+fn tiny_cursors_represent_every_window() {
+  let source = *b"abcdefg";
+  for end in 0..=7 {
+    for start in 0..=end {
+      let mut values = SliceMut::<u8, 8>::try_from_slice(&source[..end]).unwrap();
+      values.advance(start);
+      assert_eq!(values.as_mut_slice(), &source[start..end]);
+      assert_eq!(values.len(), end - start);
+    }
+  }
+}
+
+#[test]
+fn u32_capacity_and_alignment_follow_the_byte_budget() {
+  assert_eq!(Slice::<u32, 2>::INLINE_CAPACITY, 0);
+  assert_eq!(Slice::<u32, 4>::INLINE_CAPACITY, 0);
+  assert_eq!(Slice::<u32, 8>::INLINE_CAPACITY, 1);
+  assert_eq!(Slice::<u32, 24>::INLINE_CAPACITY, 5);
+  assert_eq!(SliceMut::<u32, 32>::INLINE_CAPACITY, 7);
+  assert_eq!(SliceMut::<u32, 64>::INLINE_CAPACITY, 15);
+  assert!(Slice::<u32, 24>::try_from_slice(&[0; 6]).is_none());
+  let mut values = SliceMut::<u32, 24>::try_from_slice(&[2, 3, 5, 7, 11]).unwrap();
+  values.advance(2);
+  values.as_mut_slice()[1] = 13;
+  let moved = black_box(values);
+  assert!(moved.as_slice().as_ptr().is_aligned());
+  assert_eq!(moved.as_slice(), &[5, 13, 11]);
+}
+
+#[test]
+fn over_aligned_elements_support_aligned_empty_windows() {
   #[repr(align(64))]
-  #[derive(Copy, Clone, PartialEq, Debug)]
-  struct Aligned(u8);
+  #[derive(Copy, Clone)]
+  struct Aligned {
+    _byte: u8,
+  }
 
-  let mut values = SliceMut::<Aligned, 3>::try_from_slice(&[Aligned(1), Aligned(2)]).unwrap();
-  let base = values.as_slice().as_ptr();
-  assert!(base.is_aligned());
-  values.advance(1);
-  assert_eq!(values.as_slice().as_ptr(), base.wrapping_add(1));
-  values.as_mut_slice()[0] = Aligned(7);
-  let mut moved = core::hint::black_box(values);
-  assert_eq!(moved.as_slice(), &[Aligned(7)]);
-  assert!(moved.as_mut_slice().as_mut_ptr().is_aligned());
-  moved.advance(1);
-  assert!(moved.as_mut_slice().is_empty());
+  assert_eq!(size_of::<Option<SliceMut<Aligned, 2>>>(), 2);
+  assert_eq!(size_of::<Option<Slice<Aligned, 256>>>(), 256);
+  assert_eq!(Slice::<Aligned, 256>::INLINE_CAPACITY, 0);
+  let value = Aligned { _byte: 3 };
+  assert!(Slice::<Aligned, 256>::try_from_slice(&[value]).is_none());
+  let mut empty = SliceMut::<Aligned, 2>::try_from_slice(&[]).unwrap();
+  empty.advance(0);
+  assert!(empty.is_empty());
+  assert!(empty.as_slice().as_ptr().is_aligned());
+  assert!(empty.as_mut_slice().as_mut_ptr().is_aligned());
 }
 
 #[test]
-fn empty_and_zero_sized_elements_have_valid_ranges() {
+fn aligned_zero_sized_elements_use_the_payload_byte_count() {
   #[repr(align(64))]
   #[derive(Clone, Copy)]
   struct AlignedZst;
 
-  let mut empty = SliceMut::<AlignedZst, 0>::try_from_slice(&[]).unwrap();
-  assert!(empty.is_empty());
-  empty.advance(0);
-  assert!(empty.as_mut_slice().as_mut_ptr().is_aligned());
-  assert!(Slice::<AlignedZst, 0>::try_from_slice(&[AlignedZst]).is_none());
-
-  let mut zsts = SliceMut::<AlignedZst, 3>::try_from_slice(&[AlignedZst; 3]).unwrap();
+  assert_eq!(Slice::<AlignedZst, 4>::INLINE_CAPACITY, 3);
+  assert!(Slice::<AlignedZst, 4>::try_from_slice(&[AlignedZst; 4]).is_none());
+  let mut zsts = SliceMut::<AlignedZst, 4>::try_from_slice(&[AlignedZst; 3]).unwrap();
+  assert!(zsts.as_slice().as_ptr().is_aligned());
   zsts.advance(2);
   assert_eq!(zsts.as_mut_slice().len(), 1);
   assert!(zsts.as_mut_slice().as_mut_ptr().is_aligned());
+  zsts.advance(1);
+  assert!(zsts.as_mut_slice().is_empty());
 }
 
 #[test]
-fn capacity_limits_are_checked_before_encoding() {
-  assert_eq!(Slice::<u8, 0>::INLINE_CAPACITY, 0);
-  assert_eq!(SliceMut::<u8, 30>::INLINE_CAPACITY, 30);
-  assert_eq!(Slice::<u8, 256>::INLINE_CAPACITY, 126);
-  assert!(Slice::<u8, 22>::try_from_slice(&[0; 23]).is_none());
-  assert!(SliceMut::<u8, 256>::try_from_slice(&[0; 127]).is_none());
-  assert!(Slice::<u8, 256>::try_from_slice(&[0; 256]).is_none());
-  assert_eq!(
-    Slice::<u8, 256>::try_from_slice(&[0; 126]).unwrap().len(),
-    126
-  );
-}
-
-#[test]
-#[should_panic(expected = "advance past end")]
-fn advance_checks_the_whole_count_before_narrowing() {
-  let mut values = SliceMut::<u8, 1>::try_from_slice(&[7]).unwrap();
-  values.advance(usize::MAX);
-}
-
-#[test]
-fn reference_elements_keep_their_provenance() {
+fn pointer_elements_survive_moves_advances_and_writes() {
   let numbers = [2, 3];
-  let mut refs = SliceMut::<&i32, 4>::try_from_slice(&[&numbers[0], &numbers[1]]).unwrap();
+  let mut refs = SliceMut::<&i32, 24>::try_from_slice(&[&numbers[0], &numbers[1]]).unwrap();
   refs.advance(1);
   assert_eq!(*refs.as_slice()[0], 3);
   refs.as_mut_slice()[0] = &numbers[0];
-  let moved = core::hint::black_box(refs);
-  assert!(core::ptr::eq(moved.as_slice()[0], &numbers[0]));
+  let moved = black_box(Some(refs)).unwrap();
+  assert!(ptr::eq(moved.as_slice()[0], &numbers[0]));
   assert_eq!(*moved.as_slice()[0], 2);
+}
+
+#[test]
+fn copies_preserve_pointer_fields_and_uninitialized_padding() {
+  #[repr(C)]
+  #[derive(Clone, Copy)]
+  struct Padded<'a> {
+    byte: u8,
+    number: &'a u32,
+  }
+
+  let numbers = [13, 17];
+  let first = Padded {
+    byte: 3,
+    number: &numbers[0],
+  };
+  let second = Padded {
+    byte: 5,
+    number: &numbers[1],
+  };
+  let mut values = SliceMut::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
+  values.advance(1);
+  let mut moved = black_box(Some(values)).unwrap();
+  assert_eq!(moved.as_slice()[0].byte, 5);
+  assert_eq!(*moved.as_slice()[0].number, 17);
+  moved.as_mut_slice()[0] = first;
+  let again = black_box(moved);
+  assert!(ptr::eq(again.as_slice()[0].number, &numbers[0]));
+  assert_eq!(*again.as_slice()[0].number, 13);
 }

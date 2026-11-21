@@ -13,20 +13,29 @@ extern crate std;
 
 mod layout;
 use layout::Layout;
+pub use layout::SupportedBytes;
 
 /// An owned slice with inline storage for `Copy` elements.
 ///
-/// The inline cursor can address `min(N, 126)` elements. Moving the handle moves
-/// those elements. Advancing it leaves them in place and changes the start of the
-/// visible slice. All public constructors currently use inline storage.
+/// `BYTES` is the exact size of the handle and its `Option`. It defaults to
+/// four machine words. See [`SupportedBytes`] for the available sizes.
+/// Moving the handle moves its elements. Advancing changes only the cursor.
 #[repr(transparent)]
-pub struct Slice<T, const N: usize> {
-  layout: Layout<T, N>,
+pub struct Slice<T, const BYTES: usize = { 4 * size_of::<usize>() }>
+where
+  [(); BYTES]: SupportedBytes,
+{
+  layout: Layout<T, BYTES>,
 }
 
-impl<T, const N: usize> Slice<T, N> {
-  /// The number of elements the inline cursor can address, the smaller of `N` and 126.
-  pub const INLINE_CAPACITY: usize = Layout::<T, N>::INLINE_CAPACITY;
+impl<T, const BYTES: usize> Slice<T, BYTES>
+where
+  [(); BYTES]: SupportedBytes,
+{
+  /// The maximum number of inline elements. Each zero-sized element counts as
+  /// one payload byte. Nonzero-sized elements requiring greater alignment than
+  /// the handle have capacity zero.
+  pub const INLINE_CAPACITY: usize = Layout::<T, BYTES>::INLINE_CAPACITY;
 
   /// Copies `values` inline. Returns `None` if their length exceeds [`Self::INLINE_CAPACITY`].
   pub fn try_from_slice(values: &[T]) -> Option<Self>
@@ -64,16 +73,22 @@ impl<T, const N: usize> Slice<T, N> {
 
 /// An owned slice whose inline `Copy` elements can be borrowed mutably.
 ///
-/// The inline cursor can address `min(N, 126)` elements. All public constructors
-/// currently use inline storage.
+/// `BYTES` is the exact size of the handle and its `Option`. It defaults to
+/// four machine words. See [`SupportedBytes`] for the available sizes.
 #[repr(transparent)]
-pub struct SliceMut<T, const N: usize> {
-  inner: Slice<T, N>,
+pub struct SliceMut<T, const BYTES: usize = { 4 * size_of::<usize>() }>
+where
+  [(); BYTES]: SupportedBytes,
+{
+  inner: Slice<T, BYTES>,
 }
 
-impl<T, const N: usize> SliceMut<T, N> {
-  /// The number of elements the inline cursor can address, the smaller of `N` and 126.
-  pub const INLINE_CAPACITY: usize = Slice::<T, N>::INLINE_CAPACITY;
+impl<T, const BYTES: usize> SliceMut<T, BYTES>
+where
+  [(); BYTES]: SupportedBytes,
+{
+  /// The maximum number of inline elements, as in [`Slice::INLINE_CAPACITY`].
+  pub const INLINE_CAPACITY: usize = Slice::<T, BYTES>::INLINE_CAPACITY;
 
   /// Copies `values` inline. Returns `None` if their length exceeds [`Self::INLINE_CAPACITY`].
   pub fn try_from_slice(values: &[T]) -> Option<Self>
@@ -114,23 +129,9 @@ impl<T, const N: usize> SliceMut<T, N> {
   }
 }
 
-// Keep these contracts in library builds, including cross-compilation without tests.
-#[cfg(target_pointer_width = "64")]
 const _: () = {
-  if align_of::<usize>() == 8 {
-    assert!(size_of::<Slice<u8, 22>>() == 24);
-    assert!(size_of::<Option<Slice<u8, 22>>>() == 24);
-    assert!(size_of::<SliceMut<u8, 22>>() == 24);
-    assert!(size_of::<Option<SliceMut<u8, 22>>>() == 24);
-    assert!(size_of::<Slice<u8, 30>>() == 32);
-    assert!(size_of::<Option<Slice<u8, 30>>>() == 32);
-    assert!(size_of::<SliceMut<u8, 30>>() == 32);
-    assert!(size_of::<Option<SliceMut<u8, 30>>>() == 32);
-    assert!(size_of::<Slice<u8, 62>>() == 64);
-    assert!(size_of::<Option<Slice<u8, 62>>>() == 64);
-    assert!(size_of::<SliceMut<u8, 62>>() == 64);
-    assert!(size_of::<Option<SliceMut<u8, 62>>>() == 64);
-  }
+  assert!(size_of::<Slice<u32>>() == 4 * size_of::<usize>());
+  assert!(size_of::<Option<SliceMut<u32>>>() == 4 * size_of::<usize>());
 };
 
 #[cfg(test)]
