@@ -59,6 +59,7 @@ fn compact_static_windows_cross_the_fast_tag_length_boundary() {
     assert_eq!(source.layout.tag, COMPACT_STATIC);
     assert_eq!(source.as_slice().len(), BOUNDARY - 1);
   }
+  check::<typenum::U0>();
   check::<crate::DefaultSize>();
   check::<U32>();
 }
