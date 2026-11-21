@@ -84,6 +84,14 @@ fn static_storage_supports_noncopy_and_overaligned_elements() {
   assert_eq!(last.as_slice()[0].0, 5);
   assert!(ptr::eq(&last.as_slice()[0], &DATA[1]));
   assert_eq!(HANDLE.len(), 2);
+
+  let source = SliceN::<Aligned, 64>::try_from_static(&DATA).unwrap();
+  let mut replacement = source.slice(1..);
+  replacement.clone_from(&source);
+  assert_eq!(replacement.len(), 2);
+  assert!(ptr::eq(&replacement.as_slice()[0], &DATA[0]));
+  replacement.advance(1);
+  assert_eq!(source.len(), 2);
 }
 
 #[test]

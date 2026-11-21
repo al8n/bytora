@@ -128,6 +128,17 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
       layout: self.layout.clone_inline(),
     }
   }
+
+  #[inline]
+  fn clone_from(&mut self, source: &Self) {
+    // Keep the external assignment separate so wide shared descriptors can be
+    // written without also moving the unused inline storage.
+    if Layout::<T, S>::COMPACT_EXTERNAL || source.layout.is_inline() {
+      *self = source.clone();
+    } else {
+      *self = source.clone_shared();
+    }
+  }
 }
 
 /// An owned slice whose inline `Copy` elements can be borrowed mutably.

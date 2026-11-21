@@ -66,6 +66,68 @@ fn bench_clone<T: Clone>(b: &mut Bencher<'_>, source: &T) {
   bench_operation(b, || T::clone(black_box(source)));
 }
 
+fn bench_clone_from<T: Clone>(b: &mut Bencher<'_>, source: &T, empty: impl Fn() -> T) {
+  // The timed operation replaces an empty destination; reset and drop the
+  // resulting clones after timing, as in the clone-and-push benchmark.
+  let mut outputs: Vec<T> = (0..BATCH_SIZE).map(|_| empty()).collect();
+  for slot in &mut outputs {
+    slot.clone_from(black_box(source));
+  }
+  black_box(&outputs);
+  for slot in &mut outputs {
+    *slot = empty();
+  }
+
+  b.iter_custom(|iterations| {
+    let mut elapsed = Duration::ZERO;
+    let mut remaining = iterations;
+    while remaining != 0 {
+      let count = remaining.min(BATCH_SIZE as u64) as usize;
+      let start = Instant::now();
+      for slot in &mut outputs[..count] {
+        slot.clone_from(black_box(source));
+      }
+      black_box(&outputs);
+      elapsed += start.elapsed();
+      for slot in &mut outputs[..count] {
+        *slot = empty();
+      }
+      remaining -= count as u64;
+    }
+    elapsed
+  });
+}
+
+#[derive(Clone, Copy)]
+enum CloneMethod {
+  Push,
+  From,
+}
+
+fn bench_clone_case<T: Clone>(
+  group: &mut BenchmarkGroup<'_, WallTime>,
+  id: String,
+  source: &T,
+  method: CloneMethod,
+  empty: fn() -> T,
+) {
+  group.bench_function(id, |b| match method {
+    CloneMethod::Push => bench_clone(b, source),
+    CloneMethod::From => bench_clone_from(b, source, empty),
+  });
+}
+
+fn clone_preflight<T: Clone>(source: &T, method: CloneMethod, empty: fn() -> T) -> T {
+  match method {
+    CloneMethod::Push => source.clone(),
+    CloneMethod::From => {
+      let mut cloned = empty();
+      cloned.clone_from(source);
+      cloned
+    }
+  }
+}
+
 fn unique_lengths(lengths: impl IntoIterator<Item = usize>) -> Vec<usize> {
   let mut unique = Vec::new();
   for len in lengths {
@@ -170,20 +232,60 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
   }
 }
 
-#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
-fn slice_large_heap(group: &mut BenchmarkGroup<'_, WallTime>) {
-  let owner = SliceN::<u8, LARGE_HANDLE>::try_from_vec(PAYLOAD.to_vec()).unwrap();
-  let mut shared = owner.clone();
-  assert_eq!(shared.as_slice(), &PAYLOAD[..]);
-  let id = format!("slice_heap_shared/handle_{LARGE_HANDLE}/len_{LARGE_PAYLOAD}");
-  group.bench_function(id, |b| bench_clone(b, &shared));
+fn slice_wide<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+  let handle_size = size_of::<Slice<u8, S>>();
+  let source = Slice::<u8, S>::try_from_static(&PAYLOAD).unwrap();
+  {
+    let cloned = clone_preflight(&source, method, empty_slice::<S>);
+    assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
+    assert_eq!(cloned.as_slice().as_ptr(), PAYLOAD.as_ptr());
+  }
+  let id = format!("slice_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+  bench_clone_case(group, id, &source, method, empty_slice::<S>);
+  let mut advanced = source.clone();
+  advanced.advance(LARGE_PAYLOAD - SHORT);
+  {
+    let cloned = clone_preflight(&advanced, method, empty_slice::<S>);
+    assert_eq!(cloned.as_slice(), &PAYLOAD[..SHORT]);
+    assert_eq!(
+      cloned.as_slice().as_ptr(),
+      PAYLOAD.as_ptr().wrapping_add(LARGE_PAYLOAD - SHORT)
+    );
+  }
+  let id = format!("slice_static_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+  bench_clone_case(group, id, &advanced, method, empty_slice::<S>);
 
-  shared.advance(LARGE_PAYLOAD - SHORT);
-  assert_eq!(shared.as_slice(), &PAYLOAD[..SHORT]);
-  let id =
-    format!("slice_heap_shared_advanced/handle_{LARGE_HANDLE}/from_{LARGE_PAYLOAD}/len_{SHORT}");
-  group.bench_function(id, |b| bench_clone(b, &shared));
-  black_box(&owner);
+  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+  {
+    assert!(LARGE_PAYLOAD > Slice::<u8, S>::INLINE_CAPACITY);
+    let values = PAYLOAD.to_vec();
+    let data = values.as_ptr();
+    let owner = Slice::<u8, S>::try_from_vec(values).unwrap();
+    let mut shared = owner.clone();
+    assert_eq!(shared.as_slice(), &PAYLOAD[..]);
+    assert_eq!(shared.as_slice().as_ptr(), data);
+    {
+      let cloned = clone_preflight(&shared, method, empty_slice::<S>);
+      assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
+      assert_eq!(cloned.as_slice().as_ptr(), data);
+    }
+    let id = format!("slice_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+    bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+
+    shared.advance(LARGE_PAYLOAD - SHORT);
+    {
+      let cloned = clone_preflight(&shared, method, empty_slice::<S>);
+      assert_eq!(cloned.as_slice(), &PAYLOAD[..SHORT]);
+      assert_eq!(
+        cloned.as_slice().as_ptr(),
+        data.wrapping_add(LARGE_PAYLOAD - SHORT)
+      );
+    }
+    let id =
+      format!("slice_heap_shared_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+    bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+    black_box(&owner);
+  }
 }
 
 fn slice_static<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
@@ -260,6 +362,61 @@ fn bytes_advanced(group: &mut BenchmarkGroup<'_, WallTime>, len: usize) {
   black_box(&owner);
 }
 
+fn bytes_wide_baselines(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+  let handle_size = size_of::<Bytes>();
+  let source = Bytes::from_static(&PAYLOAD);
+  {
+    let cloned = clone_preflight(&source, method, Bytes::new);
+    assert_eq!(cloned.as_ref(), &PAYLOAD[..]);
+    assert_eq!(cloned.as_ptr(), PAYLOAD.as_ptr());
+  }
+  let id = format!("bytes_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+  bench_clone_case(group, id, &source, method, Bytes::new);
+
+  let owner = Bytes::copy_from_slice(&PAYLOAD);
+  let shared = owner.clone();
+  {
+    let cloned = clone_preflight(&shared, method, Bytes::new);
+    assert_eq!(cloned.as_ref(), &PAYLOAD[..]);
+    assert_eq!(cloned.as_ptr(), owner.as_ptr());
+  }
+  let id = format!("bytes_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+  bench_clone_case(group, id, &shared, method, Bytes::new);
+  black_box(&owner);
+}
+
+fn bytes_wide_advanced(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+  let handle_size = size_of::<Bytes>();
+  let mut source = Bytes::from_static(&PAYLOAD);
+  source.advance(LARGE_PAYLOAD - SHORT);
+  {
+    let cloned = clone_preflight(&source, method, Bytes::new);
+    assert_eq!(cloned.as_ref(), &PAYLOAD[..SHORT]);
+    assert_eq!(
+      cloned.as_ptr(),
+      PAYLOAD.as_ptr().wrapping_add(LARGE_PAYLOAD - SHORT)
+    );
+  }
+  let id = format!("bytes_static_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+  bench_clone_case(group, id, &source, method, Bytes::new);
+
+  let owner = Bytes::copy_from_slice(&PAYLOAD);
+  let mut shared = owner.clone();
+  shared.advance(LARGE_PAYLOAD - SHORT);
+  {
+    let cloned = clone_preflight(&shared, method, Bytes::new);
+    assert_eq!(cloned.as_ref(), &PAYLOAD[..SHORT]);
+    assert_eq!(
+      cloned.as_ptr(),
+      owner.as_ptr().wrapping_add(LARGE_PAYLOAD - SHORT)
+    );
+  }
+  let id =
+    format!("bytes_heap_shared_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+  bench_clone_case(group, id, &shared, method, Bytes::new);
+  black_box(&owner);
+}
+
 fn clone_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone");
   inline(&mut group, SliceN::<u8, 8>::try_from_slice);
@@ -269,6 +426,8 @@ fn clone_benches(c: &mut Criterion) {
     inline(&mut group, SliceN::<u8, 24>::try_from_slice);
   }
   inline(&mut group, SliceN::<u8, MATCHED_HANDLE>::try_from_slice);
+  inline(&mut group, SliceN::<u8, 64>::try_from_slice);
+  inline(&mut group, SliceN::<u8, 128>::try_from_slice);
   inline(&mut group, SliceN::<u8, 256>::try_from_slice);
   inline(&mut group, SliceN::<u8, LARGE_HANDLE>::try_from_slice);
   inline_advanced(&mut group);
@@ -279,19 +438,23 @@ fn clone_benches(c: &mut Criterion) {
     slice_heap::<typenum::U32>(&mut group);
     #[cfg(target_pointer_width = "32")]
     slice_heap::<typenum::U12>(&mut group);
-    slice_large_heap(&mut group);
   }
   slice_static::<typenum::U16>(&mut group);
   slice_static::<typenum::U24>(&mut group);
   slice_static::<typenum::U32>(&mut group);
   #[cfg(target_pointer_width = "32")]
   slice_static::<typenum::U12>(&mut group);
+  slice_wide::<typenum::U64>(&mut group, CloneMethod::Push);
+  slice_wide::<typenum::U128>(&mut group, CloneMethod::Push);
+  slice_wide::<typenum::U4096>(&mut group, CloneMethod::Push);
 
   let lengths = [
     SHORT,
     Slice::<u8>::INLINE_CAPACITY,
     Slice::<u8>::INLINE_CAPACITY + 1,
     MEDIUM,
+    SliceN::<u8, 64>::INLINE_CAPACITY,
+    SliceN::<u8, 128>::INLINE_CAPACITY,
     SliceN::<u8, 256>::INLINE_CAPACITY,
     SliceN::<u8, LARGE_HANDLE>::INLINE_CAPACITY,
     LARGE_PAYLOAD,
@@ -312,6 +475,24 @@ fn clone_benches(c: &mut Criterion) {
   for len in unique_lengths(lengths) {
     bytes_advanced(&mut group, len);
   }
+  bytes_wide_advanced(&mut group, CloneMethod::Push);
+  group.finish();
+}
+
+fn empty_slice<S: InlineSize>() -> Slice<u8, S> {
+  Slice::<u8, S>::try_from_slice(&[]).unwrap()
+}
+
+fn clone_from_benches(c: &mut Criterion) {
+  let mut group = c.benchmark_group("clone_from");
+  // Compact handles serve as controls for the wider handles.
+  slice_wide::<typenum::U24>(&mut group, CloneMethod::From);
+  slice_wide::<typenum::U32>(&mut group, CloneMethod::From);
+  slice_wide::<typenum::U64>(&mut group, CloneMethod::From);
+  slice_wide::<typenum::U128>(&mut group, CloneMethod::From);
+  slice_wide::<typenum::U4096>(&mut group, CloneMethod::From);
+  bytes_wide_baselines(&mut group, CloneMethod::From);
+  bytes_wide_advanced(&mut group, CloneMethod::From);
   group.finish();
 }
 
@@ -440,5 +621,5 @@ fn range_benches(c: &mut Criterion) {
   group.finish();
 }
 
-criterion_group!(benches, clone_benches, range_benches);
+criterion_group!(benches, clone_benches, clone_from_benches, range_benches);
 criterion_main!(benches);

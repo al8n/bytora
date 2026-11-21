@@ -123,6 +123,142 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
 }
 
 #[test]
+fn clone_from_preserves_windows_across_storage_kinds() {
+  static DATA: &[u8] = b"static window";
+
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: crate::AssocInlineSize,
+  {
+    let mut inline = SliceN::<u8, BYTES>::try_from_slice(b"inline").unwrap();
+    inline.advance(1);
+    let mut borrowed = SliceN::<u8, BYTES>::try_from_static(DATA).unwrap();
+    borrowed.advance(2);
+
+    let mut destination = inline.clone();
+    destination.clone_from(&borrowed);
+    assert_eq!(destination.as_slice(), &DATA[2..]);
+    assert_eq!(destination.as_slice().as_ptr(), DATA[2..].as_ptr());
+    destination.advance(1);
+    assert_eq!(borrowed.as_slice(), &DATA[2..]);
+    destination.clone_from(&inline);
+    assert_eq!(destination.as_slice(), b"nline");
+    destination.advance(1);
+    assert_eq!(inline.as_slice(), b"nline");
+
+    let len = SliceN::<u8, BYTES>::INLINE_CAPACITY + 4;
+    let values = vec![7; len];
+    let base = values.as_ptr();
+    let mut shared = SliceN::<u8, BYTES>::try_from_vec(values).unwrap();
+    shared.advance(2);
+    let old_values = vec![9; len];
+    let mut destination = SliceN::<u8, BYTES>::try_from_vec(old_values).unwrap();
+    destination.clone_from(&shared);
+    assert_eq!(destination.len(), len - 2);
+    assert!(destination.as_slice().iter().all(|&value| value == 7));
+    assert_eq!(destination.as_slice().as_ptr(), base.wrapping_add(2));
+
+    let mut peer = shared.clone();
+    peer.advance(1);
+    destination.clone_from(&peer);
+    drop(shared);
+    drop(peer);
+    assert_eq!(destination.len(), len - 3);
+    assert!(destination.as_slice().iter().all(|&value| value == 7));
+    assert_eq!(destination.as_slice().as_ptr(), base.wrapping_add(3));
+
+    destination.clone_from(&borrowed);
+    assert_eq!(destination.as_slice(), &DATA[2..]);
+    assert_eq!(destination.as_slice().as_ptr(), DATA[2..].as_ptr());
+  }
+
+  let mut tiny = SliceN::<u8, 8>::try_from_slice(b"old").unwrap();
+  let tiny_source = SliceN::<u8, 8>::try_from_slice(b"new").unwrap();
+  tiny.clone_from(&tiny_source);
+  assert_eq!(tiny.as_slice(), b"new");
+
+  check::<24>();
+  check::<32>();
+  check::<64>();
+  check::<128>();
+  check::<4096>();
+}
+
+#[test]
+fn clone_from_retains_new_owner_and_releases_old_owner() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+  static OLD_LIVE: AtomicUsize = AtomicUsize::new(0);
+  static NEW_LIVE: AtomicUsize = AtomicUsize::new(0);
+  static STEP: AtomicUsize = AtomicUsize::new(0);
+  static RETAIN_STEP: AtomicUsize = AtomicUsize::new(0);
+  static RELEASE_STEP: AtomicUsize = AtomicUsize::new(0);
+  static OLD_OPS: StorageVtable = StorageVtable {
+    retain: Some(|owner| {
+      assert_eq!(owner, OLD_OPS.tagged_owner());
+      OLD_LIVE.fetch_add(1, Relaxed);
+    }),
+    release: Some(|owner| {
+      assert_eq!(owner, OLD_OPS.tagged_owner());
+      RELEASE_STEP.store(STEP.fetch_add(1, Relaxed), Relaxed);
+      assert!(OLD_LIVE.fetch_sub(1, Relaxed) > 0);
+    }),
+  };
+  static NEW_OPS: StorageVtable = StorageVtable {
+    retain: Some(|owner| {
+      assert_eq!(owner, NEW_OPS.tagged_owner());
+      RETAIN_STEP.store(STEP.fetch_add(1, Relaxed), Relaxed);
+      NEW_LIVE.fetch_add(1, Relaxed);
+    }),
+    release: Some(|owner| {
+      assert_eq!(owner, NEW_OPS.tagged_owner());
+      assert!(NEW_LIVE.fetch_sub(1, Relaxed) > 0);
+    }),
+  };
+  static DATA: &[u8] = b"abcdefgh";
+
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: crate::AssocInlineSize,
+  {
+    OLD_LIVE.store(1, Relaxed);
+    NEW_LIVE.store(1, Relaxed);
+    STEP.store(0, Relaxed);
+    let mut destination: SliceN<u8, BYTES> = Slice {
+      layout: Layout::try_external(DATA.as_ptr(), OLD_OPS.tagged_owner(), DATA.len()).unwrap(),
+    };
+    let mut source: SliceN<u8, BYTES> = Slice {
+      layout: Layout::try_external(DATA.as_ptr(), NEW_OPS.tagged_owner(), DATA.len()).unwrap(),
+    };
+    source.advance(2);
+    destination.clone_from(&source);
+    assert_eq!(OLD_LIVE.load(Relaxed), 0);
+    assert_eq!(NEW_LIVE.load(Relaxed), 2);
+    assert_eq!(RETAIN_STEP.load(Relaxed), 0);
+    assert_eq!(RELEASE_STEP.load(Relaxed), 1);
+    assert_eq!(destination.as_slice().as_ptr(), DATA[2..].as_ptr());
+
+    let mut peer = source.clone();
+    peer.advance(1);
+    destination.clone_from(&peer);
+    assert_eq!(NEW_LIVE.load(Relaxed), 3);
+    drop(source);
+    drop(peer);
+    assert_eq!(NEW_LIVE.load(Relaxed), 1);
+    assert_eq!(destination.as_slice(), &DATA[3..]);
+    assert_eq!(destination.as_slice().as_ptr(), DATA[3..].as_ptr());
+    drop(destination);
+    assert_eq!(NEW_LIVE.load(Relaxed), 0);
+  }
+
+  check::<24>();
+  check::<32>();
+  check::<64>();
+  check::<128>();
+  check::<4096>();
+}
+
+#[test]
 fn shared_storage_supports_overaligned_elements_and_zero_sized_windows() {
   #[repr(align(64))]
   #[derive(Clone, Copy, Debug)]
