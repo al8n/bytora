@@ -1,6 +1,19 @@
 use smol_slice::{Slice, SliceMut, SupportedBytes};
 
 #[test]
+fn supported_alignment_type_is_accessible_to_consumers() {
+  fn word_aligned<B: SupportedBytes<Align = usize>>() {}
+  word_aligned::<[(); 8]>();
+  word_aligned::<[(); 16]>();
+  #[cfg(target_pointer_width = "32")]
+  {
+    fn four_byte_aligned<B: SupportedBytes<Align = u32>>() {}
+    four_byte_aligned::<[(); 4]>();
+    word_aligned::<[(); 12]>();
+  }
+}
+
+#[test]
 fn handles_own_their_copied_elements() {
   let mut source = [2, 3, 5, 7];
   let mut read = Slice::<u32, 24>::try_from_slice(&source).unwrap();

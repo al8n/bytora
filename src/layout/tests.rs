@@ -23,8 +23,14 @@ fn external_lengths_round_trip_on_every_descriptor_tier() {
     assert!(make(max + 1).is_none());
     assert!(make(usize::MAX).is_none());
   }
-  check::<2>(false);
-  check::<4>(false);
+  #[cfg(target_pointer_width = "32")]
+  {
+    check::<4>(false);
+    check::<12>(true);
+    check::<20>(true);
+    check::<132>(true);
+    check::<2044>(true);
+  }
   check::<8>(false);
   check::<16>(size_of::<usize>() == 4);
   check::<24>(true);
@@ -67,7 +73,13 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     }
   }
   #[cfg(target_pointer_width = "32")]
-  check::<16>();
+  {
+    check::<12>();
+    check::<16>();
+    check::<20>();
+    check::<132>();
+    check::<2044>();
+  }
   check::<24>();
   check::<64>();
   check::<136>();

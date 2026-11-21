@@ -17,8 +17,9 @@ use sealed::Repr;
 
 /// A supported total byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
 ///
-/// Implemented for `[(); BYTES]` when `BYTES` is 2, 4, or a multiple of 8
-/// from 8 through 2048. Generic callers can use `where [(); BYTES]: SupportedBytes`.
+/// On 32- and 64-bit targets, implemented for `[(); BYTES]` when `BYTES` is a
+/// nonzero multiple of the target's word size, up to 2048 bytes. Generic callers
+/// can use `where [(); BYTES]: SupportedBytes`.
 pub trait SupportedBytes: Repr {}
 impl<const BYTES: usize> SupportedBytes for [(); BYTES] where [(); BYTES]: Repr {}
 
@@ -43,14 +44,24 @@ macro_rules! sizes {
     };
   )+};
 }
-sizes!(u16, 0; 2);
+#[cfg(target_pointer_width = "32")]
 sizes!(u32, 0; 4);
 sizes!(usize, 0; 8);
-sizes!(usize, 1; 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128);
+
+// Each larger 64-bit size also anchors the preceding 32-bit-only size in the
+// same cursor tier.
+macro_rules! word_sizes {
+  ($cursor:literal; $($bytes:expr),+ $(,)?) => {
+    sizes!(usize, $cursor; $($bytes),+);
+    #[cfg(target_pointer_width = "32")]
+    sizes!(usize, $cursor; $($bytes - 4),+);
+  };
+}
+word_sizes!(1; 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128);
 
 macro_rules! wide_sizes {
   ($($base:literal),+) => {$(
-    sizes!(usize, 3;
+    word_sizes!(3;
       $base + 8, $base + 16, $base + 24, $base + 32, $base + 40, $base + 48, $base + 56,
       $base + 64, $base + 72, $base + 80, $base + 88, $base + 96, $base + 104, $base + 112,
       $base + 120, $base + 128,

@@ -23,8 +23,14 @@ fn full_byte_windows_move_and_advance() {
     assert!(moved.is_empty());
     assert!(moved.as_slice().is_empty());
   }
-  check::<2>(1);
-  check::<4>(3);
+  #[cfg(target_pointer_width = "32")]
+  {
+    check::<4>(3);
+    check::<12>(10);
+    check::<20>(18);
+    check::<132>(128);
+    check::<2044>(2040);
+  }
   check::<8>(7);
   check::<16>(14);
   check::<24>(22);
@@ -43,20 +49,28 @@ fn full_byte_windows_move_and_advance() {
 
 #[test]
 fn tiny_cursors_represent_every_window() {
-  let source = *b"abcdefg";
-  for end in 0..=7 {
-    for start in 0..=end {
-      let mut values = SliceMut::<u8, 8>::try_from_slice(&source[..end]).unwrap();
-      values.advance(start);
-      assert_eq!(values.as_mut_slice(), &source[start..end]);
-      assert_eq!(values.len(), end - start);
+  fn check<const BYTES: usize>()
+  where
+    [(); BYTES]: SupportedBytes,
+  {
+    let source = *b"abcdefg";
+    for end in 0..=SliceMut::<u8, BYTES>::INLINE_CAPACITY {
+      for start in 0..=end {
+        let mut values = SliceMut::<u8, BYTES>::try_from_slice(&source[..end]).unwrap();
+        values.advance(start);
+        assert_eq!(values.as_mut_slice(), &source[start..end]);
+        assert_eq!(values.len(), end - start);
+      }
     }
   }
+  #[cfg(target_pointer_width = "32")]
+  check::<4>();
+  check::<8>();
 }
 
 #[test]
 fn u32_capacity_and_alignment_follow_the_byte_budget() {
-  assert_eq!(Slice::<u32, 2>::INLINE_CAPACITY, 0);
+  #[cfg(target_pointer_width = "32")]
   assert_eq!(Slice::<u32, 4>::INLINE_CAPACITY, 0);
   assert_eq!(Slice::<u32, 8>::INLINE_CAPACITY, 1);
   assert_eq!(Slice::<u32, 24>::INLINE_CAPACITY, 5);
@@ -79,12 +93,12 @@ fn over_aligned_elements_support_aligned_empty_windows() {
     _byte: u8,
   }
 
-  assert_eq!(size_of::<Option<SliceMut<Aligned, 2>>>(), 2);
+  assert_eq!(size_of::<Option<SliceMut<Aligned, 8>>>(), 8);
   assert_eq!(size_of::<Option<Slice<Aligned, 256>>>(), 256);
   assert_eq!(Slice::<Aligned, 256>::INLINE_CAPACITY, 0);
   let value = Aligned { _byte: 3 };
   assert!(Slice::<Aligned, 256>::try_from_slice(&[value]).is_none());
-  let mut empty = SliceMut::<Aligned, 2>::try_from_slice(&[]).unwrap();
+  let mut empty = SliceMut::<Aligned, 8>::try_from_slice(&[]).unwrap();
   empty.advance(0);
   assert!(empty.is_empty());
   assert!(empty.as_slice().as_ptr().is_aligned());
@@ -97,14 +111,14 @@ fn aligned_zero_sized_elements_use_the_payload_byte_count() {
   #[derive(Clone, Copy)]
   struct AlignedZst;
 
-  assert_eq!(Slice::<AlignedZst, 4>::INLINE_CAPACITY, 3);
-  assert!(Slice::<AlignedZst, 4>::try_from_slice(&[AlignedZst; 4]).is_none());
-  let mut zsts = SliceMut::<AlignedZst, 4>::try_from_slice(&[AlignedZst; 3]).unwrap();
+  assert_eq!(Slice::<AlignedZst, 8>::INLINE_CAPACITY, 7);
+  assert!(Slice::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 8]).is_none());
+  let mut zsts = SliceMut::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 7]).unwrap();
   assert!(zsts.as_slice().as_ptr().is_aligned());
   zsts.advance(2);
-  assert_eq!(zsts.as_mut_slice().len(), 1);
+  assert_eq!(zsts.as_mut_slice().len(), 5);
   assert!(zsts.as_mut_slice().as_mut_ptr().is_aligned());
-  zsts.advance(1);
+  zsts.advance(5);
   assert!(zsts.as_mut_slice().is_empty());
 }
 
