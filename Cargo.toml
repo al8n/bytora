@@ -1,23 +1,19 @@
 [package]
-name = "template-rs"
+name = "smol-slice"
 version = "0.0.0"
 edition = "2024"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
+repository = "https://github.com/al8n/smol-slice"
+homepage = "https://github.com/al8n/smol-slice"
+documentation = "https://docs.rs/smol-slice"
+description = "Compact slice handles with inline storage"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 readme = "README.md"
-keywords = ["template"]
+keywords = ["slice", "inline", "no-std"]
 categories = ["no-std", "no-std::no-alloc"]
 exclude = ["/.github/", "/ci/", "/.codecov.yml", "/deny.toml"]
 
-# The tiers. With no feature the crate is `no_std` and allocates nothing; `alloc` adds the heap
-# types and `std` the standard library, and the two are independent: `std` does not imply `alloc`.
-# All four combinations are valid builds, and `ci.yml` builds and tests each of them. A feature
-# for an optional dependency turns that dependency on and nothing else (`x = ["dep:x"]`), and each
-# tier forwards to it weakly (`std = ["x?/std"]`, `alloc = ["x?/alloc"]`).
+# The inline handles use only core with every feature combination.
 [features]
 default = ["std"]
 std = []
