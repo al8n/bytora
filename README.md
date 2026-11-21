@@ -2,6 +2,7 @@
 
 `Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
 inline. An immutable `Slice` can also borrow static data or share a vector's allocation.
+With a zero byte budget, `SliceMut` can take exclusive ownership of a vector.
 For a positive typenum integer `S`, the handle occupies exactly `S` bytes,
 including its cursor. `U0` disables inline elements and uses three machine words.
 Wrapping either handle in `Option` uses the same number
@@ -209,6 +210,36 @@ peer.as_slice()[0].fetch_add(1, Relaxed);
 assert_eq!(counters.as_slice()[0].load(Relaxed), 1);
 # }
 ```
+
+## Exclusive vector storage
+
+`SliceMut<T, U0>` and `SliceMutN<T, 0>` have zero inline capacity. Their
+`empty()` constructor works with only `core`. With `alloc` or `std`,
+`From<Vec<T>>` accepts any element type, including thread-local types and
+atomics. A nonempty vector keeps its buffer and gets one boxed owner. An empty
+vector yields the allocation-free empty handle. This storage works on targets
+without pointer-width atomics.
+
+`as_mut_slice()` borrows the current window exclusively. `advance` skips a
+prefix in constant time. Dropping the handle drops the entire vector,
+including its skipped elements.
+
+```rust
+# #[cfg(any(feature = "std", feature = "alloc"))]
+# {
+use smol_slice::SliceMutN;
+
+let mut words = SliceMutN::<String, 0>::from(vec!["one".into(), "two".into()]);
+words.advance(1);
+words.as_mut_slice()[0].push('!');
+assert_eq!(words.as_slice(), &["two!"]);
+# }
+```
+
+For a concrete budget, a `SliceMut` containing references can be moved into a
+type with shorter reference lifetimes. When the budget is still a generic
+`S: InlineSize`, Rust can shorten the lifetime of a borrowed view returned by
+`as_slice()`, but cannot prove the same conversion for the whole mutable handle.
 
 Licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
 

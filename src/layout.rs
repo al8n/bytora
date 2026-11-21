@@ -8,6 +8,7 @@ use core::{
 };
 use typenum::Unsigned;
 
+pub(super) mod mutable;
 mod shared;
 
 /// The byte arrays used by the inline cursor and raw element storage.
@@ -37,8 +38,10 @@ unsafe trait Repr {
 pub trait InlineSize: Unsigned + Debug + Repr {
   /// The size in bytes of the handle and its `Option`.
   const HANDLE_BYTES: usize = handle_bytes(Self::USIZE);
+
+  #[doc(hidden)]
+  type Mutable<T>: mutable::Storage<T>;
 }
-impl<S: Unsigned + Debug + Repr> InlineSize for S {}
 
 const fn handle_bytes(budget: usize) -> usize {
   if budget == 0 {
@@ -61,6 +64,9 @@ pub trait AssocInlineSize {
 // concrete arrays generated for the target and verify every supported size.
 macro_rules! size {
   ($bytes:literal, $size:ty, $cursor:literal) => {
+    size!($bytes, $size, $cursor, Layout<T, $size>);
+  };
+  ($bytes:literal, $size:ty, $cursor:literal, $mutable:ty) => {
     // SAFETY: Both fields are byte arrays. verify_size checks their lengths
     // against the cursor encoding and the typenum value for every mapping.
     unsafe impl Repr for $size {
@@ -68,13 +74,16 @@ macro_rules! size {
       type Cursor = [u8; $cursor];
       const ZERO_CURSOR: Self::Cursor = [0; $cursor];
     }
+    impl InlineSize for $size {
+      type Mutable<T> = $mutable;
+    }
     impl AssocInlineSize for [u8; $bytes] {
       type Size = $size;
     }
     const _: () = verify_size::<<[u8; $bytes] as AssocInlineSize>::Size>($bytes);
   };
 }
-size!(0, typenum::U0, 1);
+size!(0, typenum::U0, 1, mutable::ZeroStorage<T>);
 include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
 
 #[allow(
@@ -118,6 +127,9 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   assert!(size_of::<Option<Slice<u8, S>>>() == bytes);
   assert!(size_of::<SliceMut<u8, S>>() == bytes);
   assert!(size_of::<Option<SliceMut<u8, S>>>() == bytes);
+  if budget > 0 {
+    assert!(!core::mem::needs_drop::<SliceMut<u8, S>>());
+  }
 }
 
 const TINY_INLINE: u8 = 0x40;
@@ -141,7 +153,7 @@ struct ExternalPrefix {
 }
 
 #[repr(C)]
-pub(super) struct Layout<T, S: InlineSize> {
+pub struct Layout<T, S: InlineSize> {
   // This zero-sized field aligns the start of the payload. Both byte arrays
   // have alignment one and no padding. Moving MaybeUninit preserves pointer
   // provenance and any uninitialized bytes in a stored T's padding.
