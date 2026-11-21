@@ -6,7 +6,7 @@ fn external_lengths_round_trip_on_every_descriptor_tier() {
   where
     [(); BYTES]: SupportedBytes,
   {
-    let make = |len| Layout::<u8, BYTES>::try_external(ptr::null(), ptr::null(), len);
+    let make = |len| Layout::<u8, Size<BYTES>>::try_external(ptr::null(), ptr::null(), len);
     if !fits {
       assert!(make(0).is_none());
       assert!(make(1).is_none());
@@ -53,7 +53,7 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     let mut bytes = core::array::from_fn(|i| i as u8 + 1);
     bytes[LEN_LOW_BYTES + 1] = 0x65;
     let len = usize::from_le_bytes(bytes);
-    let repr = Layout::<u16, BYTES>::try_external(data, owner_ptr.cast(), len).unwrap();
+    let repr = Layout::<u16, Size<BYTES>>::try_external(data, owner_ptr.cast(), len).unwrap();
     let moved = core::hint::black_box(Some(repr)).unwrap();
     assert_eq!(moved.len(), len);
     assert_eq!(moved.cursor.as_ref()[0], bytes[LEN_LOW_BYTES]);
@@ -89,6 +89,6 @@ fn moved_external_prefix_preserves_pointer_provenance() {
 #[test]
 #[should_panic(expected = "expected inline storage")]
 fn external_descriptors_cannot_be_borrowed_as_inline_elements() {
-  let repr = Layout::<u8, 24>::try_external(ptr::null(), ptr::null(), 1).unwrap();
+  let repr = Layout::<u8, Size<24>>::try_external(ptr::null(), ptr::null(), 1).unwrap();
   let _ = repr.as_slice();
 }

@@ -51,14 +51,31 @@ assert_eq!(Slice::<UserId, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
 The layout is available for non-`Copy` types too; `try_from_slice` needs
 `T: Copy` to copy elements from the borrowed slice.
 
-Generic functions can express the size constraint with `SupportedBytes`.
+Generic functions can use `InlineSize` to accept a size witness:
 
 ```rust
-use smol_slice::{Slice, SupportedBytes};
+use smol_slice::{InlineSize, Size, Slice, SliceOf};
+
+fn copy_inline<S: InlineSize>(values: &[u8]) -> Option<SliceOf<u8, S>> {
+    SliceOf::try_from_slice(values)
+}
+
+let read: Slice<u8, 24> = copy_inline::<Size<24>>(b"small").unwrap();
+assert_eq!(read.as_slice(), b"small");
+```
+
+`InlineSize::BYTES` is the total handle budget including metadata, independent
+of the element type. `INLINE_CAPACITY` counts the elements that fit for a
+particular element type.
+
+Const-generic functions can express the same constraint with `Size<BYTES>`:
+
+```rust
+use smol_slice::{InlineSize, Size, Slice};
 
 fn copy_inline<T: Copy, const BYTES: usize>(values: &[T]) -> Option<Slice<T, BYTES>>
 where
-    [(); BYTES]: SupportedBytes,
+    Size<BYTES>: InlineSize,
 {
     Slice::try_from_slice(values)
 }
@@ -66,7 +83,15 @@ where
 assert_eq!(copy_inline::<_, 8>(b"small").unwrap().as_slice(), b"small");
 ```
 
-An unsupported size is a compile-time error.
+The existing `SupportedBytes` marker and `[(); BYTES]` witness remain available.
+
+An unsupported size or witness is a compile-time error.
+
+```compile_fail
+use smol_slice::{InlineSize, Size};
+fn supported<S: InlineSize>() {}
+supported::<Size<0>>();
+```
 
 ```compile_fail
 use core::mem::size_of;
@@ -84,6 +109,16 @@ let _ = Slice::<u8, { 2 * size_of::<usize>() + size_of::<usize>() / 2 }>::try_fr
 use core::mem::size_of;
 use smol_slice::SliceMut;
 let _ = SliceMut::<u8, { 8192 + size_of::<usize>() }>::try_from_slice(&[]);
+```
+
+The size trait is sealed and cannot be implemented by downstream crates.
+
+```compile_fail
+use smol_slice::{InlineSize, SupportedBytes};
+trait Local: SupportedBytes<Align = usize, Payload = (), Cursor = [u8; 0]> {}
+impl InlineSize for dyn Local {
+    const BYTES: usize = 333;
+}
 ```
 
 All public constructors store elements inline. Handles of at least three

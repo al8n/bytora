@@ -1,4 +1,47 @@
-use smol_slice::{MAX_HANDLE_BYTES, Slice, SliceMut, SupportedBytes};
+use smol_slice::{
+  InlineSize, MAX_HANDLE_BYTES, Size, Slice, SliceMut, SliceMutOf, SliceOf, SupportedBytes,
+};
+
+#[test]
+fn generic_size_witnesses_work_with_both_handles() {
+  fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceOf<T, S>> {
+    assert_eq!(size_of::<SliceOf<T, S>>(), S::BYTES);
+    SliceOf::try_from_slice(values)
+  }
+
+  fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceMutOf<T, S>> {
+    assert_eq!(size_of::<SliceMutOf<T, S>>(), S::BYTES);
+    SliceMutOf::try_from_slice(values)
+  }
+
+  fn read_with_const<const BYTES: usize>(values: &[u8]) -> Option<Slice<u8, BYTES>>
+  where
+    Size<BYTES>: InlineSize,
+  {
+    read::<u8, Size<BYTES>>(values)
+  }
+
+  let mut read: Slice<u8, 24> = read::<u8, Size<24>>(b"abc").unwrap();
+  read.advance(1);
+  let read: SliceOf<u8, Size<24>> = read;
+  assert_eq!(read.as_slice(), b"bc");
+
+  let mut write: SliceMutOf<u8, Size<24>> = write::<u8, Size<24>>(b"abc").unwrap();
+  write.advance(1);
+  write.as_mut_slice().make_ascii_uppercase();
+  let write: SliceMut<u8, 24> = write;
+  assert_eq!(write.as_slice(), b"BC");
+  assert_eq!(read_with_const::<24>(b"size").unwrap().as_slice(), b"size");
+
+  let numeric: Slice<u8> =
+    SliceOf::<u8, Size<{ 3 * size_of::<usize>() }>>::try_from_slice(b"a").unwrap();
+  let generic: SliceOf<u8, Size<{ 3 * size_of::<usize>() }>> = numeric;
+  let numeric_mut: SliceMut<u8> =
+    SliceMutOf::<u8, Size<{ 3 * size_of::<usize>() }>>::try_from_slice(b"a").unwrap();
+  let generic_mut: SliceMutOf<u8, Size<{ 3 * size_of::<usize>() }>> = numeric_mut;
+  assert_eq!(generic.as_slice(), b"a");
+  assert_eq!(generic_mut.as_slice(), b"a");
+}
 
 #[test]
 fn supported_alignment_type_is_accessible_to_consumers() {
@@ -15,6 +58,23 @@ fn supported_alignment_type_is_accessible_to_consumers() {
     word_aligned::<[(); 12]>();
   }
   assert_eq!(MAX_HANDLE_BYTES, 8192);
+}
+
+#[test]
+fn supported_bytes_remains_an_object_safe_marker() {
+  let witness: Size<24> = [(); 24];
+  let _: &dyn SupportedBytes<Align = usize, Payload = [u8; 22], Cursor = [u8; 1]> = &witness;
+
+  trait Bytes {
+    const BYTES: usize;
+  }
+  impl Bytes for Size<24> {
+    const BYTES: usize = 7;
+  }
+  fn legacy_bytes<S: SupportedBytes + Bytes>() -> usize {
+    S::BYTES
+  }
+  assert_eq!(legacy_bytes::<Size<24>>(), 7);
 }
 
 #[test]
