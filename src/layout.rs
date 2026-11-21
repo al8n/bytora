@@ -18,59 +18,66 @@ use sealed::Repr;
 /// A supported total byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
 ///
 /// On 32- and 64-bit targets, implemented for `[(); BYTES]` when `BYTES` is a
-/// nonzero multiple of the target's word size, up to 2048 bytes. Generic callers
+/// nonzero multiple of the target's word size, up to 8192 bytes. Generic callers
 /// can use `where [(); BYTES]: SupportedBytes`.
 pub trait SupportedBytes: Repr {}
 impl<const BYTES: usize> SupportedBytes for [(); BYTES] where [(); BYTES]: Repr {}
 
 // Stable Rust cannot subtract metadata from a generic array length. Select the
-// concrete arrays here and verify the whole public handle for every supported size.
-macro_rules! sizes {
-  ($align:ty, $cursor:literal; $($bytes:expr),+ $(,)?) => {$(
+// concrete arrays generated for the target and verify every supported size.
+macro_rules! size {
+  ($bytes:literal, $cursor:literal, $align:ty) => {
     impl Repr for [(); $bytes] {
       type Align = $align;
       type Payload = [u8; $bytes - $cursor - 1];
       type Cursor = [u8; $cursor];
     }
-    const _: () = {
-      use crate::{Slice, SliceMut};
-      assert!(core::mem::offset_of!(Layout<u8, { $bytes }>, payload) == 0);
-      assert!(core::mem::offset_of!(Layout<u8, { $bytes }>, tag) == $bytes - 1);
-      assert!(align_of::<Slice<u8, { $bytes }>>() == align_of::<$align>());
-      assert!(size_of::<Slice<u8, { $bytes }>>() == $bytes);
-      assert!(size_of::<Option<Slice<u8, { $bytes }>>>() == $bytes);
-      assert!(size_of::<SliceMut<u8, { $bytes }>>() == $bytes);
-      assert!(size_of::<Option<SliceMut<u8, { $bytes }>>>() == $bytes);
-    };
-  )+};
-}
-#[cfg(target_pointer_width = "32")]
-sizes!(u32, 0; 4);
-sizes!(usize, 0; 8);
-
-// Each larger 64-bit size also anchors the preceding 32-bit-only size in the
-// same cursor tier.
-macro_rules! word_sizes {
-  ($cursor:literal; $($bytes:expr),+ $(,)?) => {
-    sizes!(usize, $cursor; $($bytes),+);
-    #[cfg(target_pointer_width = "32")]
-    sizes!(usize, $cursor; $($bytes - 4),+);
+    const _: () = verify_size::<$bytes>();
   };
 }
-word_sizes!(1; 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128);
+include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
 
-macro_rules! wide_sizes {
-  ($($base:literal),+) => {$(
-    word_sizes!(3;
-      $base + 8, $base + 16, $base + 24, $base + 32, $base + 40, $base + 48, $base + 56,
-      $base + 64, $base + 72, $base + 80, $base + 88, $base + 96, $base + 104, $base + 112,
-      $base + 120, $base + 128,
-    );
-  )+};
+#[allow(
+  dead_code,
+  reason = "Rust 1.85 does not count calls from anonymous constants as use"
+)]
+const fn verify_size<const BYTES: usize>()
+where
+  [(); BYTES]: SupportedBytes,
+{
+  use crate::{Slice, SliceMut};
+
+  let payload = size_of::<<[(); BYTES] as Repr>::Payload>();
+  let cursor = size_of::<<[(); BYTES] as Repr>::Cursor>();
+  let expected_cursor = if BYTES <= 8 {
+    0
+  } else if BYTES <= 128 {
+    1
+  } else {
+    3
+  };
+  let cursor_limit = match cursor {
+    0 => 7,
+    1 => 126,
+    3 => 32511,
+    _ => 0,
+  };
+  assert!(BYTES > 0 && BYTES % size_of::<usize>() == 0 && BYTES <= MAX_HANDLE_BYTES);
+  assert!(cursor == expected_cursor);
+  assert!(payload + cursor + 1 == BYTES);
+  assert!(payload <= cursor_limit);
+  assert!(Layout::<u8, BYTES>::INLINE_CAPACITY == payload);
+  assert!(core::mem::offset_of!(Layout<u8, BYTES>, payload) == 0);
+  assert!(core::mem::offset_of!(Layout<u8, BYTES>, cursor) == payload);
+  assert!(core::mem::offset_of!(Layout<u8, BYTES>, tag) == BYTES - 1);
+  assert!(align_of::<<[(); BYTES] as Repr>::Align>() == align_of::<usize>());
+  assert!(align_of::<Slice<u8, BYTES>>() == align_of::<<[(); BYTES] as Repr>::Align>());
+  assert!(align_of::<SliceMut<u8, BYTES>>() == align_of::<Slice<u8, BYTES>>());
+  assert!(size_of::<Slice<u8, BYTES>>() == BYTES);
+  assert!(size_of::<Option<Slice<u8, BYTES>>>() == BYTES);
+  assert!(size_of::<SliceMut<u8, BYTES>>() == BYTES);
+  assert!(size_of::<Option<SliceMut<u8, BYTES>>>() == BYTES);
 }
-wide_sizes!(
-  128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920
-);
 
 const TINY_INLINE: u8 = 0x40;
 const EXTERNAL: u8 = 0x80;

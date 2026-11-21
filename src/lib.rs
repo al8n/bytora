@@ -13,7 +13,7 @@ extern crate std;
 
 mod layout;
 use layout::Layout;
-pub use layout::SupportedBytes;
+pub use layout::{MAX_HANDLE_BYTES, SupportedBytes};
 
 /// An owned slice with inline storage for `Copy` elements.
 ///
