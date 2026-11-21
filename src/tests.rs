@@ -2,6 +2,11 @@ use super::{AssocInlineSize, MAX_HANDLE_BYTES, SliceMutN, SliceN};
 use core::{hint::black_box, ptr};
 
 #[test]
+fn mutable_inline_handles_need_no_drop_glue() {
+  assert!(!core::mem::needs_drop::<SliceMutN<u8, 24>>());
+}
+
+#[test]
 fn full_byte_windows_move_and_advance() {
   fn check<const BYTES: usize>(capacity: usize)
   where
@@ -50,6 +55,34 @@ fn full_byte_windows_move_and_advance() {
   check::<4096>(4092);
   check::<4104>(4100);
   check::<MAX_HANDLE_BYTES>(8188);
+}
+
+#[test]
+fn inline_clones_preserve_the_window_and_advance_independently() {
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: AssocInlineSize,
+  {
+    let input = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
+    let end = SliceN::<u8, BYTES>::INLINE_CAPACITY;
+    let mut original = SliceN::<u8, BYTES>::try_from_slice(&input[..end]).unwrap();
+    let start = end / 2;
+    original.advance(start);
+    let mut cloned = black_box(original.clone());
+    assert_eq!(cloned.as_slice(), &input[start..end]);
+    assert_eq!(
+      cloned.as_slice().as_ptr(),
+      ptr::from_ref(&cloned).cast::<u8>().wrapping_add(start)
+    );
+    cloned.advance(1);
+    assert_eq!(original.as_slice(), &input[start..end]);
+    original.advance(end - start);
+    assert!(original.clone().is_empty());
+    assert_eq!(cloned.as_slice(), &input[start + 1..end]);
+  }
+  check::<8>();
+  check::<24>();
+  check::<4104>();
 }
 
 #[test]
@@ -204,4 +237,12 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
   let again = black_box(moved);
   assert!(ptr::eq(again.as_slice()[0].number, &numbers[0]));
   assert_eq!(*again.as_slice()[0].number, 13);
+
+  let mut original = SliceN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
+  original.advance(1);
+  let cloned = black_box(original.clone());
+  original.advance(1);
+  assert_eq!(cloned.as_slice()[0].byte, 5);
+  assert!(ptr::eq(cloned.as_slice()[0].number, &numbers[1]));
+  assert_eq!(*cloned.as_slice()[0].number, 17);
 }

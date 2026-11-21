@@ -1,7 +1,8 @@
 # smol-slice
 
 `Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
-inline. The typenum integer `S` gives the exact size in bytes of the handle,
+inline. An immutable `Slice` can also share a vector's allocation.
+The typenum integer `S` gives the exact size in bytes of the handle,
 including its cursor. Wrapping either handle in `Option` uses the same number
 of bytes. `Slice<T>` and `SliceMut<T>` default to the three-word size of a
 `Vec<T>`, or 12 bytes on 32-bit targets and 24 bytes on 64-bit targets.
@@ -19,8 +20,8 @@ assert_eq!(bytes.as_slice(), b"VALUE");
 
 On 32-bit targets, supported sizes are multiples of 4 from 4 through 8192 bytes.
 On 64-bit targets, supported sizes are multiples of 8 from 8 through 8192 bytes.
-Advancing changes the cursor in constant time. The elements stay in place until
-the handle moves. Both handles use only `core`.
+Advancing changes the cursor in constant time. Moving an inline handle moves
+its elements. The inline constructors and operations are available with only `core`.
 
 | Handle size | Cursor bytes | Inline capacity for `u8` |
 | --- | --- | --- |
@@ -30,10 +31,10 @@ the handle moves. Both handles use only `core`.
 
 For example, `SliceN<u8, 24>` holds 22 bytes and `SliceN<u32, 24>` holds five
 elements. `INLINE_CAPACITY` gives the limit for a particular type and budget.
-Construction returns `None` if the input exceeds it. All handles have word
-alignment. A nonzero-sized element that needs greater alignment supports only
-the empty slice. Each zero-sized element counts as one payload byte, including
-when it has greater alignment than the handle.
+`try_from_slice` returns `None` if the input exceeds it. All handles have word
+alignment. A nonzero-sized element that needs greater alignment has zero
+inline capacity. Each zero-sized element counts as one inline payload byte,
+including when it has greater alignment than the handle.
 The same size and alignment rules apply to downstream types, including
 `#[repr(transparent)]` wrappers.
 
@@ -119,9 +120,34 @@ struct CustomSize;
 impl InlineSize for CustomSize {}
 ```
 
-All public constructors store elements inline. Handles of at least three
-machine words also have room for a private external descriptor with two
-pointers and a length.
+## Cloning and shared storage
+
+Cloning an inline `Slice` copies the entire handle, including its cursor. With
+the `std` or `alloc` feature on targets with pointer-width atomics,
+`Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. It
+copies short inputs inline. For larger inputs it retains the vector's buffer
+and allocates a shared owner. Each clone increments the owner's atomic
+reference count and keeps its own cursor. Dropping the last handle frees the
+owner and the vector.
+
+Shared storage requires a handle of at least three machine words and a length
+of at most `isize::MAX` elements. If the elements need shared storage and the
+handle or length cannot accommodate them, the constructor returns the original
+vector in `Err`.
+The default `Slice<u8>` on a 64-bit target keeps up to 22 bytes inline.
+
+```rust
+# #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+# {
+use smol_slice::Slice;
+
+let whole = Slice::<u8>::try_from_vec((0..32).collect()).unwrap();
+let mut tail = whole.clone();
+tail.advance(30);
+assert_eq!(tail.as_slice(), &[30, 31]);
+assert_eq!(whole.len(), 32);
+# }
+```
 
 Licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
 
