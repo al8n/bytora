@@ -3,7 +3,8 @@
 `Slice<T, BYTES>` and `SliceMut<T, BYTES>` own small sequences of `Copy`
 elements inline. `BYTES` is the exact size of the handle, including its cursor.
 Wrapping either handle in `Option` uses the same number of bytes. The default
-is four machine words, or 16 bytes on 32-bit targets and 32 bytes on 64-bit targets.
+matches the three-word size of a `Vec<T>`, or 12 bytes on 32-bit targets and
+24 bytes on 64-bit targets.
 
 ```rust
 use smol_slice::SliceMut;
