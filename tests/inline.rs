@@ -1,80 +1,65 @@
 use smol_slice::{
-  InlineSize, MAX_HANDLE_BYTES, Size, Slice, SliceMut, SliceMutOf, SliceOf, SupportedBytes,
+  AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Slice, SliceMut, SliceMutN, SliceN,
+  typenum::{Sum, U8, U24, U4096, Unsigned},
 };
 
 #[test]
-fn generic_size_witnesses_work_with_both_handles() {
-  fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceOf<T, S>> {
-    assert_eq!(size_of::<SliceOf<T, S>>(), S::BYTES);
-    SliceOf::try_from_slice(values)
+fn generic_sizes_work_with_both_handles() {
+  fn size<S: Unsigned + core::fmt::Debug>() -> usize {
+    S::USIZE
+  }
+  fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
+    assert_eq!(size_of::<Slice<T, S>>(), size::<S>());
+    Slice::try_from_slice(values)
+  }
+  fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceMut<T, S>> {
+    assert_eq!(size_of::<SliceMut<T, S>>(), S::USIZE);
+    SliceMut::try_from_slice(values)
   }
 
-  fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceMutOf<T, S>> {
-    assert_eq!(size_of::<SliceMutOf<T, S>>(), S::BYTES);
-    SliceMutOf::try_from_slice(values)
-  }
-
-  fn read_with_const<const BYTES: usize>(values: &[u8]) -> Option<Slice<u8, BYTES>>
-  where
-    Size<BYTES>: InlineSize,
-  {
-    read::<u8, Size<BYTES>>(values)
-  }
-
-  let mut read: Slice<u8, 24> = read::<u8, Size<24>>(b"abc").unwrap();
+  let mut read: SliceN<u8, 24> = read::<_, U24>(b"abc").unwrap();
   read.advance(1);
-  let read: SliceOf<u8, Size<24>> = read;
+  let read: Slice<u8, U24> = read;
   assert_eq!(read.as_slice(), b"bc");
 
-  let mut write: SliceMutOf<u8, Size<24>> = write::<u8, Size<24>>(b"abc").unwrap();
+  let mut write: SliceMutN<u8, 24> = write::<_, U24>(b"abc").unwrap();
   write.advance(1);
   write.as_mut_slice().make_ascii_uppercase();
-  let write: SliceMut<u8, 24> = write;
+  let write: SliceMut<u8, U24> = write;
   assert_eq!(write.as_slice(), b"BC");
-  assert_eq!(read_with_const::<24>(b"size").unwrap().as_slice(), b"size");
-
-  let numeric: Slice<u8> =
-    SliceOf::<u8, Size<{ 3 * size_of::<usize>() }>>::try_from_slice(b"a").unwrap();
-  let generic: SliceOf<u8, Size<{ 3 * size_of::<usize>() }>> = numeric;
-  let numeric_mut: SliceMut<u8> =
-    SliceMutOf::<u8, Size<{ 3 * size_of::<usize>() }>>::try_from_slice(b"a").unwrap();
-  let generic_mut: SliceMutOf<u8, Size<{ 3 * size_of::<usize>() }>> = numeric_mut;
-  assert_eq!(generic.as_slice(), b"a");
-  assert_eq!(generic_mut.as_slice(), b"a");
 }
 
 #[test]
-fn supported_alignment_type_is_accessible_to_consumers() {
-  fn word_aligned<B: SupportedBytes<Align = usize>>() {}
-  word_aligned::<[(); 8]>();
-  word_aligned::<[(); 16]>();
-  word_aligned::<[(); 2056]>();
-  word_aligned::<[(); 4104]>();
-  word_aligned::<[(); MAX_HANDLE_BYTES]>();
-  #[cfg(target_pointer_width = "32")]
+fn const_sizes_match_typenum_arithmetic_across_the_full_range() {
+  fn read<const N: usize>(values: &[u8]) -> Option<SliceN<u8, N>>
+  where
+    [u8; N]: AssocInlineSize,
   {
-    fn four_byte_aligned<B: SupportedBytes<Align = u32>>() {}
-    four_byte_aligned::<[(); 4]>();
-    word_aligned::<[(); 12]>();
+    Slice::try_from_slice(values)
   }
-  assert_eq!(MAX_HANDLE_BYTES, 8192);
+
+  // Typenum computes this size but does not name it or map it from a const.
+  type Budget = Sum<U4096, U8>;
+  let typed: Slice<u8, Budget> = read::<4104>(b"size").unwrap();
+  let numeric: SliceN<u8, 4104> = typed;
+  assert_eq!(numeric.as_slice(), b"size");
+  let typed: SliceMut<u8, Budget> = SliceMutN::<u8, 4104>::try_from_slice(b"size").unwrap();
+  let mut numeric: SliceMutN<u8, 4104> = typed;
+  numeric.as_mut_slice()[0] = b'S';
+  assert_eq!(numeric.as_slice(), b"Size");
+  assert_eq!(size_of::<Option<Slice<u8, Budget>>>(), 4104);
+  assert_eq!(size_of::<Option<SliceMut<u8, Budget>>>(), 4104);
 }
 
 #[test]
-fn supported_bytes_remains_an_object_safe_marker() {
-  let witness: Size<24> = [(); 24];
-  let _: &dyn SupportedBytes<Align = usize, Payload = [u8; 22], Cursor = [u8; 1]> = &witness;
-
-  trait Bytes {
-    const BYTES: usize;
-  }
-  impl Bytes for Size<24> {
-    const BYTES: usize = 7;
-  }
-  fn legacy_bytes<S: SupportedBytes + Bytes>() -> usize {
-    S::BYTES
-  }
-  assert_eq!(legacy_bytes::<Size<24>>(), 7);
+fn default_handles_have_the_three_word_size_type() {
+  const THREE_WORDS: usize = 3 * size_of::<usize>();
+  let read: Slice<u8> = SliceN::<u8, THREE_WORDS>::try_from_slice(b"a").unwrap();
+  let write: SliceMut<u8> = SliceMutN::<u8, THREE_WORDS>::try_from_slice(b"a").unwrap();
+  let read: SliceN<u8, THREE_WORDS> = read;
+  let write: SliceMutN<u8, THREE_WORDS> = write;
+  assert_eq!(read.as_slice(), b"a");
+  assert_eq!(write.as_slice(), b"a");
 }
 
 #[test]
@@ -87,22 +72,25 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
   struct NonCopy(u16);
 
   fn check_layout<T>() {
-    assert_eq!(size_of::<Slice<T, MAX_HANDLE_BYTES>>(), MAX_HANDLE_BYTES);
+    assert_eq!(size_of::<SliceN<T, MAX_HANDLE_BYTES>>(), MAX_HANDLE_BYTES);
     assert_eq!(
-      size_of::<Option<Slice<T, MAX_HANDLE_BYTES>>>(),
-      MAX_HANDLE_BYTES
-    );
-    assert_eq!(size_of::<SliceMut<T, MAX_HANDLE_BYTES>>(), MAX_HANDLE_BYTES);
-    assert_eq!(
-      size_of::<Option<SliceMut<T, MAX_HANDLE_BYTES>>>(),
+      size_of::<Option<SliceN<T, MAX_HANDLE_BYTES>>>(),
       MAX_HANDLE_BYTES
     );
     assert_eq!(
-      align_of::<Slice<T, MAX_HANDLE_BYTES>>(),
+      size_of::<SliceMutN<T, MAX_HANDLE_BYTES>>(),
+      MAX_HANDLE_BYTES
+    );
+    assert_eq!(
+      size_of::<Option<SliceMutN<T, MAX_HANDLE_BYTES>>>(),
+      MAX_HANDLE_BYTES
+    );
+    assert_eq!(
+      align_of::<SliceN<T, MAX_HANDLE_BYTES>>(),
       align_of::<usize>()
     );
     assert_eq!(
-      align_of::<SliceMut<T, MAX_HANDLE_BYTES>>(),
+      align_of::<SliceMutN<T, MAX_HANDLE_BYTES>>(),
       align_of::<usize>()
     );
   }
@@ -111,18 +99,24 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
   check_layout::<Wrapped>();
   check_layout::<NonCopy>();
   assert_eq!(NonCopy(7).0, 7);
-  assert_eq!(Slice::<u16, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
-  assert_eq!(Slice::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
-  assert_eq!(SliceMut::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
-  assert_eq!(Slice::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
-  assert_eq!(SliceMut::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(SliceN::<u16, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(SliceN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(
+    SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
+    4094
+  );
+  assert_eq!(SliceN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(
+    SliceMutN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
+    4094
+  );
 
   let source = core::array::from_fn::<_, 4095, _>(|i| Wrapped(i as u16));
   let snapshot = source;
-  assert!(Slice::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  assert!(SliceMut::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  let mut read = Slice::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
-  let mut write = SliceMut::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
+  assert!(SliceN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert!(SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  let mut read = SliceN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
+  let mut write = SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
   read.advance(1);
   write.advance(1024);
   let read = core::hint::black_box(Some(read)).unwrap();
@@ -138,8 +132,8 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
 #[test]
 fn handles_own_their_copied_elements() {
   let mut source = [2, 3, 5, 7];
-  let mut read = Slice::<u32, 24>::try_from_slice(&source).unwrap();
-  let mut write = SliceMut::<u32, 24>::try_from_slice(&source).unwrap();
+  let mut read = SliceN::<u32, 24>::try_from_slice(&source).unwrap();
+  let mut write = SliceMutN::<u32, 24>::try_from_slice(&source).unwrap();
   source.fill(0);
   read.advance(2);
   write.advance(1);
@@ -152,9 +146,9 @@ fn handles_own_their_copied_elements() {
 fn failed_advances_leave_the_window_intact() {
   fn check<const BYTES: usize>(source: &[u8], start: usize)
   where
-    [(); BYTES]: SupportedBytes,
+    [u8; BYTES]: AssocInlineSize,
   {
-    let mut values = SliceMut::<u8, BYTES>::try_from_slice(source).unwrap();
+    let mut values = SliceMutN::<u8, BYTES>::try_from_slice(source).unwrap();
     values.advance(start);
     for count in [values.len() + 1, usize::MAX] {
       assert!(

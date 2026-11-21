@@ -1,12 +1,12 @@
 use super::*;
+#[cfg(target_pointer_width = "32")]
+use typenum::{Diff, U4, U12, U20, U132};
+use typenum::{U8, U16, U24, U32, U64, U128, U136, U2048};
 
 #[test]
 fn external_lengths_round_trip_on_every_descriptor_tier() {
-  fn check<const BYTES: usize>(fits: bool)
-  where
-    [(); BYTES]: SupportedBytes,
-  {
-    let make = |len| Layout::<u8, Size<BYTES>>::try_external(ptr::null(), ptr::null(), len);
+  fn check<S: InlineSize>(fits: bool) {
+    let make = |len| Layout::<u8, S>::try_external(ptr::null(), ptr::null(), len);
     if !fits {
       assert!(make(0).is_none());
       assert!(make(1).is_none());
@@ -25,27 +25,24 @@ fn external_lengths_round_trip_on_every_descriptor_tier() {
   }
   #[cfg(target_pointer_width = "32")]
   {
-    check::<4>(false);
-    check::<12>(true);
-    check::<20>(true);
-    check::<132>(true);
-    check::<2044>(true);
+    check::<U4>(false);
+    check::<U12>(true);
+    check::<U20>(true);
+    check::<U132>(true);
+    check::<Diff<U2048, U4>>(true);
   }
-  check::<8>(false);
-  check::<16>(size_of::<usize>() == 4);
-  check::<24>(true);
-  check::<32>(true);
-  check::<128>(true);
-  check::<136>(true);
-  check::<2048>(true);
+  check::<U8>(false);
+  check::<U16>(size_of::<usize>() == 4);
+  check::<U24>(true);
+  check::<U32>(true);
+  check::<U128>(true);
+  check::<U136>(true);
+  check::<U2048>(true);
 }
 
 #[test]
 fn moved_external_prefix_preserves_pointer_provenance() {
-  fn check<const BYTES: usize>()
-  where
-    [(); BYTES]: SupportedBytes,
-  {
+  fn check<S: InlineSize>() {
     let values = [11u16, 13];
     let owner = 17u32;
     let data = ptr::from_ref(&values[1]);
@@ -53,7 +50,7 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     let mut bytes = core::array::from_fn(|i| i as u8 + 1);
     bytes[LEN_LOW_BYTES + 1] = 0x65;
     let len = usize::from_le_bytes(bytes);
-    let repr = Layout::<u16, Size<BYTES>>::try_external(data, owner_ptr.cast(), len).unwrap();
+    let repr = Layout::<u16, S>::try_external(data, owner_ptr.cast(), len).unwrap();
     let moved = core::hint::black_box(Some(repr)).unwrap();
     assert_eq!(moved.len(), len);
     assert_eq!(moved.cursor.as_ref()[0], bytes[LEN_LOW_BYTES]);
@@ -74,21 +71,21 @@ fn moved_external_prefix_preserves_pointer_provenance() {
   }
   #[cfg(target_pointer_width = "32")]
   {
-    check::<12>();
-    check::<16>();
-    check::<20>();
-    check::<132>();
-    check::<2044>();
+    check::<U12>();
+    check::<U16>();
+    check::<U20>();
+    check::<U132>();
+    check::<Diff<U2048, U4>>();
   }
-  check::<24>();
-  check::<64>();
-  check::<136>();
-  check::<2048>();
+  check::<U24>();
+  check::<U64>();
+  check::<U136>();
+  check::<U2048>();
 }
 
 #[test]
 #[should_panic(expected = "expected inline storage")]
 fn external_descriptors_cannot_be_borrowed_as_inline_elements() {
-  let repr = Layout::<u8, Size<24>>::try_external(ptr::null(), ptr::null(), 1).unwrap();
+  let repr = Layout::<u8, U24>::try_external(ptr::null(), ptr::null(), 1).unwrap();
   let _ = repr.as_slice();
 }

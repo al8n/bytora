@@ -1,66 +1,62 @@
 use core::{
+  fmt::Debug,
   marker::PhantomData,
   mem::MaybeUninit,
   num::NonZeroU8,
   ops::Range,
   ptr::{self, NonNull},
 };
+use typenum::Unsigned;
 
-mod sealed {
-  pub trait Repr {
-    type Align;
-    type Payload;
-    type Cursor: Default + AsRef<[u8]> + AsMut<[u8]>;
-  }
-}
-use sealed::Repr;
-
-/// A size witness for a total handle size of `BYTES` bytes.
+/// The byte arrays used by the inline cursor and raw element storage.
 ///
-/// This is an alias for `[(); BYTES]`. See [`InlineSize`] for supported sizes.
-pub type Size<const BYTES: usize> = [(); BYTES];
-
-/// A supported total byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
+/// # Safety
 ///
-/// On 32- and 64-bit targets, implemented for `[(); BYTES]` when `BYTES` is a
-/// nonzero multiple of the target's word size, up to 8192 bytes. Generic callers
-/// can use `where [(); BYTES]: SupportedBytes`.
-pub trait SupportedBytes: Repr {}
-impl<const BYTES: usize> SupportedBytes for [(); BYTES] where [(); BYTES]: Repr {}
-
-/// A supported total handle byte budget for a [`SliceOf`](crate::SliceOf) or
-/// [`SliceMutOf`](crate::SliceMutOf).
-///
-/// On 32- and 64-bit targets, implemented for [`Size<BYTES>`] when `BYTES` is a
-/// nonzero multiple of the target's word size, up to 8192 bytes. This trait is
-/// sealed and cannot be implemented outside this crate. The budget includes
-/// metadata and is independent of the element type. It differs from the
-/// per-element-type [`INLINE_CAPACITY`](crate::SliceOf::INLINE_CAPACITY).
-pub trait InlineSize: SupportedBytes + Sized {
-  /// The total handle byte budget, including metadata and independent of the element type.
-  ///
-  /// This is distinct from [`INLINE_CAPACITY`](crate::SliceOf::INLINE_CAPACITY),
-  /// which counts the elements that fit for a particular element type.
-  const BYTES: usize;
+/// Both types must be arrays of `u8`. Together with the one-byte tag they
+/// must fill exactly the size's byte budget. The cursor must have the width
+/// required to encode every index in the payload.
+#[doc(hidden)]
+unsafe trait Repr {
+  type Payload;
+  type Cursor: Default + AsRef<[u8]> + AsMut<[u8]>;
 }
 
-impl<const BYTES: usize> InlineSize for Size<BYTES>
-where
-  Size<BYTES>: SupportedBytes,
-{
-  const BYTES: usize = BYTES;
+/// A type-level byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
+///
+/// Implemented for the [`typenum`] unsigned integers that are positive multiples
+/// of the target's word size through [`MAX_HANDLE_BYTES`]. The trait is sealed.
+/// [`S::USIZE`](Unsigned::USIZE) counts all bytes, including the cursor. The
+/// [`INLINE_CAPACITY`](crate::Slice::INLINE_CAPACITY) also depends on the element type.
+#[allow(
+  private_bounds,
+  reason = "the backing arrays are private to the layout"
+)]
+pub trait InlineSize: Unsigned + Debug + Repr {}
+impl<S: Unsigned + Debug + Repr> InlineSize for S {}
+
+/// Maps an array of `N` bytes to the type-level handle size used by
+/// [`SliceN`](crate::SliceN) and [`SliceMutN`](crate::SliceMutN).
+///
+/// Use `where [u8; N]: AssocInlineSize` in code generic over `const N: usize`.
+pub trait AssocInlineSize {
+  /// The [`InlineSize`] for this total byte count.
+  type Size: InlineSize;
 }
 
 // Stable Rust cannot subtract metadata from a generic array length. Select the
 // concrete arrays generated for the target and verify every supported size.
 macro_rules! size {
-  ($bytes:literal, $cursor:literal, $align:ty) => {
-    impl Repr for [(); $bytes] {
-      type Align = $align;
+  ($bytes:literal, $size:ty, $cursor:literal) => {
+    // SAFETY: Both fields are byte arrays. verify_size checks their lengths
+    // against the cursor encoding and the typenum value for every mapping.
+    unsafe impl Repr for $size {
       type Payload = [u8; $bytes - $cursor - 1];
       type Cursor = [u8; $cursor];
     }
-    const _: () = verify_size::<$bytes>();
+    impl AssocInlineSize for [u8; $bytes] {
+      type Size = $size;
+    }
+    const _: () = verify_size::<<[u8; $bytes] as AssocInlineSize>::Size>($bytes);
   };
 }
 include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
@@ -69,17 +65,14 @@ include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
   dead_code,
   reason = "Rust 1.85 does not count calls from anonymous constants as use"
 )]
-const fn verify_size<const BYTES: usize>()
-where
-  [(); BYTES]: SupportedBytes,
-{
+const fn verify_size<S: InlineSize>(bytes: usize) {
   use crate::{Slice, SliceMut};
 
-  let payload = size_of::<<[(); BYTES] as Repr>::Payload>();
-  let cursor = size_of::<<[(); BYTES] as Repr>::Cursor>();
-  let expected_cursor = if BYTES <= 8 {
+  let payload = size_of::<S::Payload>();
+  let cursor = size_of::<S::Cursor>();
+  let expected_cursor = if bytes <= 8 {
     0
-  } else if BYTES <= 128 {
+  } else if bytes <= 128 {
     1
   } else {
     3
@@ -90,21 +83,21 @@ where
     3 => 32511,
     _ => 0,
   };
-  assert!(BYTES > 0 && BYTES % size_of::<usize>() == 0 && BYTES <= MAX_HANDLE_BYTES);
+  assert!(bytes > 0 && bytes % size_of::<usize>() == 0 && bytes <= MAX_HANDLE_BYTES);
+  assert!(S::USIZE == bytes);
   assert!(cursor == expected_cursor);
-  assert!(payload + cursor + 1 == BYTES);
+  assert!(payload + cursor + 1 == bytes);
   assert!(payload <= cursor_limit);
-  assert!(Layout::<u8, Size<BYTES>>::INLINE_CAPACITY == payload);
-  assert!(core::mem::offset_of!(Layout<u8, Size<BYTES>>, payload) == 0);
-  assert!(core::mem::offset_of!(Layout<u8, Size<BYTES>>, cursor) == payload);
-  assert!(core::mem::offset_of!(Layout<u8, Size<BYTES>>, tag) == BYTES - 1);
-  assert!(align_of::<<[(); BYTES] as Repr>::Align>() == align_of::<usize>());
-  assert!(align_of::<Slice<u8, BYTES>>() == align_of::<<[(); BYTES] as Repr>::Align>());
-  assert!(align_of::<SliceMut<u8, BYTES>>() == align_of::<Slice<u8, BYTES>>());
-  assert!(size_of::<Slice<u8, BYTES>>() == BYTES);
-  assert!(size_of::<Option<Slice<u8, BYTES>>>() == BYTES);
-  assert!(size_of::<SliceMut<u8, BYTES>>() == BYTES);
-  assert!(size_of::<Option<SliceMut<u8, BYTES>>>() == BYTES);
+  assert!(Layout::<u8, S>::INLINE_CAPACITY == payload);
+  assert!(core::mem::offset_of!(Layout<u8, S>, payload) == 0);
+  assert!(core::mem::offset_of!(Layout<u8, S>, cursor) == payload);
+  assert!(core::mem::offset_of!(Layout<u8, S>, tag) == bytes - 1);
+  assert!(align_of::<Slice<u8, S>>() == align_of::<usize>());
+  assert!(align_of::<SliceMut<u8, S>>() == align_of::<usize>());
+  assert!(size_of::<Slice<u8, S>>() == bytes);
+  assert!(size_of::<Option<Slice<u8, S>>>() == bytes);
+  assert!(size_of::<SliceMut<u8, S>>() == bytes);
+  assert!(size_of::<Option<SliceMut<u8, S>>>() == bytes);
 }
 
 const TINY_INLINE: u8 = 0x40;
@@ -125,15 +118,15 @@ pub(super) struct Layout<T, S: InlineSize> {
   // This zero-sized field aligns the start of the payload. Both byte arrays
   // have alignment one and no padding. Moving MaybeUninit preserves pointer
   // provenance and any uninitialized bytes in a stored T's padding.
-  _align: [<S as Repr>::Align; 0],
-  payload: MaybeUninit<<S as Repr>::Payload>,
-  cursor: <S as Repr>::Cursor,
+  _align: [usize; 0],
+  payload: MaybeUninit<S::Payload>,
+  cursor: S::Cursor,
   tag: NonZeroU8,
   _element: PhantomData<T>,
 }
 
 impl<T, S: InlineSize> Layout<T, S> {
-  const PAYLOAD_BYTES: usize = size_of::<<S as Repr>::Payload>();
+  const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
   pub(super) const INLINE_CAPACITY: usize = if size_of::<T>() == 0 {
     Self::PAYLOAD_BYTES
   } else if align_of::<T>() > align_of::<Self>() {
@@ -150,7 +143,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     if len > Self::INLINE_CAPACITY {
       return None;
     }
-    let mut cursor = <S as Repr>::Cursor::default();
+    let mut cursor = S::Cursor::default();
     let tag = match cursor.as_mut() {
       [] => TINY_INLINE | len as u8,
       [_] => len as u8 + 1,
@@ -179,7 +172,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   // An inert descriptor. Only inline layouts can be put into a public handle.
   #[cfg_attr(not(test), expect(dead_code, reason = "reserved for external owners"))]
   fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
-    if S::BYTES <= 8
+    if S::USIZE <= 8
       || Self::PAYLOAD_BYTES < size_of::<ExternalPrefix>()
       || len > isize::MAX as usize
     {
@@ -188,9 +181,9 @@ impl<T, S: InlineSize> Layout<T, S> {
     let bytes = len.to_le_bytes();
     let mut len_low = [0; LEN_LOW_BYTES];
     len_low.copy_from_slice(&bytes[..LEN_LOW_BYTES]);
-    let mut cursor = <S as Repr>::Cursor::default();
+    let mut cursor = S::Cursor::default();
     cursor.as_mut()[0] = bytes[LEN_LOW_BYTES];
-    let mut payload = MaybeUninit::<<S as Repr>::Payload>::uninit();
+    let mut payload = MaybeUninit::<S::Payload>::uninit();
     // SAFETY: The packed prefix has alignment one and fits the checked payload.
     unsafe {
       payload
