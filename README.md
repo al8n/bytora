@@ -181,22 +181,68 @@ For a compile-time length, use the original static slice's length. In core-only
 builds, a constant can also read the length from the static handle itself.
 
 With `std` or `alloc` and shared ownership available,
-`Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. It
-copies short inputs inline. For larger inputs it retains the vector's buffer.
-A non-zero-sized vector with no spare capacity needs no additional allocation
-on construction or drop. The first clone or range publishes a reference-counted
-owner. Concurrent first clones can allocate competing owners and publish only one.
-Later clones and ranges retain that owner and keep independent cursors.
-The descriptor also accommodates spare capacity, skipped prefixes and truncated
-suffixes up to `(1 << ((usize::BITS - 2) / 3)) - 1` elements each. Larger counts,
-zero-sized elements and targets with insufficient pointer alignment use a
-separately allocated owner. In both forms,
-the final handle owns the entire original vector allocation.
-`try_from_shared_vec` always shares the supplied vector, even for short inputs,
+`Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. A
+handle of at least three machine words keeps the vector's allocation, even for
+a short vector or an empty vector with spare capacity. A smaller handle copies
+the elements inline when they fit. An empty vector without an allocation and
+short vectors of zero-sized elements can also use inline storage.
+
+On targets with suitable pointer alignment, an exact-capacity vector of
+non-zero-sized elements needs no additional allocation on adoption or drop.
+The descriptor records skipped prefixes and truncated suffixes of up to
+`(1 << ((usize::BITS - 2) / 2)) - 1` elements each. The first clone, shared
+range, or larger window adjustment allocates a reference-counted owner.
+Concurrent first clones can allocate competing owners and publish only one.
+
+For a vector with spare capacity, adoption initializes the owner immediately.
+It uses aligned space beyond the initialized elements when the four-word owner
+fits, and allocates a separate owner otherwise. Clones and ranges then need no
+additional allocation. Shared zero-sized vectors and exact-capacity vectors on
+targets with insufficient pointer alignment also use a separate owner.
+Every shared range keeps an independent cursor. The final handle owns the
+entire original vector allocation, including its spare capacity.
+
+`try_from_shared_vec` always uses external storage, even for short inputs,
 and accepts any `T: Send + Sync`. `Slice::from_owner` and `try_from_owner`
 keep an `AsRef<[T]> + Send + 'static` owner alive without copying its slice;
 their elements must be `Sync`. Shared ownership and its target requirements
 are described under [Features and targets](#features-and-targets).
+
+`Slice::try_from_boxed_slice` and `Slice::try_from_arc` adopt a `Box<[T]>`
+or an already shared `Arc<[T]>` without copying the elements. Both accept
+borrowed and non-`Clone` elements with `T: Send + Sync`. A box follows the
+exact-capacity vector path, including allocation recovery through
+`try_into_vec`. An Arc-backed window stays read-only. Adoption and ordinary
+ranges reuse its existing reference count. A range whose hidden ends exceed
+the descriptor's counts allocates a small owner that retains the original Arc.
+`Slice` also implements `TryFrom` for both input types. A failed conversion
+returns the original owner.
+
+`LocalSlice<T>` adopts an already shared `Rc<[T]>` and stays on the same
+thread. It requires only `alloc` or `std`, including on targets without
+pointer-width atomics. Its default handle and its `Option` occupy three
+machine words. `LocalSliceN<T, N>` selects a byte budget. Adoption, clones,
+and normally sized ranges reuse the original Rc without allocating. A range
+whose hidden prefix or suffix exceeds `(1 << (usize::BITS / 2 - 1)) - 1`
+elements allocates a small owner for that view and its descendants.
+`into_original_rc` returns the complete original allocation from any window.
+
+```rust
+# #[cfg(any(feature = "std", feature = "alloc"))]
+# {
+extern crate alloc;
+use alloc::rc::Rc;
+use core::cell::Cell;
+use smol_slice::LocalSlice;
+
+let values: Rc<[Cell<u8>]> = Rc::from([Cell::new(3), Cell::new(9)]);
+let whole = LocalSlice::<_>::from_rc(values.clone());
+let tail = whole.slice(1..);
+tail.as_slice()[0].set(12);
+assert_eq!(values[1].get(), 12);
+assert!(Rc::ptr_eq(&values, &tail.into_original_rc()));
+# }
+```
 
 Shared storage requires a handle of at least three machine words and a length
 of at most `isize::MAX` elements. If the elements need shared storage and the
@@ -226,8 +272,10 @@ including zero-sized types. `SliceN::<T, 0>::empty()` uses only `core` and
 accepts any element type. `try_from_static` borrows a static slice of `Sync`
 elements. With shared ownership available, `TryFrom<Vec<T>>`
 takes ownership of `Send + Sync` elements, including types that implement
-neither `Copy` nor `Clone`. Clones and ranges keep the original vector's
-elements alive until the last handle drops, even when its window is empty.
+neither `Copy` nor `Clone`. It retains an empty vector's allocation when one
+exists. An empty vector without an allocation yields `Slice::empty()`. Clones
+and ranges keep the original vector's elements alive until the last handle
+drops, even when its window is empty.
 
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
@@ -337,13 +385,18 @@ type with shorter reference lifetimes. When the budget is still a generic
 ## Features and targets
 
 The default `std` feature and the optional `alloc` feature support vector-backed
-mutable storage. Without `extra-platforms`, targets with native pointer-width
-compare-and-swap also enable shared ownership using the standard allocation
-library's `Arc`. With neither feature, inline and static operations use only `core`.
+mutable storage and Rc-backed `LocalSlice`. Without `extra-platforms`, targets
+with native pointer-width
+compare-and-swap also enable shared ownership. Vectors use a strong reference
+count, and custom owners and frozen mutable windows use the allocation library's
+`Arc`. With neither feature, inline and static operations use only `core`.
 
 The `extra-platforms` feature enables `alloc` and selects
-[`portable-atomic-util`](https://docs.rs/portable-atomic-util/) for shared
-ownership, including on targets with native atomics. On a target without native
+`portable-atomic` and [`portable-atomic-util`](https://docs.rs/portable-atomic-util/)
+for internal thread-safe sharing, including on targets with native atomics.
+`Slice::try_from_arc` accepts `alloc::sync::Arc` wherever native pointer-width
+atomics are available and `portable_atomic_util::Arc` on portable-only
+targets. On a target without native
 compare-and-swap, the application must configure a working portable-atomic
 backend. For example, a single-core Cortex-M application can provide a real
 critical section with these downstream dependencies:

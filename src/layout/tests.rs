@@ -46,10 +46,16 @@ fn compact_static_windows_cross_the_fast_tag_length_boundary() {
   static DATA: [(); BOUNDARY + 1] = [(); BOUNDARY + 1];
   fn check<S: InlineSize>() {
     let mut source = crate::Slice::<(), S>::try_from_static(&DATA).unwrap();
-    assert_ne!(source.layout.tag, COMPACT_STATIC);
+    assert_eq!(
+      source.layout.tag == COMPACT_STATIC,
+      !Layout::<(), S>::PACKED_LEN
+    );
     assert_eq!(source.clone().len(), BOUNDARY + 1);
     source.advance(1);
-    assert_ne!(source.layout.tag, COMPACT_STATIC);
+    assert_eq!(
+      source.layout.tag == COMPACT_STATIC,
+      !Layout::<(), S>::PACKED_LEN
+    );
     assert_eq!(source.len(), BOUNDARY);
     let subrange = source.slice(1..);
     assert_eq!(subrange.layout.tag, COMPACT_STATIC);
@@ -72,14 +78,17 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     let data = ptr::from_ref(&values[1]);
     let owner_ptr = ptr::from_ref(&owner);
     let mut bytes = core::array::from_fn(|i| i as u8 + 1);
-    bytes[LEN_LOW_BYTES + 1] = 0x65;
+    bytes[size_of::<usize>() - 1] = 0x65;
     let len = usize::from_le_bytes(bytes);
     let repr = Layout::<u16, S>::try_external(data, owner_ptr.cast(), len).unwrap();
     let moved = core::hint::black_box(Some(repr)).unwrap();
     assert_eq!(moved.len(), len);
-    assert_eq!(moved.cursor.as_ref()[0], bytes[LEN_LOW_BYTES]);
-    assert_eq!(moved.tag.get(), 0xe5);
-    assert_eq!(moved.len_low(), bytes[..LEN_LOW_BYTES]);
+    if Layout::<u16, S>::PACKED_LEN {
+      assert_eq!(moved.cursor.as_ref()[0], bytes[size_of::<usize>() - 2]);
+      assert_eq!(moved.tag.get(), 0xe5);
+    } else {
+      assert_eq!(moved.tag.get(), EXTERNAL);
+    }
     let stored_data = moved.data().cast::<u16>();
     // SAFETY: This private descriptor stores the unchanged pointer to the local.
     let stored_owner = unsafe { (*moved.external_ptr()).owner.cast::<u32>() };

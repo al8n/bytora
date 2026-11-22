@@ -8,6 +8,8 @@ use core::{
 };
 use typenum::Unsigned;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub(super) mod local;
 pub(super) mod mutable;
 mod shared;
 
@@ -123,6 +125,14 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   if Layout::<u8, S>::COMPACT_EXTERNAL {
     assert!(cursor == 1 && payload + 1 < COMPACT_STATIC.get() as usize);
   }
+  if Layout::<u8, S>::FITS_EXTERNAL {
+    assert!(size_of::<ExternalPrefix>() == 2 * size_of::<usize>());
+    if bytes == 3 * size_of::<usize>() {
+      assert!(cursor == 1 && payload + 2 == bytes);
+    } else {
+      assert!(payload >= 3 * size_of::<usize>());
+    }
+  }
   assert!(Layout::<u8, S>::INLINE_CAPACITY == if budget == 0 { 0 } else { payload });
   assert!(core::mem::offset_of!(Layout<u8, S>, payload) == 0);
   assert!(core::mem::offset_of!(Layout<u8, S>, cursor) == payload);
@@ -140,20 +150,16 @@ const fn verify_size<S: InlineSize>(budget: usize) {
 
 const TINY_INLINE: u8 = 0x40;
 // An external-capable handle of at most 32 bytes uses tags 1..=31 for inline
-// endpoints. 0x40 identifies the real static owner when the high length byte
-// is zero. Tags 0x80..=0xff use the general owner and length encoding, even
-// for a static slice with a larger length. Both external forms keep the same
-// typed data and owner pointers. Tiny inline-only handles have a separate tag encoding.
+// endpoints. 0x40 identifies the real static owner. In a three-word handle
+// the high length byte shares the tag, so long windows use 0x80..=0xff
+// regardless of owner. Tiny inline-only handles have a separate tag encoding.
 const COMPACT_STATIC: NonZeroU8 = NonZeroU8::new(0x40).unwrap();
-// A compact source keeps this tag across concurrent first clones. Peers receive
-// the ordinary external tag and can use the direct Arc clone path immediately.
-#[cfg(smol_slice_atomic)]
-const COMPACT_VEC: NonZeroU8 = NonZeroU8::new(0x41).unwrap();
 const EXTERNAL: u8 = 0x80;
-const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
+const TAG_SHIFT: u32 = usize::BITS - 8;
 
-// The two high length bytes live in the cursor and tag. Both pointers stay
-// typed when written to or read from the payload, including on big-endian targets.
+// Both pointers stay typed when written to or read from the payload.
+// The next word stores the length. In three-word handles its last byte
+// doubles as the tag; the word is little-endian there, even on big-endian targets.
 // Recoverable ZST owners use the data word for a provenance-free logical index
 // and supply the original aligned pointer themselves.
 #[repr(C, packed)]
@@ -161,7 +167,6 @@ const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
 struct ExternalPrefix {
   data: *const (),
   owner: *const (),
-  len_low: [u8; LEN_LOW_BYTES],
 }
 
 #[repr(transparent)]
@@ -189,7 +194,7 @@ impl<P> Payload<P> {
     self.bytes.as_ptr()
   }
 
-  fn as_mut_ptr(&mut self) -> *mut P {
+  const fn as_mut_ptr(&mut self) -> *mut P {
     ptr::from_mut(self).cast()
   }
 }
@@ -216,7 +221,8 @@ pub struct Layout<T, S: InlineSize> {
 
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
-  const FITS_EXTERNAL: bool = Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>();
+  const FITS_EXTERNAL: bool = S::HANDLE_BYTES >= 3 * size_of::<usize>();
+  const PACKED_LEN: bool = S::HANDLE_BYTES == 3 * size_of::<usize>();
   pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::HANDLE_BYTES <= 32;
   pub(super) const INLINE_CAPACITY: usize = if S::USIZE == 0 {
     0
@@ -282,11 +288,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   // Inline and compact static descriptors can be copied without an owner.
   #[cfg(smol_slice_atomic)]
   fn uses_external_owner(&self) -> bool {
-    if Self::COMPACT_EXTERNAL {
-      self.tag.get() > COMPACT_STATIC.get()
-    } else {
-      Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
-    }
+    Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
   }
 
   pub(super) fn clone_inline(&self) -> Self {
@@ -333,30 +335,30 @@ impl<T, S: InlineSize> Layout<T, S> {
     unsafe { (*self.external_ptr()).data }
   }
 
-  const fn len_low(&self) -> [u8; LEN_LOW_BYTES] {
-    // SAFETY: The length bytes are initialized and disjoint from the owner word.
-    unsafe { (*self.external_ptr()).len_low }
-  }
-
   pub(super) const fn len(&self) -> usize {
     if Self::inline_tag(self.tag) {
       let range = self.inline_range();
       return range.end - range.start;
     }
-    let low = self.len_low();
-    let mut bytes = [0; size_of::<usize>()];
-    let mut i = 0;
-    while i < LEN_LOW_BYTES {
-      bytes[i] = low[i];
-      i += 1;
+    self.external_len()
+  }
+
+  #[inline]
+  const fn external_len(&self) -> usize {
+    assert!(!Self::inline_tag(self.tag), "expected external storage");
+    // SAFETY: Every external constructor initializes this entire word. Its
+    // address derives from the enclosing handle, as the packed form spans the
+    // payload, cursor and tag. It is disjoint from the mutable owner slot.
+    let word = unsafe { ptr::from_ref(self).cast::<usize>().add(2).read() };
+    if !Self::PACKED_LEN {
+      return word;
     }
-    bytes[LEN_LOW_BYTES] = self.cursor_bytes()[0];
-    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag.get() < EXTERNAL {
-      0
+    let len = usize::from_le(word);
+    if self.tag.get() < EXTERNAL {
+      len & ((1 << TAG_SHIFT) - 1)
     } else {
-      self.tag.get() & !EXTERNAL
-    };
-    usize::from_le_bytes(bytes)
+      len & (isize::MAX as usize)
+    }
   }
 
   const fn cursor_bytes(&self) -> &[u8] {
@@ -437,48 +439,73 @@ impl<T, S: InlineSize> Layout<T, S> {
 
 // A bare Layout describes a window. Its enclosing Slice manages the external owner.
 impl<T, S: InlineSize> Layout<T, S> {
-  const fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
-    let bytes = len.to_le_bytes();
-    let mut low = [0; LEN_LOW_BYTES];
-    let mut i = 0;
-    while i < LEN_LOW_BYTES {
-      low[i] = bytes[i];
-      i += 1;
-    }
-    let tag = NonZeroU8::new(EXTERNAL | bytes[LEN_LOW_BYTES + 1]).unwrap();
-    (low, bytes[LEN_LOW_BYTES], tag)
+  const fn set_external_len(&mut self, len: usize, kind: NonZeroU8) {
+    assert!(Self::FITS_EXTERNAL);
+    let word = if Self::PACKED_LEN {
+      // The owner-specific tag is available only when the high byte is free.
+      let tag = if len >> TAG_SHIFT == 0 {
+        kind.get()
+      } else {
+        EXTERNAL
+      };
+      (len | ((tag as usize) << TAG_SHIFT)).to_le()
+    } else {
+      if Self::COMPACT_EXTERNAL {
+        // Initialize the whole final word, including the byte cursor. Compact
+        // handles are routinely moved as words, even when their spare bytes
+        // have no semantic meaning. The separate length precedes this word.
+        let last = S::HANDLE_BYTES / size_of::<usize>() - 1;
+        let tag_word = ((kind.get() as usize) << TAG_SHIFT).to_le();
+        // SAFETY: The fourth or later word is aligned and disjoint from the
+        // other three. Its final address byte receives the nonzero tag.
+        unsafe {
+          ptr::from_mut(self)
+            .cast::<usize>()
+            .add(last)
+            .write(tag_word)
+        };
+      } else {
+        self.tag = kind;
+      }
+      len
+    };
+    // SAFETY: verify_size checks that the third word fits, and the handle
+    // is usize-aligned. The packed write initializes the cursor and writes
+    // a nonzero high byte into the tag. The wide write is wholly in the payload.
+    unsafe { ptr::from_mut(self).cast::<usize>().add(2).write(word) };
   }
 
+  #[cfg(any(test, smol_slice_atomic))]
   const fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
     if !Self::FITS_EXTERNAL || len > isize::MAX as usize {
       return None;
     }
-    let (len_low, high, tag) = Self::split_external_len(len);
+    Some(Self::external(
+      data,
+      owner,
+      len,
+      NonZeroU8::new(EXTERNAL).unwrap(),
+    ))
+  }
+
+  #[inline]
+  const fn external(data: *const T, owner: *const (), len: usize, kind: NonZeroU8) -> Self {
+    assert!(Self::FITS_EXTERNAL);
+    let mut layout = Self::empty_inline();
     let prefix = ExternalPrefix {
       data: data.cast(),
       owner,
-      len_low,
     };
-    Some(Self::external(prefix, high, tag))
-  }
-
-  const fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
-    assert!(!Self::inline_tag(tag), "expected external storage");
-    assert!(Self::FITS_EXTERNAL);
-    let mut cursor = S::ZERO_CURSOR;
-    // SAFETY: A size that fits the prefix has a cursor of one or three bytes.
-    // Repr guarantees a byte array. The raw write also works in const initializers.
-    unsafe { ptr::from_mut(&mut cursor).cast::<u8>().write(high) };
-    let mut payload = MaybeUninit::<S::Payload>::uninit();
-    // SAFETY: The packed prefix has alignment one and fits the checked payload.
-    unsafe { payload.as_mut_ptr().cast::<ExternalPrefix>().write(prefix) };
-    Self {
-      _align: [],
-      payload: Payload::new(payload),
-      cursor,
-      tag,
-      _element: PhantomData,
-    }
+    // SAFETY: The two-pointer prefix fits the checked external payload.
+    unsafe {
+      layout
+        .payload
+        .as_mut_ptr()
+        .cast::<ExternalPrefix>()
+        .write(prefix)
+    };
+    layout.set_external_len(len, kind);
+    layout
   }
 }
 

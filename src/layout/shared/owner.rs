@@ -1,5 +1,5 @@
 use super::vector::{self, Vector};
-use super::{Arc, STATIC_OWNER};
+use super::{Arc, Layout, STATIC_OWNER, arc};
 use crate::{InlineSize, Slice, layout::mutable::Window};
 use core::{mem::ManuallyDrop, ops::Range};
 use std::vec::Vec;
@@ -34,28 +34,37 @@ impl<T> StorageVtable<T> {
   };
 
   const VECTOR: Self = Self {
-    clone: retain::<Vector<T>>,
+    clone: Vector::<T>::retain,
     into_vec: vector_into_vec,
     into_mut: vector_into_window,
     is_unique: |owner| {
       // SAFETY: A direct vector supplies a strong reference to its header.
-      vector::raw(owner) || unsafe { unique::<Vector<T>>(owner) }
+      vector::raw(owner) || unsafe { Vector::<T>::strong_count(owner) == 1 }
     },
-    drop: release::<Vector<T>>,
+    drop: Vector::<T>::release,
     zst_base: Some(|owner| {
-      // SAFETY: ZST vectors always use a live direct Arc<Vector<T>>.
+      // SAFETY: ZST vectors always use a live direct vector header.
       unsafe { (*owner.cast::<Vector<T>>()).base.cast() }
     }),
   };
 }
 
-// Promoted Vec owners keep their direct Arc<Vector<T>> pointer. Other managed owners put
+// Shared Vec owners keep their direct Vector<T> pointer. Other managed owners put
 // a pointer to their typed operations first and tag their Arc pointer. Keeping
 // the table in constant storage lets scoped T (such as &'a str) use it too.
-#[repr(C)]
+// Tagging the address by adding one leaves a low 001 on every target,
+// distinct from inline Arc geometry (101), raw vectors and actual headers.
+#[repr(C, align(8))]
 struct Managed<T, O> {
   ops: *const StorageVtable<T>,
   value: O,
+}
+
+pub(super) fn manage_read_only<T, O>(value: O) -> *const () {
+  Managed::into_owner(Arc::new(Managed {
+    ops: Managed::<T, O>::OPAQUE_OPS,
+    value,
+  }))
 }
 
 impl<T, O> Managed<T, O> {
@@ -66,7 +75,7 @@ impl<T, O> Managed<T, O> {
   };
 
   fn into_owner(this: Arc<Self>) -> *const () {
-    // repr(C)'s pointer first field gives the allocation at least two-byte alignment.
+    // The eight-byte-aligned value pointer leaves three low bits for the tag.
     Arc::into_raw(this).wrapping_byte_add(1).cast()
   }
 }
@@ -103,7 +112,9 @@ fn untag(owner: *const ()) -> *const () {
 pub(super) unsafe fn operations<'a, T>(owner: *const ()) -> &'a StorageVtable<T> {
   if owner.addr() & 1 == 0 || vector::raw(owner) {
     &StorageVtable::<T>::VECTOR
-  } else if owner == STATIC_OWNER {
+  } else if owner == STATIC_OWNER || arc::is_arc(owner) {
+    // Both backings are read-only. Arc clones and releases take their
+    // geometry from the handle in the retain and release paths below.
     &StorageVtable::<T>::STATIC
   } else {
     // SAFETY: This tagged pointer identifies a managed allocation.
@@ -112,7 +123,7 @@ pub(super) unsafe fn operations<'a, T>(owner: *const ()) -> &'a StorageVtable<T>
 }
 
 pub(super) unsafe fn managed_operations<'a, T>(owner: *const ()) -> &'a StorageVtable<T> {
-  // SAFETY: The caller excludes the static sentinel and direct Vec pointers.
+  // SAFETY: The caller excludes all geometry markers, static and direct owners.
   // Untagging recovers the live Managed<T, O> whose first field holds its table.
   unsafe { &**untag(owner).cast::<*const StorageVtable<T>>() }
 }
@@ -125,16 +136,19 @@ pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
     return owner == STATIC_OWNER;
   }
   // SAFETY: The caller holds a live external descriptor. Its untagged owner
-  // came from Arc<Vector<T>>::into_raw. Raw descriptors are promoted before retain.
+  // points to a vector header. Raw descriptors are promoted before retain.
   unsafe { (StorageVtable::<T>::VECTOR.clone)(owner) };
   true
 }
 
 #[inline]
-pub(super) unsafe fn release_owner<T>(owner: *const ()) {
+pub(super) unsafe fn release_owner<T, S: InlineSize>(owner: *const (), layout: &Layout<T, S>) {
   if owner.addr() & 1 == 0 {
-    // SAFETY: The untagged owner transfers a direct Arc<Vector<T>> reference.
+    // SAFETY: The untagged owner transfers a direct vector reference.
     unsafe { (StorageVtable::<T>::VECTOR.drop)(owner) };
+  } else if arc::is_arc(owner) {
+    // SAFETY: The caller transfers the reference held by this exact window.
+    unsafe { arc::release::<T>(owner, layout.data(), layout.external_len()) };
   } else if owner != STATIC_OWNER {
     // SAFETY: The tagged managed owner transfers a reference to its own table.
     unsafe { (managed_operations::<T>(owner).drop)(owner) };
@@ -209,15 +223,14 @@ unsafe fn vector_into_vec<T>(owner: *const (), data: *const (), len: usize) -> O
 }
 
 unsafe fn take_vector<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
-  let buffer = if vector::raw(owner) {
+  if vector::raw(owner) {
     // SAFETY: A consuming take transfers the raw descriptor's original vector.
-    unsafe { Vector::<T>::take_raw(owner, data, len) }
+    Some(unsafe { Vector::<T>::take_raw(owner, data, len) })
   } else {
     // SAFETY: A direct descriptor transfers its strong reference, or restores
     // it when other immutable views still exist.
-    unsafe { take_arc::<Vector<T>>(owner) }?
-  };
-  Some(buffer.into_vec())
+    unsafe { Vector::<T>::try_take(owner) }
+  }
 }
 
 unsafe fn vector_into_window<T>(

@@ -17,7 +17,12 @@ const MATCHED_HANDLE: usize = 32;
 const LARGE_HANDLE: usize = 4096;
 const LARGE_PAYLOAD: usize = 64 * 1024;
 const BATCH_SIZE: usize = 64;
+#[cfg(target_pointer_width = "64")]
 const SMALL_LENGTHS: [usize; 13] = [0, 1, 7, 8, 14, 15, 16, 22, 23, 24, 30, 31, 32];
+#[cfg(target_pointer_width = "32")]
+const SMALL_LENGTHS: [usize; 17] = [
+  0, 1, 7, 8, 14, 15, 16, 18, 19, 22, 23, 24, 26, 27, 30, 31, 32,
+];
 
 const _: () = {
   assert!(size_of::<SliceN<u8, 32>>() == 32);
@@ -590,8 +595,15 @@ fn array_copy<const N: usize>(group: &mut BenchmarkGroup<'_, WallTime>, method: 
 
 fn clone_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone");
+  #[cfg(target_pointer_width = "32")]
+  inline(&mut group, SliceN::<u8, 4>::try_from_slice);
   inline(&mut group, SliceN::<u8, 8>::try_from_slice);
   inline(&mut group, SliceN::<u8, 16>::try_from_slice);
+  #[cfg(target_pointer_width = "32")]
+  {
+    inline(&mut group, SliceN::<u8, 20>::try_from_slice);
+    inline(&mut group, SliceN::<u8, 28>::try_from_slice);
+  }
   inline(&mut group, Slice::<u8>::try_from_slice);
   if size_of::<Slice<u8>>() != 24 {
     inline(&mut group, SliceN::<u8, 24>::try_from_slice);
@@ -608,13 +620,21 @@ fn clone_benches(c: &mut Criterion) {
     slice_heap::<typenum::U24>(&mut group);
     slice_heap::<typenum::U32>(&mut group);
     #[cfg(target_pointer_width = "32")]
-    slice_heap::<typenum::U12>(&mut group);
+    {
+      slice_heap::<typenum::U12>(&mut group);
+      slice_heap::<typenum::U20>(&mut group);
+      slice_heap::<typenum::U28>(&mut group);
+    }
   }
   slice_static::<typenum::U16>(&mut group);
   slice_static::<typenum::U24>(&mut group);
   slice_static::<typenum::U32>(&mut group);
   #[cfg(target_pointer_width = "32")]
-  slice_static::<typenum::U12>(&mut group);
+  {
+    slice_static::<typenum::U12>(&mut group);
+    slice_static::<typenum::U20>(&mut group);
+    slice_static::<typenum::U28>(&mut group);
+  }
   // Full 32-byte cases were already registered above; add only advanced windows.
   slice_wide::<typenum::U32>(&mut group, CloneMethod::Push, false);
   slice_wide::<typenum::U64>(&mut group, CloneMethod::Push, true);
@@ -635,6 +655,8 @@ fn clone_benches(c: &mut Criterion) {
   ]
   .into_iter()
   .chain(SMALL_LENGTHS);
+  #[cfg(target_pointer_width = "32")]
+  let lengths = lengths.chain([3]);
   for len in unique_lengths(lengths) {
     bytes_baselines(&mut group, len);
   }
@@ -646,6 +668,8 @@ fn clone_benches(c: &mut Criterion) {
   ]
   .into_iter()
   .chain([0, 1, 7, 14, 15, 22, 23, 30, 31, MATCHED_HANDLE]);
+  #[cfg(target_pointer_width = "32")]
+  let lengths = lengths.chain([18, 19, 26, 27]);
   for len in unique_lengths(lengths) {
     bytes_advanced(&mut group, len);
   }
@@ -663,6 +687,13 @@ fn empty_slice<S: InlineSize>() -> Slice<u8, S> {
 fn clone_from_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone_from");
   // Compact handles serve as controls for the wider handles.
+  #[cfg(target_pointer_width = "32")]
+  {
+    slice_wide::<typenum::U12>(&mut group, CloneMethod::From, true);
+    slice_wide::<typenum::U16>(&mut group, CloneMethod::From, true);
+    slice_wide::<typenum::U20>(&mut group, CloneMethod::From, true);
+    slice_wide::<typenum::U28>(&mut group, CloneMethod::From, true);
+  }
   slice_wide::<typenum::U24>(&mut group, CloneMethod::From, true);
   slice_wide::<typenum::U32>(&mut group, CloneMethod::From, true);
   slice_wide::<typenum::U64>(&mut group, CloneMethod::From, true);
