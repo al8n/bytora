@@ -31,8 +31,10 @@ pub(super) const AVAILABLE: bool = align_of::<*const ()>() >= 4
 // An exact-capacity vector has no hidden elements at adoption. Caching its
 // length in the owner word lets consumption recover both raw parts from aligned
 // pointer slots. Larger lengths still fit the ordinary zero-prefix/suffix form.
+pub(super) const MAX_FULL_LEN: usize = usize::MAX >> 2;
+
 pub(super) fn full_owner(len: usize) -> *const () {
-  if len <= usize::MAX >> 2 {
+  if len <= MAX_FULL_LEN {
     ptr::without_provenance((len << 2) | RAW_BIT)
   } else {
     NO_HIDDEN_ELEMENTS
@@ -69,7 +71,7 @@ fn counts(owner: *const ()) -> (usize, usize) {
 const IN_TAIL: usize = 1 << (usize::BITS - 1);
 
 #[inline(never)]
-pub(super) fn from_vec<T>(mut values: Vec<T>) -> *const () {
+pub(super) fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   let base = values.as_mut_ptr();
   let len = values.len();
   let capacity = values.capacity();
@@ -86,14 +88,14 @@ pub(super) fn from_vec<T>(mut values: Vec<T>) -> *const () {
       // The raw base retains the allocation's original provenance and capacity.
       unsafe { header.write(Vector::new(base, len | IN_TAIL, capacity, 1)) };
       core::mem::forget(values);
-      return header.cast();
+      return (base, header.cast());
     }
   }
   // Keep the input live through allocation. It still owns all the elements
   // if allocation unwinds before the ownership transfer.
   let header = Box::new(Vector::new(base, len, capacity, 1));
   core::mem::forget(values);
-  Box::into_raw(header).cast()
+  (base, Box::into_raw(header).cast())
 }
 
 pub(super) fn narrow(owner: *const (), front: usize, back: usize) -> Option<*const ()> {

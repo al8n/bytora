@@ -120,6 +120,7 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   assert!(bytes > 0 && bytes % size_of::<usize>() == 0 && bytes <= MAX_HANDLE_BYTES);
   assert!(S::USIZE == budget);
   assert!(cursor == expected_cursor);
+  assert!(cursor < size_of::<usize>());
   assert!(payload + cursor + 1 == bytes);
   assert!(payload <= cursor_limit);
   if Layout::<u8, S>::COMPACT_EXTERNAL {
@@ -225,6 +226,10 @@ impl<T, S: InlineSize> Layout<T, S> {
   const FITS_EXTERNAL: bool = S::HANDLE_BYTES >= 3 * size_of::<usize>();
   const PACKED_LEN: bool = S::HANDLE_BYTES == 3 * size_of::<usize>();
   pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::HANDLE_BYTES <= 32;
+  pub(super) const SPARSE_CLONE: bool = cfg!(smol_slice_atomic)
+    && Self::FITS_EXTERNAL
+    && !Self::COMPACT_EXTERNAL
+    && S::HANDLE_BYTES <= 128;
   pub(super) const INLINE_CAPACITY: usize = if S::USIZE == 0 {
     0
   } else if size_of::<T>() == 0 {
