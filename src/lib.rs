@@ -12,12 +12,16 @@ extern crate std;
 
 mod layout;
 mod slice;
+#[cfg(all(feature = "experimental-thin", smol_slice_atomic))]
+mod thin;
 use core::ops::{Bound, Range, RangeBounds};
 use layout::Layout;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use layout::local::{LocalSlice, LocalSliceN};
 pub use layout::mutable::WritableSize;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
+#[cfg(all(feature = "experimental-thin", smol_slice_atomic))]
+pub use thin::ThinSlice;
 pub use typenum;
 #[cfg(target_pointer_width = "32")]
 use typenum::U16 as DefaultSize;

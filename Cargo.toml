@@ -18,6 +18,8 @@ exclude = ["/.github/", "/ci/", "/.codecov.yml", "/deny.toml"]
 default = ["std"]
 std = []
 alloc = []
+# The prototype also needs std or alloc and a shared ownership backend.
+experimental-thin = []
 # Shared ownership on targets without native pointer-width compare-and-swap.
 extra-platforms = ["alloc", "dep:portable-atomic", "dep:portable-atomic-util"]
 
@@ -56,6 +58,17 @@ harness = false
 path = "benches/budgets.rs"
 name = "budgets"
 harness = false
+
+[[bench]]
+path = "benches/thin.rs"
+name = "thin"
+harness = false
+required-features = ["experimental-thin"]
+
+[[example]]
+path = "examples/thin_allocations.rs"
+name = "thin_allocations"
+required-features = ["experimental-thin"]
 
 [profile.bench]
 opt-level = 3
