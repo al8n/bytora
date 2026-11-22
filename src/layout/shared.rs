@@ -63,12 +63,11 @@ impl<T, S: InlineSize> Layout<T, S> {
     assert!(vector::AVAILABLE && size_of::<T>() != 0);
     let len = values.len();
     let capacity = values.capacity();
-    let spare = capacity - len;
     // A Vec with one spare element (for example just after a pop) cannot
     // embed a header if an entire element is smaller than that header.
-    let (data, owner) = if size_of::<T>() < size_of::<vector::Vector<T>>() && spare == 1 {
+    let (data, owner) = if size_of::<T>() < size_of::<vector::Vector<T>>() && capacity == len + 1 {
       vector::box_vec(values)
-    } else if spare == 0 {
+    } else if capacity == len {
       if len == 0 {
         return Self::empty_inline();
       }
@@ -169,32 +168,41 @@ impl<T, S: InlineSize> Layout<T, S> {
     front: usize,
     back: usize,
   ) -> *const () {
-    let owner = if vector::AVAILABLE && self.uses_external_owner() {
-      let slot = self.owner_slot();
-      let owner = slot
-        .load(core::sync::atomic::Ordering::Acquire)
-        .cast_const();
-      // SAFETY: The borrowed source pins its immutable window. A full marker
-      // carries the allocation's original length and capacity. Publication
-      // retains the peer even if another borrower wins the race.
-      unsafe {
-        if let Some(full_len) = vector::full_len(owner) {
-          return vector::publish(
-            slot,
-            owner,
-            vector::Vector::<T>::new(data.cast(), full_len, full_len, 2),
-          );
-        }
-        if vector::raw(owner) {
-          return vector::promote::<T>(slot, owner, data, len);
-        }
-      }
-      owner
-    } else {
-      self.owner()
-    };
-    // SAFETY: The source holds a live reference for this owner.
+    // SAFETY: The source pins this acquired owner and the caller supplies its window.
+    unsafe { self.retain_loaded_owner(self.owner(), data, len, front, back) }
+  }
+
+  /// # Safety
+  ///
+  /// `owner` must come from this live external descriptor, with an acquire
+  /// load if its slot can be promoted. `data` and `len` must be the source's
+  /// data word and visible length. The ends omitted by `front` and `back`
+  /// must fit together within that window.
+  #[cfg(smol_slice_atomic)]
+  #[inline]
+  unsafe fn retain_loaded_owner(
+    &self,
+    owner: *const (),
+    data: *const (),
+    len: usize,
+    front: usize,
+    back: usize,
+  ) -> *const () {
+    // SAFETY: The borrowed source pins its immutable window. A raw marker can
+    // occur only in its atomic owner slot. The full marker carries the original
+    // length and capacity. Publication retains the peer even if another
+    // borrower wins the race.
     unsafe {
+      if let Some(full_len) = vector::full_len(owner) {
+        return vector::publish(
+          self.owner_slot(),
+          owner,
+          vector::Vector::<T>::new(data.cast(), full_len, full_len, 2),
+        );
+      }
+      if vector::raw(owner) {
+        return vector::promote::<T>(self.owner_slot(), owner, data, len);
+      }
       if owner::retain_direct::<T>(owner) {
         return owner;
       }
@@ -803,6 +811,28 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
     let data = self.subwindow_data(range.start);
     let kind = self.layout.tag;
+    #[cfg(smol_slice_atomic)]
+    if S::HANDLE_BYTES == 4 * size_of::<usize>() && vector::AVAILABLE && size_of::<T>() != 0 {
+      let owner = if self.layout.uses_external_owner() {
+        let owner = self
+          .layout
+          .owner_slot()
+          .load(core::sync::atomic::Ordering::Acquire);
+        if owner.addr() & 0b11 != 0 {
+          // SAFETY: The acquire observes this window's raw or tagged owner.
+          return unsafe { self.slice_tagged_owner(owner, range, len) };
+        }
+        // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
+        unsafe { vector::Vector::<T>::retain(owner) };
+        owner.cast_const()
+      } else {
+        // Among four-word external descriptors, only compact static has this tag.
+        STATIC_OWNER
+      };
+      return Self {
+        layout: Layout::external(data, owner, range.end - range.start, kind),
+      };
+    }
     // SAFETY: The original data word and visible length belong to this source.
     // The checked range gives the number of elements omitted at each end.
     let owner = unsafe {
@@ -819,6 +849,33 @@ impl<T, S: InlineSize> Slice<T, S> {
     };
     let layout = Layout::external(data, owner, range.end - range.start, kind);
     Self { layout }
+  }
+
+  /// # Safety
+  ///
+  /// The source must be a four-word descriptor tagged `EXTERNAL` for non-ZSTs.
+  /// Its promotable slot must have yielded `owner` with an acquire load and
+  /// at least one of the two low bits set. `len` is the source's visible
+  /// length and `range` must be an ordered subrange of it.
+  #[cfg(smol_slice_atomic)]
+  #[inline(never)]
+  unsafe fn slice_tagged_owner(&self, owner: *const (), range: Range<usize>, len: usize) -> Self {
+    let data = self.layout.data();
+    // SAFETY: The caller acquired this owner from the source's four-word
+    // descriptor and checked both endpoints. Its elements have nonzero size.
+    let owner = unsafe {
+      self
+        .layout
+        .retain_loaded_owner(owner, data, len, range.start, len - range.end)
+    };
+    Self {
+      layout: Layout::external(
+        data.cast::<T>().wrapping_add(range.start),
+        owner,
+        range.end - range.start,
+        NonZeroU8::new(EXTERNAL).unwrap(),
+      ),
+    }
   }
 
   #[track_caller]
