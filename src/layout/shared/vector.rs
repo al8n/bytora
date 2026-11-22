@@ -10,23 +10,41 @@ pub(super) use portable_atomic::AtomicPtr;
 use portable_atomic::AtomicUsize;
 use std::{boxed::Box, vec::Vec};
 
-// On targets with raw descriptors, direct Vec headers end in 00, tagged managed
-// pointers and the static sentinel end in 01, and raw geometry ends in 11.
-// The data pointer stays unmodified, including for an odd-address allocation.
-const TAG: usize = 3;
-pub(super) const EXACT: *const () = ptr::without_provenance(TAG);
+// The low two owner bits distinguish real Vec headers (00), static or managed
+// owners and Arc geometry (01), a full raw Vec (10), and raw Vec geometry (11).
+// The data pointer stays unmodified, including for odd-address allocations.
+const TAG_MASK: usize = 0b11;
+const RAW_BIT: usize = 0b10;
+const GEOMETRY_TAG: usize = RAW_BIT | 1;
+const NO_HIDDEN_ELEMENTS: *const () = ptr::without_provenance(GEOMETRY_TAG);
 const BITS: u32 = (usize::BITS - 2) / 2;
 const MASK: usize = (1 << BITS) - 1;
 
-// Some 32-bit ABIs align pointers and handles to two bytes, while their
-// atomic pointers require four. Their owner slot must be immutable.
+// Every real Vector<T> contains a pointer, including headers placed in spare
+// capacity. Four-byte pointer alignment leaves both low bits free. On some
+// 32-bit ABIs the handle also provides less alignment than atomic pointers need.
 pub(super) const AVAILABLE: bool = align_of::<*const ()>() >= 4
   && align_of::<usize>() >= align_of::<AtomicPtr<()>>()
   && size_of::<*mut ()>() == size_of::<AtomicPtr<()>>()
   && size_of::<*mut ()>() % align_of::<AtomicPtr<()>>() == 0;
 
+// An exact-capacity vector has no hidden elements at adoption. Caching its
+// length in the owner word lets consumption recover both raw parts from aligned
+// pointer slots. Larger lengths still fit the ordinary zero-prefix/suffix form.
+pub(super) fn full_owner(len: usize) -> *const () {
+  if len <= usize::MAX >> 2 {
+    ptr::without_provenance((len << 2) | RAW_BIT)
+  } else {
+    NO_HIDDEN_ELEMENTS
+  }
+}
+
+pub(super) fn full_len(owner: *const ()) -> Option<usize> {
+  (AVAILABLE && owner.addr() & TAG_MASK == RAW_BIT).then_some(owner.addr() >> 2)
+}
+
 pub(super) fn raw(owner: *const ()) -> bool {
-  AVAILABLE && owner.addr() & TAG == TAG
+  AVAILABLE && owner.addr() & RAW_BIT != 0
 }
 
 fn encode(prefix: usize, suffix: usize) -> Option<*const ()> {
@@ -34,10 +52,14 @@ fn encode(prefix: usize, suffix: usize) -> Option<*const ()> {
     return None;
   }
   let counts = prefix | (suffix << BITS);
-  Some(ptr::without_provenance((counts << 2) | TAG))
+  Some(ptr::without_provenance((counts << 2) | GEOMETRY_TAG))
 }
 
 fn counts(owner: *const ()) -> (usize, usize) {
+  if full_len(owner).is_some() {
+    // The first trim switches from a cached full length to hidden-end counts.
+    return (0, 0);
+  }
   let fields = owner.addr() >> 2;
   (fields & MASK, fields >> BITS)
 }
@@ -75,6 +97,9 @@ pub(super) fn from_vec<T>(mut values: Vec<T>) -> *const () {
 }
 
 pub(super) fn narrow(owner: *const (), front: usize, back: usize) -> Option<*const ()> {
+  if front == 0 && back == 0 {
+    return Some(owner);
+  }
   let (prefix, suffix) = counts(owner);
   // Both additions are bounded by the original vector's initialized length.
   encode(prefix + front, suffix + back)
@@ -100,7 +125,7 @@ impl<T> Vector<T> {
   }
 
   fn parts(owner: *const (), data: *const (), len: usize, strong: usize) -> Self {
-    if owner == EXACT {
+    if owner == NO_HIDDEN_ELEMENTS || full_len(owner).is_some() {
       return Self::new(data.cast(), len, len, strong);
     }
     let (prefix, suffix) = counts(owner);
@@ -226,6 +251,29 @@ mod tests {
   use crate::Slice;
 
   #[test]
+  fn full_length_markers_respect_the_encoding_and_alignment_limits() {
+    let limit = usize::MAX >> 2;
+    for len in [0, 1, limit - 1, limit, limit + 1, isize::MAX as usize] {
+      let owner = full_owner(len);
+      assert_eq!(raw(owner), AVAILABLE);
+      assert_eq!(full_len(owner), (AVAILABLE && len <= limit).then_some(len));
+      if len > limit {
+        assert_eq!(owner, NO_HIDDEN_ELEMENTS);
+      }
+      if AVAILABLE {
+        assert_eq!(counts(owner), (0, 0));
+        let front = len.min(MASK);
+        let back = (len - front).min(MASK);
+        assert_eq!(counts(narrow(owner, front, back).unwrap()), (front, back));
+      }
+    }
+    let header = Vector::<u8>::new(core::ptr::null(), 0, 0, 1);
+    let owner = core::ptr::from_ref(&header).cast();
+    assert!(!raw(owner));
+    assert_eq!(full_len(owner), None);
+  }
+
+  #[test]
   fn geometry_leaves_an_odd_data_pointer_untagged() {
     #[repr(align(2))]
     struct Bytes([u8; 8]);
@@ -279,7 +327,7 @@ mod tests {
 
   #[test]
   fn raw_geometry_uses_both_fields_and_rejects_overflow() {
-    let full = narrow(EXACT, MASK, MASK).unwrap();
+    let full = narrow(NO_HIDDEN_ELEMENTS, MASK, MASK).unwrap();
     assert_eq!(counts(full), (MASK, MASK));
     assert!(narrow(full, 1, 0).is_none());
     assert!(narrow(full, 0, 1).is_none());

@@ -199,6 +199,47 @@ fn unshared_vec_preserves_all_raw_parts_across_window_edits() {
 }
 
 #[test]
+fn exact_vectors_recover_their_allocation_before_and_after_trimming_or_promotion() {
+  fn check<S: InlineSize>() {
+    for (trim, share) in [(false, false), (false, true), (true, false), (true, true)] {
+      let values = Vec::from(*b"abcdef");
+      let (base, capacity) = (values.as_ptr(), values.capacity());
+      assert_eq!(capacity, values.len());
+      let mut source = Slice::<_, S>::try_from_shared_vec(values).unwrap();
+      let owner = source.layout.owner();
+      assert_eq!(
+        vector::full_len(owner),
+        vector::AVAILABLE.then_some(capacity)
+      );
+      source.advance(0);
+      source.truncate(source.len());
+      assert_eq!(source.layout.owner(), owner);
+      if trim {
+        source.advance(1);
+        source.truncate(3);
+        assert_eq!(vector::full_len(source.layout.owner()), None);
+      }
+      if share {
+        let peer = source.clone();
+        assert!(!vector::raw(source.layout.owner()));
+        source = source.try_into_vec().unwrap_err();
+        assert_eq!(source.as_slice(), peer.as_slice());
+        drop(peer);
+      }
+      let values = source.try_into_vec().ok().unwrap();
+      assert_eq!((values.as_ptr(), values.capacity()), (base, capacity));
+      assert_eq!(
+        values.as_slice(),
+        if trim { &b"bcd"[..] } else { &b"abcdef"[..] }
+      );
+    }
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U32>();
+}
+
+#[test]
 fn whole_vec_round_trip_preserves_even_an_empty_allocation() {
   for (len, capacity) in [(0, 0), (0, 1), (0, 32), (4, 4), (4, 5), (4, 32)] {
     let mut original = Vec::with_capacity(capacity);

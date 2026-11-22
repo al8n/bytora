@@ -314,37 +314,57 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[inline]
   pub fn try_into_vec(self) -> Result<Vec<T>, Self> {
+    let mut this = ManuallyDrop::new(self);
     #[cfg(smol_slice_atomic)]
-    if self.layout.uses_external_owner() {
-      // SAFETY: Consuming the handle precludes concurrent promotion through
-      // this slot. The external tag guarantees an initialized owner field.
-      let owner = unsafe { (*self.layout.external_ptr()).owner };
-      let data = self.layout.data();
-      let len = self.layout.external_len();
-      core::mem::forget(self);
-      if vector::AVAILABLE && owner == vector::EXACT {
-        // SAFETY: EXACT is an unpromoted Vec without hidden elements or spare
-        // capacity. Its descriptor therefore holds the original raw parts.
-        return Ok(unsafe { Vec::from_raw_parts(data.cast_mut().cast(), len, len) });
-      }
-      // SAFETY: Only a failed take leaves the reference in the caller's
-      // ownership. On success or unwind the callback owns its destruction.
-      if let Some(values) = unsafe { Self::take_external_vec(owner, data, len) } {
-        return Ok(values);
-      }
-      return Err(Self {
-        layout: Layout::external(
-          data.cast(),
-          owner,
-          len,
-          Layout::<T, S>::external_kind(owner),
-        ),
-      });
-    }
-    if self.layout.is_inline() {
-      Ok(self.take_inline_vec())
+    let full_len = if vector::AVAILABLE && this.layout.uses_external_owner() {
+      // SAFETY: The consuming handle has exclusive access to its owner slot.
+      vector::full_len(unsafe { (*this.layout.external_ptr()).owner })
     } else {
-      Err(self)
+      None
+    };
+    #[cfg(not(smol_slice_atomic))]
+    let full_len = None;
+    let (data, len, capacity) = if let Some(len) = full_len {
+      (this.layout.data().cast_mut().cast(), len, len)
+    } else {
+      // SAFETY: Only failure below reads the original handle again. On success
+      // or unwind the ManuallyDrop suppresses its destructor.
+      let Some(values) = (unsafe { Self::take_backing_vec(&mut this) }) else {
+        return Err(ManuallyDrop::into_inner(this));
+      };
+      let mut values = ManuallyDrop::new(values);
+      (values.as_mut_ptr(), values.len(), values.capacity())
+    };
+    // SAFETY: A full raw marker carries the original length and has matching
+    // capacity. For other backings the recovered vector supplies all three parts.
+    Ok(unsafe { Vec::from_raw_parts(data, len, capacity) })
+  }
+
+  /// # Safety
+  ///
+  /// The caller must own a live descriptor and may use it again only after `None`.
+  /// Success transfers ownership and unwinding may already have dropped elements.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(never)]
+  unsafe fn take_backing_vec(this: &mut ManuallyDrop<Self>) -> Option<Vec<T>> {
+    #[cfg(smol_slice_atomic)]
+    if this.layout.uses_external_owner() {
+      let owner = this.layout.external_prefix_mut().owner;
+      let (data, len) = (this.layout.data(), this.layout.external_len());
+      if owner.addr() & 1 == 0 && !vector::raw(owner) {
+        // SAFETY: Even non-raw owners are real vector headers, and the
+        // caller suppresses this handle's destructor on success or unwind.
+        return unsafe { owner::direct_into_vec(owner, data, len) };
+      }
+      // SAFETY: The caller suppressed Drop. The callback owns a successful take
+      // or unwind, while a failed take leaves the original reference untouched.
+      return unsafe { Self::take_external(owner, data, len, |ops| ops.into_vec) };
+    }
+    if this.layout.is_inline() {
+      // SAFETY: The caller has suppressed Drop and forgets this slot on success.
+      Some(unsafe { ManuallyDrop::take(this) }.take_inline_vec())
+    } else {
+      None
     }
   }
 
@@ -352,13 +372,6 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline(never)]
   fn take_inline_vec(self) -> Vec<T> {
     self.into_inline_mut().into_vec()
-  }
-
-  #[cfg(smol_slice_atomic)]
-  #[inline(never)]
-  unsafe fn take_external_vec(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
-    // SAFETY: The caller restores ownership only when the callback returns None.
-    unsafe { Self::take_external(owner, data, len, |ops| ops.into_vec) }
   }
 
   /// Moves the current elements into a vector, cloning the visible window
@@ -489,7 +502,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     let data = owner::initial_data(values.as_mut_ptr());
     let owner = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
       core::mem::forget(values);
-      vector::EXACT
+      vector::full_owner(len)
     } else {
       vector::from_vec(values)
     };
@@ -636,10 +649,10 @@ impl<T, S: InlineSize> Slice<T, S> {
       } else {
         self.layout.owner()
       };
-      // SAFETY: All even owners point to live vector headers. The acquire
-      // observes any promotion of a formerly raw descriptor.
+      // SAFETY: After excluding tagged owners and raw markers, only actual
+      // vector headers remain. Acquire observes any published promotion.
       unsafe {
-        if owner.addr() & 1 != 0 {
+        if owner.addr() & 1 != 0 || vector::raw(owner) {
           return self.clone_compact_tagged(owner);
         }
         vector::Vector::<T>::retain(owner);
@@ -664,25 +677,14 @@ impl<T, S: InlineSize> Slice<T, S> {
 
 #[cfg(smol_slice_atomic)]
 impl<T, S: InlineSize> Drop for Slice<T, S> {
-  #[inline]
+  #[inline(always)]
   fn drop(&mut self) {
     if self.layout.uses_external_owner() {
-      let owner = self.layout.external_prefix_mut().owner;
-      if vector::raw(owner) {
-        // SAFETY: Exclusive access confirms this descriptor never published a
-        // shared owner. Recover its entire buffer, including both hidden ends.
-        unsafe {
-          drop(vector::Vector::<T>::take_raw(
-            owner,
-            self.layout.data(),
-            self.len(),
-          ))
-        };
-        return;
-      }
-      // SAFETY: Each handle holds one reference to its original owner. Advancing
-      // changes only the window. Release exactly the reference held by this handle.
-      unsafe { owner::release_owner(owner, &self.layout) };
+      let prefix = *self.layout.external_prefix_mut();
+      let len = self.layout.external_len();
+      // SAFETY: This handle transfers the external owner reference and the
+      // window it describes. No concurrent promotion can access this slot.
+      unsafe { owner::release_owner::<T>(prefix.owner, prefix.data, len) };
     }
   }
 }

@@ -6,8 +6,8 @@ use portable_atomic_util::Arc;
 #[cfg(target_has_atomic = "ptr")]
 use std::sync::Arc;
 
-// Managed pointers end in 001, raw vectors end in 11, and actual vector
-// headers are even. Arc geometry is an integer marker, never a data pointer.
+// Arc geometry uses 101 and managed pointers use 001. Neither encoding can
+// alias a direct Vec header (even) or a raw Vec marker (10 or 11).
 const TAG: usize = 0b101;
 const BITS: u32 = (usize::BITS - 3) / 2;
 const MASK: usize = (1 << BITS) - 1;

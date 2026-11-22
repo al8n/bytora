@@ -1,5 +1,5 @@
 use super::vector::{self, Vector};
-use super::{Arc, Layout, STATIC_OWNER, arc};
+use super::{Arc, STATIC_OWNER, arc};
 use crate::{InlineSize, Slice, layout::mutable::Window};
 use core::{mem::ManuallyDrop, ops::Range};
 use std::vec::Vec;
@@ -128,8 +128,8 @@ pub(super) unsafe fn managed_operations<'a, T>(owner: *const ()) -> &'a StorageV
   unsafe { &**untag(owner).cast::<*const StorageVtable<T>>() }
 }
 
-// Retain a direct Vec reference without a dynamic call. Static references need
-// no retain. A false result leaves a tagged managed reference for its table.
+// The caller has excluded raw markers. Retain a direct Vec reference without
+// a dynamic call. Static references need no retain. Other owners use their table.
 #[inline]
 pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
   if owner.addr() & 1 != 0 {
@@ -141,14 +141,21 @@ pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
   true
 }
 
-#[inline]
-pub(super) unsafe fn release_owner<T, S: InlineSize>(owner: *const (), layout: &Layout<T, S>) {
+// Passing only the ownership and window fields keeps destruction independent
+// of the inline budget and lets consuming callers move their Vec directly.
+#[inline(never)]
+pub(super) unsafe fn release_owner<T>(owner: *const (), data: *const (), len: usize) {
+  if vector::raw(owner) {
+    // SAFETY: The consuming descriptor transfers its unpromoted allocation.
+    unsafe { drop(Vector::<T>::take_raw(owner, data, len)) };
+    return;
+  }
   if owner.addr() & 1 == 0 {
     // SAFETY: The untagged owner transfers a direct vector reference.
     unsafe { (StorageVtable::<T>::VECTOR.drop)(owner) };
   } else if arc::is_arc(owner) {
     // SAFETY: The caller transfers the reference held by this exact window.
-    unsafe { arc::release::<T>(owner, layout.data(), layout.external_len()) };
+    unsafe { arc::release::<T>(owner, data, len) };
   } else if owner != STATIC_OWNER {
     // SAFETY: The tagged managed owner transfers a reference to its own table.
     unsafe { (managed_operations::<T>(owner).drop)(owner) };
@@ -215,11 +222,30 @@ fn active_range<T>(original: &[T], data: *const T, len: usize) -> Range<usize> {
 
 unsafe fn vector_into_vec<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
   // SAFETY: This callback consumes the source's raw vector or its strong reference.
-  let mut original = unsafe { take_vector(owner, data, len) }?;
-  let range = active_range(&original, data.cast::<T>(), len);
-  original.truncate(range.end);
-  drop(original.drain(..range.start));
-  Some(original)
+  let original = unsafe { take_vector(owner, data, len) }?;
+  Some(visible_vec(original, data, len))
+}
+
+#[inline]
+pub(super) unsafe fn direct_into_vec<T>(
+  owner: *const (),
+  data: *const (),
+  len: usize,
+) -> Option<Vec<T>> {
+  // SAFETY: The caller transfers a strong reference to a real Vector<T> header.
+  let original = unsafe { Vector::<T>::try_take(owner) }?;
+  Some(visible_vec(original, data, len))
+}
+
+fn visible_vec<T>(mut original: Vec<T>, data: *const (), len: usize) -> Vec<T> {
+  // A window is contained in the original initialized interval. Equal lengths
+  // therefore exclude hidden elements at either end, including for ZSTs.
+  if original.len() != len {
+    let range = active_range(&original, data.cast::<T>(), len);
+    original.truncate(range.end);
+    drop(original.drain(..range.start));
+  }
+  original
 }
 
 unsafe fn take_vector<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
