@@ -3,9 +3,10 @@ use core::{hint::black_box, ptr};
 
 #[test]
 fn only_heap_capable_mutable_handles_need_drop_glue() {
-  assert!(!core::mem::needs_drop::<
-    SliceMutN<u8, { size_of::<usize>() }>,
-  >());
+  assert_eq!(
+    core::mem::needs_drop::<SliceMutN<u8, { size_of::<usize>() }>>(),
+    cfg!(smol_slice_owner_table)
+  );
   assert_eq!(
     core::mem::needs_drop::<SliceMutN<u8, 24>>(),
     cfg!(any(feature = "std", feature = "alloc"))

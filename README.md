@@ -190,6 +190,31 @@ elements up to `(1 << (usize::BITS / 2 - 1)) - 1` elements. This covers
 handles can copy fitting elements inline. An empty vector without an allocation
 and short vectors of zero-sized elements can also use inline storage.
 
+On 64-bit targets with native pointer atomics, an eight-byte handle can adopt
+an allocated vector of at most 1,048,575 elements, including its original
+pointer and arbitrary spare capacity. It stores a 23-bit index into a
+process-wide owner table and two 20-bit fields for the window start and length.
+Borrowed copies still fit seven bytes inline. The table shares its 8,388,608
+slots across all element types. Each independently owned vector or mutable
+heap window needs one slot. Clones and immutable subranges keep the same slot.
+The final owner releases its allocation and makes its slot available for reuse.
+Forced shared construction returns the original vector when the table is full
+or its length is oversized. A fitting `Copy` vector can still be copied inline
+by `try_from_vec` if all slots are reserved.
+
+The table has 32 shards. Each touched shard starts with 32 slots and grows in
+permanent pages of 32, 32, 64, 128 and successively doubled sizes, up to
+262,144 slots per shard. Each slot uses 32 bytes on the measured AArch64 target.
+With `std` on Unix, each live thread can cache up to 64 vacant slots. The
+65th return transfers 32 vacant slots to their originating shards. The thread
+links each batch before taking one lock per touched shard. The
+thread-local destructor returns these slots to the shards on platforms and exit
+paths that run it. Allocator-only and other targets, including Windows, use the
+shard free lists directly.
+The table keeps each shard's peak page allocation after the input vectors have
+been released. At full capacity it retains 256 MiB of slot metadata, plus the
+directory and the thread caches.
+
 For an exact-capacity vector, two-word adoption and unique conversion back
 into a vector need no additional allocation. The first share or in-place
 narrowing allocates a reference-counted owner. All subwindows share the
@@ -332,8 +357,13 @@ prefix, until they are reclaimed or that window is dropped.
 `SliceMut::new` starts empty with inline capacity for positive budgets and
 `Copy` elements; `U0` accepts any element type and starts without inline space.
 `reserve` and `with_capacity` may spill a handle of at least two machine words
-to a vector-backed window with `std` or `alloc`. A one-word handle, or any
-handle built without an allocator, remains bounded by its inline capacity.
+to a vector-backed window with `std` or `alloc`. A table-backed eight-byte handle
+can also spill and has drop glue. Its slot owns a boxed mutable window. Other
+one-word handles and handles built without an allocator have bounded inline capacity.
+A fallible mutable vector constructor returns its original vector when all slots
+are reserved. Spilling an inline buffer or splitting a heap window panics when
+the additional slot is unavailable. A unique immutable-to-mutable conversion
+and a successful freeze both reuse the current slot.
 `try_from_slice` only attempts inline storage; it does not spill.
 
 Mutable `split_off(at)` divides both the current elements and capacity, and
@@ -358,7 +388,9 @@ type for any budget. It preserves the allocation of a heap window and moves
 the elements of a nonempty inline window into shared storage when three
 words are available. A two-word heap window can also freeze a unique
 allocation if it owns a contiguous initialized prefix from the allocation base
-and the prefix fits the two-word vector limits. Its visible window can start
+and the prefix fits the two-word vector limits. An eight-byte table-backed heap
+window can freeze a unique initialized prefix of up to 1,048,575 elements.
+Its visible window can start
 anywhere in that prefix and retains its address. Unsupported windows,
 including those with live mutable siblings, are returned intact.
 `SliceMut::into_vec` reuses

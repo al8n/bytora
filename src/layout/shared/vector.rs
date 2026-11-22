@@ -215,7 +215,7 @@ impl<T> Vector<T> {
 
 #[cold]
 #[inline(never)]
-extern "C" fn refcount_overflow() -> ! {
+pub(in crate::layout) extern "C" fn refcount_overflow() -> ! {
   #[cfg(feature = "std")]
   std::process::abort();
   // A panic cannot unwind across this ABI, including in alloc-only builds.

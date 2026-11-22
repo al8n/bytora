@@ -311,7 +311,7 @@ impl<T> Window<T> {
   // A complete initialized prefix can become a Vec without moving anything.
   // A former sibling may leave uninitialized slots before owned_start.
   #[cfg(smol_slice_atomic)]
-  pub(super) fn take_vec_prefix(
+  pub(in crate::layout) fn take_vec_prefix(
     &mut self,
     fits: impl FnOnce(usize) -> bool,
   ) -> Option<(Vec<T>, usize)> {

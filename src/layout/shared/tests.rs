@@ -103,7 +103,7 @@ fn one_word_recovery_moves_the_visible_inline_elements() {
       .unwrap()
   }
   let input: [u8; BYTES] = core::array::from_fn(|i| i as u8);
-  let full = Word::try_from_vec(input.to_vec()).unwrap();
+  let full = Word::try_from_slice(&input).unwrap();
   for start in 0..=BYTES {
     for end in start..=BYTES {
       let mut slot = Some(full.slice(start..end));
@@ -219,12 +219,21 @@ fn a_failed_four_word_take_retains_the_original_window_and_allocation() {
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
   type OneWord = SliceN<u8, { size_of::<usize>() }>;
   let short = vec![3u8; OneWord::INLINE_CAPACITY];
-  let inline = OneWord::try_from_vec(short).unwrap();
-  assert!(inline.layout.is_inline());
-  assert_eq!(inline.as_slice(), &[3; OneWord::INLINE_CAPACITY]);
+  let handle = OneWord::try_from_vec(short).unwrap();
+  assert_eq!(handle.layout.is_inline(), !cfg!(smol_slice_owner_table));
+  assert_eq!(handle.as_slice(), &[3; OneWord::INLINE_CAPACITY]);
   let input = vec![7u8; OneWord::INLINE_CAPACITY + 1];
   let (ptr, cap) = (input.as_ptr(), input.capacity());
-  let returned = OneWord::try_from_vec(input).err().unwrap();
+  let returned = match OneWord::try_from_vec(input) {
+    Ok(handle) => {
+      assert!(cfg!(smol_slice_owner_table));
+      handle.try_into_vec().ok().unwrap()
+    }
+    Err(original) => {
+      assert!(!cfg!(smol_slice_owner_table));
+      original
+    }
+  };
   assert_eq!(returned, [7; OneWord::INLINE_CAPACITY + 1]);
   assert_eq!((returned.as_ptr(), returned.capacity()), (ptr, cap));
 }

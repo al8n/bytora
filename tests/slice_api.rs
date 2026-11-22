@@ -209,8 +209,12 @@ fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
   let copy = Slice::<u8>::copy_from_slice(&source);
   assert_eq!(copy.as_slice(), &source);
   type OneWord = SliceN<u8, { size_of::<usize>() }>;
-  assert!(OneWord::try_copy_from_slice(&[9; 64]).is_none());
-  assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
+  if cfg!(smol_slice_owner_table) {
+    assert_eq!(OneWord::copy_from_slice(&[9; 64]).as_slice(), &[9; 64]);
+  } else {
+    assert!(OneWord::try_copy_from_slice(&[9; 64]).is_none());
+    assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
+  }
 }
 
 #[cfg(smol_slice_atomic)]

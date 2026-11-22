@@ -19,7 +19,7 @@ mod owner;
 #[cfg(smol_slice_atomic)]
 mod two_word;
 #[cfg(smol_slice_atomic)]
-mod vector;
+pub(super) mod vector;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 type HandleWord = core::mem::MaybeUninit<[u8; size_of::<usize>()]>;
@@ -246,7 +246,10 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   fn external_prefix_mut(&mut self) -> &mut ExternalPrefix {
-    assert!(!self.is_inline(), "expected external storage");
+    assert!(
+      Self::FITS_EXTERNAL && !self.is_inline(),
+      "expected pointer descriptor"
+    );
     // SAFETY: The external tag guarantees an initialized packed prefix. We
     // have exclusive access to this handle's descriptor, independent of its peers.
     unsafe { &mut *self.payload.as_mut_ptr().cast::<ExternalPrefix>() }
@@ -352,6 +355,10 @@ impl<T, S: InlineSize> Slice<T, S> {
     if self.layout.is_inline() {
       return true;
     }
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return self.layout.table_unique();
+    }
     #[cfg(smol_slice_atomic)]
     {
       if Layout::<T, S>::TWO_WORD_VEC {
@@ -399,6 +406,10 @@ impl<T, S: InlineSize> Slice<T, S> {
     if self.layout.is_inline() {
       return Ok(self.into_inline_mut());
     }
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return self.take_table_mut();
+    }
     #[cfg(smol_slice_atomic)]
     {
       if Layout::<T, S>::TWO_WORD_VEC {
@@ -437,6 +448,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline]
   pub fn try_into_vec(self) -> Result<Vec<T>, Self> {
     if S::HANDLE_BYTES == size_of::<usize>() {
+      #[cfg(smol_slice_owner_table)]
+      if !self.layout.is_inline() {
+        return self.take_table_vec();
+      }
       return Ok(self.take_one_word_vec());
     }
     #[cfg(smol_slice_atomic)]
@@ -630,7 +645,9 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// On targets with suitable pointer alignment, a two-word handle also
   /// keeps an allocated vector of non-zero-sized elements when the length fits
   /// in 31 bits on 64-bit targets or 15 bits on 32-bit targets. Other smaller
-  /// handles copy fitting elements inline.
+  /// handles copy fitting elements inline. On 64-bit targets with native
+  /// pointer atomics an eight-byte handle can adopt a vector with up to
+  /// 1,048,575 elements through a growable owner table.
   ///
   /// Returns the original vector if neither representation can hold it.
   /// The shared constructor requires `Send + Sync` because clones can share
@@ -642,6 +659,14 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Copy + Send + Sync,
   {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      if size_of::<T>() == 0 && values.len() <= Self::INLINE_CAPACITY {
+        return Self::try_from_slice(&values).ok_or(values);
+      }
+      return Self::from_table_vec::<true>(values)
+        .or_else(|values| Self::try_from_slice(&values).ok_or(values));
+    }
     if Layout::<T, S>::fits_two_word_vec(0) {
       if !Layout::<T, S>::fits_two_word_vec(values.len()) {
         // An unrepresentable non-ZST vector cannot fit inline in two words either.
@@ -689,7 +714,9 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Send + Sync,
   {
-    if (!Layout::<T, S>::FITS_EXTERNAL && !Layout::<T, S>::fits_two_word_vec(values.len()))
+    if (!Layout::<T, S>::FITS_EXTERNAL
+      && !Layout::<T, S>::fits_two_word_vec(values.len())
+      && !Layout::<T, S>::fits_table_vec(values.len()))
       || values.len() > isize::MAX as usize
     {
       return Err(values);
@@ -712,7 +739,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// of non-zero-sized elements with a length up to 2,147,483,647 on 64-bit
   /// targets or 32,767 on 32-bit targets. The first share or window adjustment
   /// of a two-word exact-capacity vector allocates its owner. Returns the
-  /// original vector if its backing cannot be represented.
+  /// original vector if its backing cannot be represented. On a 64-bit target
+  /// with native pointer atomics, eight-byte handles share a process-wide
+  /// table of up to 8,388,608 slots and accept up to 1,048,575 elements.
+  /// The table retains its allocated pages for reuse.
   #[cfg(smol_slice_atomic)]
   #[inline]
   pub fn try_from_shared_vec(values: Vec<T>) -> Result<Self, Vec<T>>
@@ -720,6 +750,10 @@ impl<T, S: InlineSize> Slice<T, S> {
     T: Send + Sync,
   {
     const { assert!(align_of::<vector::Vector<T>>() >= 2) };
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return Self::from_table_vec::<false>(values);
+    }
     let len = values.len();
     if Layout::<T, S>::fits_two_word_vec(len) {
       return Ok(Self {
@@ -766,6 +800,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn shared_slice(&self) -> &[T] {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return self.layout.table_slice();
+    }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return self.layout.two_word_slice();
@@ -803,6 +841,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) unsafe fn slice_shared(&self, range: Range<usize>, len: usize) -> Self {
     debug_assert!(!self.layout.is_inline() && len == self.len());
     debug_assert!(range.start <= range.end && range.end <= len);
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return Self {
+        layout: self.layout.share_table(range),
+      };
+    }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return Self {
@@ -882,6 +926,11 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn advance_shared(&mut self, count: usize) {
     let len = self.len();
     assert!(count <= len, "advance past end");
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      self.layout.keep_table(count..len);
+      return;
+    }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       if count != 0 {
@@ -899,6 +948,11 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   pub(crate) fn truncate_shared(&mut self, len: usize) {
     debug_assert!(len <= self.len());
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      self.layout.keep_table(0..len);
+      return;
+    }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       self.layout.keep_two_word(0..len);
@@ -1037,6 +1091,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn clone_shared(&self) -> Self {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return Self {
+        layout: self.layout.share_table(0..self.len()),
+      };
+    }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return Self {
@@ -1061,6 +1121,12 @@ impl<T, S: InlineSize> Slice<T, S> {
 impl<T, S: InlineSize> Drop for Slice<T, S> {
   #[inline(always)]
   fn drop(&mut self) {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC && !self.layout.is_inline() {
+      // SAFETY: the typed handle transfers its single table reference.
+      unsafe { self.layout.drop_table() };
+      return;
+    }
     if self.layout.is_two_word_vec() {
       // SAFETY: Dropping this descriptor transfers its sole reference.
       unsafe { self.layout.drop_two_word() };

@@ -19,6 +19,7 @@ fn typenum(bytes: usize) -> String {
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
   println!("cargo:rustc-check-cfg=cfg(smol_slice_atomic)");
+  println!("cargo:rustc-check-cfg=cfg(smol_slice_owner_table)");
   let alloc =
     env::var_os("CARGO_FEATURE_STD").is_some() || env::var_os("CARGO_FEATURE_ALLOC").is_some();
   let native_cas = env::var("CARGO_CFG_TARGET_HAS_ATOMIC")
@@ -34,6 +35,9 @@ fn main() {
     Ok("64") => 8,
     other => panic!("unsupported target pointer width: {other:?}"),
   };
+  if alloc && native_cas && word == 8 {
+    println!("cargo:rustc-cfg=smol_slice_owner_table");
+  }
   let mut sizes = format!(
     "/// The largest supported total handle size, in bytes.\n\
      pub const MAX_HANDLE_BYTES: usize = {MAX_HANDLE_BYTES};\n"

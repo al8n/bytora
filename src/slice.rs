@@ -171,6 +171,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
     if values.len() > isize::MAX as usize
       || (S::HANDLE_BYTES < 3 * mem::size_of::<usize>()
+        && !Layout::<T, S>::fits_table_vec(values.len())
         && !Layout::<T, S>::fits_two_word_vec(values.len()))
     {
       return None;

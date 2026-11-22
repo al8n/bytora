@@ -17,7 +17,7 @@ mod window;
 pub(crate) use window::Window;
 
 // The pointer occupies a whole, aligned word in the payload. Its provenance
-// never overlaps the tag. The one-word handle therefore stays inline-only.
+// never overlaps the tag. A table-backed one-word handle stores its index here.
 #[cfg(any(feature = "std", feature = "alloc"))]
 const HEAP: NonZeroU8 = NonZeroU8::MAX;
 // An empty immutable handle can exist for arbitrary T, including types that
@@ -26,7 +26,7 @@ const EMPTY_WITHOUT_COPY: NonZeroU8 = NonZeroU8::new(0xfe).unwrap();
 
 #[repr(transparent)]
 pub struct Mutable<T, S, B> {
-  storage: B,
+  pub(super) storage: B,
   marker: PhantomData<(T, S)>,
 }
 
@@ -79,9 +79,9 @@ impl<T, S: InlineSize> Drop for Spill<T, S> {
 
 #[cfg(not(any(feature = "std", feature = "alloc")))]
 pub type Spill<T, S> = Layout<T, S>;
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(smol_slice_owner_table)))]
 pub type EightBytes<T, S> = Layout<T, S>;
-#[cfg(target_pointer_width = "32")]
+#[cfg(any(target_pointer_width = "32", smol_slice_owner_table))]
 pub type EightBytes<T, S> = Spill<T, S>;
 
 // Seal the element parameter too: Rust's orphan rules would otherwise allow
@@ -124,11 +124,16 @@ impl<T, S: InlineSize + writable::Sealed<T>> WritableSize<T> for S {}
 
 impl<T, S: InlineSize> Layout<T, S> {
   #[cfg(any(feature = "std", feature = "alloc"))]
-  const FITS_WINDOW: bool = Self::PAYLOAD_BYTES >= size_of::<NonNull<Window<T>>>();
+  const FITS_WINDOW: bool =
+    Self::TABLE_VEC || Self::PAYLOAD_BYTES >= size_of::<NonNull<Window<T>>>();
 
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn window_ptr(&self) -> Option<NonNull<Window<T>>> {
     if Self::FITS_WINDOW && self.tag == HEAP {
+      #[cfg(smol_slice_owner_table)]
+      if Self::TABLE_VEC {
+        return Some(self.table_box_ptr());
+      }
       // SAFETY: The heap tag is written only with a full Box pointer. Layout's
       // payload starts at the word-aligned handle address.
       Some(unsafe { self.payload.as_ptr().cast::<NonNull<Window<T>>>().read() })
@@ -139,6 +144,10 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn take_window(&mut self) -> Option<Box<Window<T>>> {
+    #[cfg(smol_slice_owner_table)]
+    if Self::TABLE_VEC && self.tag == HEAP {
+      return Some(self.take_table_box());
+    }
     let ptr = self.window_ptr()?;
     *self = Self::empty_inline();
     // SAFETY: The cleared descriptor was the sole owner of this Box.
@@ -195,7 +204,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
     }
   }
 
-  fn wrap(layout: Layout<T, S>) -> Self {
+  pub(super) fn wrap(layout: Layout<T, S>) -> Self {
     Self {
       storage: S::Mutable::wrap(layout),
       marker: PhantomData,
@@ -224,6 +233,10 @@ impl<T, S: InlineSize> SliceMut<T, S> {
 
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn from_window_with(make_window: impl FnOnce() -> Window<T>) -> Self {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return Self::from_table_window(make_window);
+    }
     assert!(Layout::<T, S>::FITS_WINDOW);
     let mut layout = Layout::<T, S>::empty_inline();
     // Allocate the descriptor before the closure partitions a borrowed source
@@ -253,7 +266,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   }
 
   #[cfg(any(feature = "std", feature = "alloc"))]
-  fn window_mut(&mut self) -> Option<&mut Window<T>> {
+  pub(super) fn window_mut(&mut self) -> Option<&mut Window<T>> {
     let mut ptr = self.storage.layout().window_ptr()?;
     // SAFETY: This descriptor exclusively owns its boxed window.
     Some(unsafe { ptr.as_mut() })
@@ -286,7 +299,8 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// # Panics
   ///
   /// Panics if the requested capacity cannot be represented. Without an
-  /// allocator, or with a one-word budget, only the inline capacity is available.
+  /// allocator only the inline capacity is available. One-word budgets can
+  /// grow when the 64-bit owner table is available.
   #[track_caller]
   pub fn with_capacity(capacity: usize) -> Self
   where
@@ -438,7 +452,8 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics on capacity overflow, or when a bounded buffer cannot fit the request.
+  /// Panics on capacity overflow, when a bounded buffer cannot fit the request,
+  /// or when a one-word inline buffer needs to spill and all owner slots are reserved.
   #[track_caller]
   pub fn reserve(&mut self, additional: usize) {
     #[cfg(any(feature = "std", feature = "alloc"))]
@@ -539,7 +554,8 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `at` exceeds the current capacity.
+  /// Panics if `at` exceeds the current capacity, or an eight-byte heap
+  /// window needs a second owner slot and the table is full.
   #[must_use]
   #[track_caller]
   pub fn split_off(&mut self, at: usize) -> Self {
@@ -639,12 +655,17 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   }
 
   /// Takes a vector without moving its elements, including its spare capacity.
-  /// A one-word budget can represent only an empty, unallocated vector here.
+  /// A one-word budget uses a table slot on 64-bit targets with native pointer
+  /// atomics. Other one-word handles can take an empty, unallocated vector.
   /// An unrepresentable vector is returned intact.
   #[cfg(any(feature = "std", feature = "alloc"))]
   pub fn try_from_vec(values: Vec<T>) -> Result<Self, Vec<T>> {
     if values.capacity() == 0 {
       return Ok(Self::unproven_empty());
+    }
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return Self::try_from_table_vec(values);
     }
     if !Layout::<T, S>::FITS_WINDOW {
       return Err(values);
@@ -710,12 +731,18 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// handle when its byte budget or length cannot represent an external window.
   /// A two-word handle can freeze a unique heap allocation when its initialized
   /// elements begin at the allocation base and their count fits the two-word
-  /// vector descriptor. The visible window can start within that prefix.
+  /// vector descriptor. An eight-byte table-backed handle can freeze a
+  /// unique prefix of at most 1,048,575 elements under the same conditions.
+  /// The visible window can start within that prefix.
   #[cfg(smol_slice_atomic)]
   pub fn try_freeze_shared(mut self) -> Result<Slice<T, S>, Self>
   where
     T: Send + Sync,
   {
+    #[cfg(smol_slice_owner_table)]
+    if Layout::<T, S>::TABLE_VEC {
+      return self.freeze_table();
+    }
     if Layout::<T, S>::TWO_WORD_VEC {
       let Some((values, start)) = self
         .window_mut()

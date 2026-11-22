@@ -8,6 +8,8 @@ use core::{
 };
 use typenum::Unsigned;
 
+#[cfg(smol_slice_owner_table)]
+mod directory;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub(super) mod local;
 pub(super) mod mutable;
@@ -144,7 +146,9 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   assert!(size_of::<Option<Slice<u8, S>>>() == bytes);
   assert!(size_of::<SliceMut<u8, S>>() == bytes);
   assert!(size_of::<Option<SliceMut<u8, S>>>() == bytes);
-  if !cfg!(any(feature = "std", feature = "alloc")) || budget == size_of::<usize>() {
+  if !cfg!(any(feature = "std", feature = "alloc"))
+    || (budget == size_of::<usize>() && !Layout::<u8, S>::TABLE_VEC)
+  {
     assert!(!core::mem::needs_drop::<SliceMut<u8, S>>());
   }
 }
@@ -222,6 +226,11 @@ pub struct Layout<T, S: InlineSize> {
 
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
+  pub(crate) const TABLE_VEC: bool = cfg!(smol_slice_owner_table) && S::HANDLE_BYTES == 8;
+  #[cfg(smol_slice_atomic)]
+  pub(crate) const fn fits_table_vec(len: usize) -> bool {
+    Self::TABLE_VEC && len < (1 << 20)
+  }
   const TWO_WORD_VEC: bool = cfg!(smol_slice_atomic) && S::HANDLE_BYTES == 2 * size_of::<usize>();
   const FITS_EXTERNAL: bool = S::HANDLE_BYTES >= 3 * size_of::<usize>();
   const PACKED_LEN: bool = S::HANDLE_BYTES == 3 * size_of::<usize>();
@@ -283,6 +292,9 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   const fn inline_tag(tag: NonZeroU8) -> bool {
+    if Self::TABLE_VEC {
+      return tag.get() < EXTERNAL;
+    }
     if Self::TWO_WORD_VEC {
       // Tiny inline endpoints set bit 6. A sixteen-byte inline handle
       // has a one-byte endpoint in the range 1 through 15.
@@ -340,7 +352,10 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   const fn external_ptr(&self) -> *const ExternalPrefix {
-    assert!(!Self::inline_tag(self.tag), "expected external storage");
+    assert!(
+      Self::FITS_EXTERNAL && !Self::inline_tag(self.tag),
+      "expected pointer descriptor"
+    );
     self.payload.as_ptr().cast()
   }
 
@@ -355,6 +370,10 @@ impl<T, S: InlineSize> Layout<T, S> {
       let range = self.inline_range();
       return range.end - range.start;
     }
+    #[cfg(smol_slice_owner_table)]
+    if Self::TABLE_VEC {
+      return self.table_len();
+    }
     #[cfg(smol_slice_atomic)]
     if Self::TWO_WORD_VEC {
       return self.two_word_len();
@@ -364,7 +383,10 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   #[inline]
   const fn external_len(&self) -> usize {
-    assert!(!Self::inline_tag(self.tag), "expected external storage");
+    assert!(
+      Self::FITS_EXTERNAL && !Self::inline_tag(self.tag),
+      "expected pointer descriptor"
+    );
     // SAFETY: Every external constructor initializes this entire word. Its
     // address derives from the enclosing handle, as the packed form spans the
     // payload, cursor and tag. It is disjoint from the mutable owner slot.

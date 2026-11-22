@@ -185,7 +185,16 @@ mod tests {
     type Tiny<T> = SliceN<T, { size_of::<usize>() }>;
     let boxed = vec![3].into_boxed_slice();
     let base = boxed.as_ptr();
-    let returned = Tiny::try_from_boxed_slice(boxed).err().unwrap();
+    let returned = match Tiny::try_from_boxed_slice(boxed) {
+      Ok(handle) => {
+        assert!(cfg!(smol_slice_owner_table));
+        handle.try_into_vec().ok().unwrap().into_boxed_slice()
+      }
+      Err(boxed) => {
+        assert!(!cfg!(smol_slice_owner_table));
+        boxed
+      }
+    };
     assert_eq!(returned.as_ptr(), base);
     let arc = Arc::<[u32]>::from(returned);
     let returned = Tiny::try_from_arc(arc.clone()).err().unwrap();
