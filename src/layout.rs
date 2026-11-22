@@ -40,7 +40,7 @@ pub trait InlineSize: Unsigned + Debug + Repr {
   const HANDLE_BYTES: usize = handle_bytes(Self::USIZE);
 
   #[doc(hidden)]
-  type Mutable<T>: mutable::Storage<T>;
+  type Mutable<T>: mutable::Storage<T, Self>;
 }
 
 const fn handle_bytes(budget: usize) -> usize {
@@ -63,8 +63,14 @@ pub trait AssocInlineSize {
 // Stable Rust cannot subtract metadata from a generic array length. Select the
 // concrete arrays generated for the target and verify every supported size.
 macro_rules! size {
+  (4, $size:ty, $cursor:literal) => {
+    size!(4, $size, $cursor, Layout<T, $size>);
+  };
+  (8, $size:ty, $cursor:literal) => {
+    size!(8, $size, $cursor, mutable::EightBytes<T, $size>);
+  };
   ($bytes:literal, $size:ty, $cursor:literal) => {
-    size!($bytes, $size, $cursor, Layout<T, $size>);
+    size!($bytes, $size, $cursor, mutable::Spill<T, $size>);
   };
   ($bytes:literal, $size:ty, $cursor:literal, $mutable:ty) => {
     // SAFETY: Both fields are byte arrays. verify_size checks their lengths
@@ -83,7 +89,7 @@ macro_rules! size {
     const _: () = verify_size::<<[u8; $bytes] as AssocInlineSize>::Size>($bytes);
   };
 }
-size!(0, typenum::U0, 1, mutable::ZeroStorage<T>);
+size!(0, typenum::U0, 1, mutable::Spill<T, typenum::U0>);
 include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
 
 #[allow(
@@ -127,7 +133,7 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   assert!(size_of::<Option<Slice<u8, S>>>() == bytes);
   assert!(size_of::<SliceMut<u8, S>>() == bytes);
   assert!(size_of::<Option<SliceMut<u8, S>>>() == bytes);
-  if budget > 0 {
+  if !cfg!(any(feature = "std", feature = "alloc")) || budget == size_of::<usize>() {
     assert!(!core::mem::needs_drop::<SliceMut<u8, S>>());
   }
 }
@@ -144,6 +150,8 @@ const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
 
 // The two high length bytes live in the cursor and tag. Both pointers stay
 // typed when written to or read from the payload, including on big-endian targets.
+// Recoverable ZST owners use the data word for a provenance-free logical index
+// and supply the original aligned pointer themselves.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct ExternalPrefix {
@@ -178,6 +186,20 @@ impl<T, S: InlineSize> Layout<T, S> {
     Self::PAYLOAD_BYTES / size_of::<T>()
   };
 
+  pub(crate) const fn empty_inline() -> Self {
+    Self {
+      _align: [],
+      payload: MaybeUninit::uninit(),
+      cursor: S::ZERO_CURSOR,
+      tag: if size_of::<S::Cursor>() == 0 {
+        NonZeroU8::new(TINY_INLINE).unwrap()
+      } else {
+        NonZeroU8::MIN
+      },
+      _element: PhantomData,
+    }
+  }
+
   pub(super) fn try_inline(values: &[T]) -> Option<Self>
   where
     T: Copy,
@@ -203,16 +225,20 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   pub(super) fn is_inline(&self) -> bool {
+    Self::inline_tag(self.tag)
+  }
+
+  const fn inline_tag(tag: NonZeroU8) -> bool {
     let first_external = if Self::COMPACT_EXTERNAL {
       COMPACT_STATIC.get()
     } else {
       EXTERNAL
     };
-    !Self::FITS_EXTERNAL || self.tag.get() < first_external
+    !Self::FITS_EXTERNAL || tag.get() < first_external
   }
 
   // Inline and compact static descriptors can be copied without an owner.
-  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+  #[cfg(smol_slice_atomic)]
   fn uses_external_owner(&self) -> bool {
     Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
   }
@@ -220,7 +246,8 @@ impl<T, S: InlineSize> Layout<T, S> {
   pub(super) fn clone_inline(&self) -> Self {
     assert!(self.is_inline(), "expected inline storage");
     // SAFETY: self is a valid, aligned layout. The inline tag excludes an external
-    // owner. Only try_inline constructs inline layouts, and it requires T: Copy.
+    // owner. Nonempty immutable inline elements entered with a Copy proof;
+    // they cannot be replaced while immutable. Refreezing checks Copy again.
     // Reading the MaybeUninit payload as part of Self preserves both
     // pointer provenance and uninitialized bytes, including element padding.
     unsafe { ptr::read(self) }
@@ -241,21 +268,34 @@ impl<T, S: InlineSize> Layout<T, S> {
     layout
   }
 
-  fn external_prefix(&self) -> &ExternalPrefix {
-    assert!(!self.is_inline(), "expected external storage");
+  pub(super) fn truncate_inline(&mut self, len: usize) {
+    let current = self.inline_range();
+    if len < current.len() {
+      // Only the end moves, and it stays within the initialized window.
+      (self.cursor, self.tag) = Self::inline_cursor(current.start..current.start + len);
+    }
+  }
+
+  const fn external_prefix(&self) -> &ExternalPrefix {
+    assert!(!Self::inline_tag(self.tag), "expected external storage");
     // SAFETY: The external tag is set only on a layout containing this packed prefix.
     unsafe { &*self.payload.as_ptr().cast::<ExternalPrefix>() }
   }
 
-  pub(super) fn len(&self) -> usize {
-    if self.is_inline() {
-      return self.inline_range().len();
+  pub(super) const fn len(&self) -> usize {
+    if Self::inline_tag(self.tag) {
+      let range = self.inline_range();
+      return range.end - range.start;
     }
     let prefix = self.external_prefix();
     let mut bytes = [0; size_of::<usize>()];
-    bytes[..LEN_LOW_BYTES].copy_from_slice(&prefix.len_low);
-    bytes[LEN_LOW_BYTES] = self.cursor.as_ref()[0];
-    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag == COMPACT_STATIC {
+    let mut i = 0;
+    while i < LEN_LOW_BYTES {
+      bytes[i] = prefix.len_low[i];
+      i += 1;
+    }
+    bytes[LEN_LOW_BYTES] = self.cursor_bytes()[0];
+    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag.get() == COMPACT_STATIC.get() {
       0
     } else {
       self.tag.get() & !EXTERNAL
@@ -263,17 +303,24 @@ impl<T, S: InlineSize> Layout<T, S> {
     usize::from_le_bytes(bytes)
   }
 
-  fn inline_range(&self) -> Range<usize> {
+  const fn cursor_bytes(&self) -> &[u8] {
+    // SAFETY: Sealed Repr guarantees that Cursor is an initialized [u8; N].
+    // Borrow exactly its N bytes, including the zero-byte cursor of tiny layouts.
+    unsafe {
+      core::slice::from_raw_parts(ptr::from_ref(&self.cursor).cast(), size_of::<S::Cursor>())
+    }
+  }
+
+  const fn inline_range(&self) -> Range<usize> {
     let tag = self.tag.get();
-    assert!(self.is_inline(), "expected inline storage");
+    assert!(Self::inline_tag(self.tag), "expected inline storage");
     // Tiny tags contain both 3-bit cursors. Larger tags encode the high part
     // of end plus one, leaving zero for Option and the top bit for external.
-    match self.cursor.as_ref() {
-      [] => usize::from((tag >> 3) & 7)..usize::from(tag & 7),
-      [start] => usize::from(*start)..usize::from(tag - 1),
+    match self.cursor_bytes() {
+      [] => ((tag >> 3) & 7) as usize..(tag & 7) as usize,
+      [start] => *start as usize..(tag - 1) as usize,
       [lo, hi, end_low] => {
-        usize::from(u16::from_le_bytes([*lo, *hi]))
-          ..usize::from(u16::from_le_bytes([*end_low, tag - 1]))
+        u16::from_le_bytes([*lo, *hi]) as usize..u16::from_le_bytes([*end_low, tag - 1]) as usize
       }
       _ => unreachable!(),
     }
@@ -314,12 +361,6 @@ impl<T, S: InlineSize> Layout<T, S> {
     // SAFETY: window selects initialized elements (or an aligned empty slice) and
     // the shared payload borrow covers the lifetime of the returned slice.
     unsafe { &*Self::window(NonNull::from(&self.payload).cast(), self.inline_range()) }
-  }
-
-  pub(super) fn as_mut_slice(&mut self) -> &mut [T] {
-    let range = self.inline_range();
-    // SAFETY: The same window invariant applies, with exclusive payload access.
-    unsafe { &mut *Self::window(NonNull::from(&mut self.payload).cast(), range) }
   }
 
   #[track_caller]

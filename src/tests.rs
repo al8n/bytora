@@ -2,8 +2,14 @@ use super::{AssocInlineSize, MAX_HANDLE_BYTES, Slice, SliceMutN, SliceN};
 use core::{hint::black_box, ptr};
 
 #[test]
-fn mutable_inline_handles_need_no_drop_glue() {
-  assert!(!core::mem::needs_drop::<SliceMutN<u8, 24>>());
+fn only_heap_capable_mutable_handles_need_drop_glue() {
+  assert!(!core::mem::needs_drop::<
+    SliceMutN<u8, { size_of::<usize>() }>,
+  >());
+  assert_eq!(
+    core::mem::needs_drop::<SliceMutN<u8, 24>>(),
+    cfg!(any(feature = "std", feature = "alloc"))
+  );
 }
 
 #[test]

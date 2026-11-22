@@ -18,7 +18,10 @@ fn empty_mutable_zero_budget_has_three_words_and_accepts_any_alignment() {
   assert!(empty.is_empty());
   assert!(empty.as_mut_slice().as_mut_ptr().is_aligned());
   assert!(empty.as_slice().as_ptr().is_aligned());
-  assert!(!needs_drop::<SliceMut<String, U24>>());
+  assert_eq!(
+    needs_drop::<SliceMut<String, U24>>(),
+    cfg!(any(feature = "std", feature = "alloc"))
+  );
 
   fn send<T: Send>() {}
   fn sync<T: Sync>() {}
