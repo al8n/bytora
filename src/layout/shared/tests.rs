@@ -484,10 +484,13 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
     assert_eq!(drops.each_ref().map(|d| d.load(Relaxed)), [1; 10]);
   }
 
+  type ThreeWords = <[u8; 3 * size_of::<usize>()] as crate::AssocInlineSize>::Size;
   for spare in [0, 1, 8] {
+    exercise::<ThreeWords>(spare, true);
     exercise::<crate::DefaultSize>(spare, true);
     exercise::<typenum::U8192>(spare, true);
   }
+  exercise::<ThreeWords>(0, false);
   exercise::<crate::DefaultSize>(0, false);
   exercise::<typenum::U0>(0, false);
 }
@@ -813,25 +816,35 @@ fn unique_vector_extraction_preserves_allocation_and_drops_only_hidden_elements(
       self.0.fetch_add(1, Relaxed);
     }
   }
-  let drops = [const { AtomicUsize::new(0) }; 5];
-  let mut values = Vec::with_capacity(12);
-  values.extend(drops.iter().map(Count));
-  let (base, capacity) = (values.as_ptr(), values.capacity());
-  let original = SliceN::<_, 0>::try_from(values).ok().unwrap();
-  let middle = original.slice(1..4);
-  assert!(!middle.is_unique());
-  let middle = middle.try_into_mut().err().unwrap();
-  let middle = middle.try_into_vec().err().unwrap();
-  drop(original);
-  assert!(middle.is_unique());
-  let values = middle.try_into_vec().ok().unwrap();
-  assert_eq!(
-    (values.as_ptr(), values.len(), values.capacity()),
-    (base, 3, capacity)
-  );
-  assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1, 0, 0, 0, 1]);
-  drop(values);
-  assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1; 5]);
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: crate::AssocInlineSize,
+  {
+    let drops = [const { AtomicUsize::new(0) }; 5];
+    let mut values = Vec::with_capacity(12);
+    values.extend(drops.iter().map(Count));
+    let (base, capacity) = (values.as_ptr(), values.capacity());
+    let original = SliceN::<_, BYTES>::try_from_shared_vec(values)
+      .ok()
+      .unwrap();
+    let middle = original.slice(1..4);
+    assert_eq!(middle.as_slice().as_ptr(), base.wrapping_add(1));
+    assert!(!middle.is_unique());
+    let middle = middle.try_into_mut().err().unwrap();
+    let middle = middle.try_into_vec().err().unwrap();
+    drop(original);
+    assert!(middle.is_unique());
+    let values = middle.try_into_vec().ok().unwrap();
+    assert_eq!(
+      (values.as_ptr(), values.len(), values.capacity()),
+      (base, 3, capacity)
+    );
+    assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1, 0, 0, 0, 1]);
+    drop(values);
+    assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1; 5]);
+  }
+  check::<0>();
+  check::<{ 3 * size_of::<usize>() }>();
 }
 
 #[test]

@@ -63,9 +63,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     assert!(vector::AVAILABLE && size_of::<T>() != 0);
     let len = values.len();
     let capacity = values.capacity();
-    // A Vec with one spare element (for example just after a pop) cannot
-    // embed a header if an entire element is smaller than that header.
-    let (data, owner) = if size_of::<T>() < size_of::<vector::Vector<T>>() && capacity == len + 1 {
+    let (data, owner) = if vector::single_spare_needs_box(&values) {
       vector::box_vec(values)
     } else if capacity == len {
       if len == 0 {
@@ -437,7 +435,25 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline]
   pub fn try_into_vec(self) -> Result<Vec<T>, Self> {
     if S::HANDLE_BYTES == size_of::<usize>() {
-      return Ok(self.take_one_word_vec());
+      let capacity = Self::INLINE_CAPACITY;
+      if self.layout.tag.get() == super::TINY_INLINE | capacity as u8 {
+        let mut values = Vec::<T>::with_capacity(capacity);
+        // SAFETY: This initial cursor covers the entire inline payload. Copy
+        // exactly that many elements, including padding, to the fresh vector.
+        // Empty and zero-sized windows have no bytes to transfer.
+        unsafe {
+          if capacity != 0 && size_of::<T>() != 0 {
+            ptr::copy_nonoverlapping(
+              self.layout.payload.as_ptr().cast(),
+              values.as_mut_ptr(),
+              capacity,
+            );
+          }
+          values.set_len(capacity);
+        }
+        return Ok(values);
+      }
+      return Ok(self.take_one_word_box().into_vec());
     }
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
@@ -491,32 +507,20 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   #[cfg(any(feature = "std", feature = "alloc"))]
-  #[inline]
-  fn take_one_word_vec(self) -> Vec<T> {
+  #[inline(never)]
+  fn take_one_word_box(self) -> std::boxed::Box<[T]> {
     let range = self.layout.inline_range();
-    let copy = |start, len| {
-      let mut values = Vec::with_capacity(len);
-      // SAFETY: Each call below transfers exactly the initialized window to
-      // a fresh allocation. Nonempty, non-ZST inline payloads are T-aligned.
-      // Dropping an inline handle never visits the transferred elements.
-      unsafe {
-        if size_of::<T>() != 0 && len != 0 {
-          let base = self.layout.payload.as_ptr().cast::<T>();
-          ptr::copy_nonoverlapping(base.add(start), values.as_mut_ptr(), len);
-        }
-        values.set_len(len);
+    let len = range.len();
+    let mut values = std::boxed::Box::<[T]>::new_uninit_slice(len);
+    // SAFETY: The source is the initialized inline window and its entire
+    // non-ZST payload fits in seven bytes. The fresh allocation has room for
+    // len aligned elements. Dropping this inline handle never visits them.
+    unsafe {
+      if size_of::<T>() != 0 && len != 0 {
+        let src = self.layout.payload.as_ptr().cast::<T>().add(range.start);
+        super::copy_tiny(src.cast(), values.as_mut_ptr().cast(), len * size_of::<T>());
       }
-      values
-    };
-    // Full and single-element windows have a constant allocation and copy size.
-    let capacity = Self::INLINE_CAPACITY;
-    if range == (0..capacity) {
-      return copy(0, capacity);
-    }
-    match range.end - range.start {
-      0 => Vec::new(),
-      1 => copy(range.start, 1),
-      len => copy(range.start, len),
+      values.assume_init()
     }
   }
 
@@ -675,7 +679,12 @@ impl<T, S: InlineSize> Slice<T, S> {
         return Self::try_from_shared_vec(values);
       }
     }
-    Self::try_from_slice(&values).ok_or(values)
+    if values.len() > Self::INLINE_CAPACITY {
+      return Err(values);
+    }
+    Ok(Self {
+      layout: Layout::copy_inline(&values),
+    })
   }
 
   /// Takes ownership of a boxed slice without copying its elements, including
@@ -739,7 +748,9 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline(always)]
   fn adopt_vec(mut values: Vec<T>) -> Layout<T, S> {
     let len = values.len();
-    let (data, owner) = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
+    let (data, owner) = if vector::single_spare_needs_box(&values) {
+      vector::box_vec(values)
+    } else if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
       let data = values.as_mut_ptr();
       core::mem::forget(values);
       (data, vector::full_owner(len))
@@ -812,8 +823,11 @@ impl<T, S: InlineSize> Slice<T, S> {
     let data = self.subwindow_data(range.start);
     let kind = self.layout.tag;
     #[cfg(smol_slice_atomic)]
-    if S::HANDLE_BYTES == 4 * size_of::<usize>() && vector::AVAILABLE && size_of::<T>() != 0 {
-      let owner = if self.layout.uses_external_owner() {
+    if (Layout::<T, S>::PACKED_LEN || S::HANDLE_BYTES == 4 * size_of::<usize>())
+      && vector::AVAILABLE
+      && size_of::<T>() != 0
+    {
+      let (owner, kind) = if self.layout.uses_external_owner() {
         let owner = self
           .layout
           .owner_slot()
@@ -824,10 +838,10 @@ impl<T, S: InlineSize> Slice<T, S> {
         }
         // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
         unsafe { vector::Vector::<T>::retain(owner) };
-        owner.cast_const()
+        (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
       } else {
-        // Among four-word external descriptors, only compact static has this tag.
-        STATIC_OWNER
+        // A short static window has this tag in either descriptor size.
+        (STATIC_OWNER, COMPACT_STATIC)
       };
       return Self {
         layout: Layout::external(data, owner, range.end - range.start, kind),
@@ -853,7 +867,7 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   /// # Safety
   ///
-  /// The source must be a four-word descriptor tagged `EXTERNAL` for non-ZSTs.
+  /// The source must be a three- or four-word external descriptor for non-ZSTs.
   /// Its promotable slot must have yielded `owner` with an acquire load and
   /// at least one of the two low bits set. `len` is the source's visible
   /// length and `range` must be an ordered subrange of it.
@@ -861,7 +875,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline(never)]
   unsafe fn slice_tagged_owner(&self, owner: *const (), range: Range<usize>, len: usize) -> Self {
     let data = self.layout.data();
-    // SAFETY: The caller acquired this owner from the source's four-word
+    // SAFETY: The caller acquired this owner from the source's external
     // descriptor and checked both endpoints. Its elements have nonzero size.
     let owner = unsafe {
       self
@@ -873,7 +887,12 @@ impl<T, S: InlineSize> Slice<T, S> {
         data.cast::<T>().wrapping_add(range.start),
         owner,
         range.end - range.start,
-        NonZeroU8::new(EXTERNAL).unwrap(),
+        if Layout::<T, S>::PACKED_LEN {
+          // A long static window may now be short enough for its own tag.
+          Layout::<T, S>::external_kind(owner)
+        } else {
+          NonZeroU8::new(EXTERNAL).unwrap()
+        },
       ),
     }
   }

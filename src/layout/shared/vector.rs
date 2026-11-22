@@ -70,6 +70,12 @@ fn counts(owner: *const ()) -> (usize, usize) {
 // Its spare high bit distinguishes an embedded header at final release.
 const IN_TAIL: usize = 1 << (usize::BITS - 1);
 
+// One spare element cannot hold a header when the element itself is smaller.
+#[inline]
+pub(super) fn single_spare_needs_box<T>(values: &Vec<T>) -> bool {
+  size_of::<T>() < size_of::<Vector<T>>() && values.capacity() - values.len() == 1
+}
+
 #[inline(always)]
 pub(super) fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   let base = values.as_mut_ptr();

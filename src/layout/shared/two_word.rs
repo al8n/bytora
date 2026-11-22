@@ -43,6 +43,12 @@ fn raw_base<T>(state: *mut (), meta: usize) -> *mut T {
     .cast()
 }
 
+// Keep tail placement and header allocation out of the exact-capacity constructor.
+#[inline(never)]
+fn spare_vec_owner<T>(values: Vec<T>) -> *mut () {
+  vector::from_vec(values).1.cast_mut()
+}
+
 impl<T, S: InlineSize> Layout<T, S> {
   pub(crate) fn fits_two_word_vec(len: usize) -> bool {
     Self::TWO_WORD_VEC && vector::AVAILABLE && size_of::<T>() != 0 && len <= MAX_LEN
@@ -100,9 +106,11 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   pub(super) fn two_word_vec<const INLINE_EMPTY: bool>(mut values: Vec<T>) -> Self {
     let len = values.len();
+    if vector::single_spare_needs_box(&values) {
+      return Self::two_words(vector::box_vec(values).1.cast_mut(), window(0, len));
+    }
     if values.capacity() != len {
-      // Positive spare capacity uses the same embedded-or-boxed owner as wider handles.
-      return Self::two_words(vector::from_vec(values).1.cast_mut(), window(0, len));
+      return Self::two_words(spare_vec_owner(values), window(0, len));
     }
     let base = values.as_mut_ptr().cast::<()>();
     let adjustment = usize::from(base.addr() & 1 == 0);
