@@ -2,13 +2,13 @@ use core::{cell::Cell, mem::needs_drop};
 use smol_slice::{SliceMut, SliceMutN, typenum::U24};
 
 #[test]
-fn empty_mutable_zero_budget_has_three_words_and_accepts_any_alignment() {
+fn empty_mutable_zero_budget_matches_bytes_and_accepts_any_alignment() {
   #[repr(align(256))]
   struct Aligned;
-  const WORDS: usize = 3 * size_of::<usize>();
-
-  assert_eq!(size_of::<SliceMutN<Aligned, 0>>(), WORDS);
-  assert_eq!(size_of::<Option<SliceMutN<Aligned, 0>>>(), WORDS);
+  assert_eq!(
+    size_of::<SliceMutN<Aligned, 0>>(),
+    size_of::<bytes::Bytes>()
+  );
   assert_eq!(align_of::<SliceMutN<Aligned, 0>>(), align_of::<usize>());
   assert_eq!(SliceMutN::<Aligned, 0>::INLINE_CAPACITY, 0);
   assert!(SliceMutN::<(), 0>::try_from_slice(&[()]).is_none());

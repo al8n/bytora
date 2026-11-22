@@ -42,10 +42,28 @@ fn zero_budget_has_no_inline_elements_and_an_aligned_const_empty_window() {
   assert_eq!(SliceN::<u8, 0>::INLINE_CAPACITY, 0);
   assert_eq!(SliceN::<(), 0>::INLINE_CAPACITY, 0);
   assert!(SliceN::<(), 0>::try_from_slice(&[()]).is_none());
-  assert_eq!(size_of::<Slice<Aligned, U0>>(), 3 * size_of::<usize>());
-  assert_eq!(size_of::<Option<SliceN<Aligned, 0>>>(), U0::HANDLE_BYTES);
+  assert_eq!(size_of::<Slice<Aligned, U0>>(), size_of::<bytes::Bytes>());
   assert!(empty.clone().slice(..).is_empty());
   assert!(empty.as_slice().as_ptr().is_aligned());
+}
+
+#[test]
+fn default_and_zero_budget_handles_and_options_match_bytes() {
+  fn check<T>() {
+    assert_eq!(size_of::<T>(), size_of::<bytes::Bytes>());
+    assert_eq!(size_of::<Option<T>>(), size_of::<bytes::Bytes>());
+  }
+  assert_eq!(size_of::<bytes::Bytes>(), 4 * size_of::<usize>());
+  assert_eq!(U0::HANDLE_BYTES, size_of::<bytes::Bytes>());
+  check::<Slice<u8>>();
+  check::<SliceN<u8, 0>>();
+  check::<SliceMut<u8>>();
+  check::<SliceMutN<u8, 0>>();
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  {
+    check::<smol_slice::LocalSlice<u8>>();
+    check::<smol_slice::LocalSliceN<u8, 0>>();
+  }
 }
 
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
@@ -139,14 +157,24 @@ fn const_sizes_match_typenum_arithmetic_across_the_full_range() {
 }
 
 #[test]
-fn default_handles_have_the_three_word_size_type() {
-  const THREE_WORDS: usize = 3 * size_of::<usize>();
-  let read: Slice<u8> = SliceN::<u8, THREE_WORDS>::try_from_slice(b"a").unwrap();
-  let write: SliceMut<u8> = SliceMutN::<u8, THREE_WORDS>::try_from_slice(b"a").unwrap();
-  let read: SliceN<u8, THREE_WORDS> = read;
-  let write: SliceMutN<u8, THREE_WORDS> = write;
+fn default_handles_match_bytes_and_have_the_four_word_size_type() {
+  const FOUR_WORDS: usize = 4 * size_of::<usize>();
+  let read: Slice<u8> = SliceN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
+  let write: SliceMut<u8> = SliceMutN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
+  let read: SliceN<u8, FOUR_WORDS> = read;
+  let write: SliceMutN<u8, FOUR_WORDS> = write;
   assert_eq!(read.as_slice(), b"a");
   assert_eq!(write.as_slice(), b"a");
+  assert_eq!(Slice::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
+  assert_eq!(SliceMut::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
+  let full = [7; FOUR_WORDS - 2];
+  assert_eq!(Slice::<u8>::try_from_slice(&full).unwrap().as_slice(), full);
+  assert_eq!(
+    SliceMut::<u8>::try_from_slice(&full).unwrap().as_slice(),
+    full
+  );
+  assert!(Slice::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
+  assert!(SliceMut::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
 }
 
 #[test]

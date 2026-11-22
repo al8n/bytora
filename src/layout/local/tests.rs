@@ -44,11 +44,10 @@ fn shared_rc_and_local_elements_outlive_the_original_window() {
 #[test]
 fn byte_budgets_preserve_sizes_niches_and_rejected_inputs() {
   const WORD: usize = size_of::<usize>();
-  assert_eq!(size_of::<LocalSlice<u8>>(), 3 * WORD);
-  assert_eq!(size_of::<Option<LocalSlice<u8>>>(), 3 * WORD);
-  assert_eq!(size_of::<Option<LocalSliceN<u8, 0>>>(), 3 * WORD);
   assert_eq!(size_of::<Option<LocalSliceN<u8, 32>>>(), 32);
   let values: Rc<[u8]> = Rc::from([1, 2, 3]);
+  let default: LocalSlice<u8> = LocalSliceN::<_, { 4 * WORD }>::try_from(values.clone()).unwrap();
+  let _: LocalSliceN<u8, { 4 * WORD }> = default;
   let rejected = LocalSliceN::<u8, { 2 * WORD }>::try_from(values.clone())
     .err()
     .unwrap();

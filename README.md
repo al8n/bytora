@@ -4,10 +4,10 @@
 inline. An immutable `Slice` can also borrow static data or share owned data.
 With `std` or `alloc`, a `SliceMut` can hold a growable vector-backed window.
 For a positive typenum integer `S`, the handle occupies exactly `S` bytes,
-including its cursor. `U0` disables inline elements and uses three machine words.
-Wrapping either handle in `Option` uses the same number
-of bytes. `Slice<T>` and `SliceMut<T>` default to the three-word size of a
-`Vec<T>`, or 12 bytes on 32-bit targets and 24 bytes on 64-bit targets.
+including its cursor. `Slice<T>` and `SliceMut<T>` default to four machine words,
+the size of `bytes::Bytes`, which is 16 bytes on 32-bit targets and 32 on 64-bit targets.
+`U0` uses the same size and disables inline elements. Wrapping either handle in
+`Option` uses the same number of bytes.
 
 `SliceN<T, N>` and `SliceMutN<T, N>` name the same types using a numeric byte count.
 The inherent APIs draw on [`bytes::Bytes`](https://docs.rs/bytes/1.12.2/bytes/struct.Bytes.html)
@@ -30,7 +30,7 @@ its elements. The inline constructors and operations are available with only `co
 
 | Requested budget | Inline cursor bytes | Inline capacity for `u8` |
 | --- | --- | --- |
-| 0 (three-word handle) | — | 0 |
+| 0 (four-word handle) | — | 0 |
 | 4 (32-bit only), 8 | 1 | 3, 7 |
 | 12 (32-bit only) or 16 through 128 | 2 | 10 or 14 through 126 |
 | 132 (32-bit only) or 136 through 8192 | 4 | 128 or 132 through 8188 |
@@ -230,9 +230,10 @@ returns the original owner.
 
 `LocalSlice<T>` adopts an already shared `Rc<[T]>` and stays on the same
 thread. It requires only `alloc` or `std`, including on targets without
-pointer-width atomics. Its default handle and its `Option` occupy three
-machine words. `LocalSliceN<T, N>` selects a byte budget. Adoption, clones,
-and normally sized ranges reuse the original Rc without allocating. A range
+pointer-width atomics. Its default handle and its `Option` occupy four machine
+words, the size of `bytes::Bytes`. `LocalSliceN<T, N>` selects a byte budget.
+Zero also uses four words. Adoption, clones, and normally sized ranges reuse
+the original Rc without allocating. A range
 whose hidden prefix or suffix exceeds `(1 << (usize::BITS / 2 - 1)) - 1`
 elements allocates a small owner for that view and its descendants.
 `into_original_rc` returns the complete original allocation from any window.
@@ -259,7 +260,8 @@ three machine words and a length of at most `isize::MAX` elements.
 If the elements need shared storage and the
 handle or length cannot accommodate them, the constructor returns the original
 vector in `Err`.
-The default `Slice<u8>` on a 64-bit target keeps up to 22 bytes inline.
+The default `Slice<u8>` keeps up to 14 bytes inline on 32-bit targets and 30
+bytes on 64-bit targets.
 `try_copy_from_slice` copies inline when possible and otherwise uses shared
 storage when available, returning `None` if the input cannot fit;
 `copy_from_slice` panics in that case. The sharing-enabled form requires

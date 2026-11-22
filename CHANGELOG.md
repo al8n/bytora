@@ -8,3 +8,9 @@ opens a new, empty `## Unreleased` above it. `ci/changelog.sh` checks this struc
 request, and `release.yml` publishes the released section as the GitHub Release notes.
 
 ## Unreleased
+
+- Default and zero-budget `Slice`, `SliceMut`, and `LocalSlice` handles and
+  their `Option`s use four machine words, matching `bytes::Bytes` (16 bytes on
+  32-bit targets and 32 bytes on 64-bit targets). Both default `Slice<u8>` and
+  `SliceMut<u8>` hold 30 inline bytes on 64-bit targets and 14 on 32-bit targets.
+  The zero-budget inline capacity remains zero.
