@@ -17,6 +17,8 @@ mod arc;
 #[cfg(smol_slice_atomic)]
 mod owner;
 #[cfg(smol_slice_atomic)]
+mod two_word;
+#[cfg(smol_slice_atomic)]
 mod vector;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -241,6 +243,9 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
     #[cfg(smol_slice_atomic)]
     {
+      if Layout::<T, S>::TWO_WORD_VEC {
+        return self.layout.two_word_unique();
+      }
       let owner = self.layout.owner();
       // SAFETY: This handle keeps the tagged owner and its table alive.
       unsafe { (owner::operations::<T>(owner).is_unique)(owner) }
@@ -285,6 +290,9 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
     #[cfg(smol_slice_atomic)]
     {
+      if Layout::<T, S>::TWO_WORD_VEC {
+        return self.take_two_word_mut();
+      }
       let mut this = ManuallyDrop::new(self);
       let prefix = this.layout.external_prefix_mut();
       let (owner, data, len) = (prefix.owner, prefix.data, this.layout.external_len());
@@ -317,6 +325,13 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[inline]
   pub fn try_into_vec(self) -> Result<Vec<T>, Self> {
+    if S::HANDLE_BYTES == size_of::<usize>() {
+      return Ok(self.take_one_word_vec());
+    }
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      return self.take_two_word_vec();
+    }
     let mut this = ManuallyDrop::new(self);
     #[cfg(smol_slice_atomic)]
     let full_len = if vector::AVAILABLE && this.layout.uses_external_owner() {
@@ -330,6 +345,10 @@ impl<T, S: InlineSize> Slice<T, S> {
     let (data, len, capacity) = if let Some(len) = full_len {
       (this.layout.data().cast_mut().cast(), len, len)
     } else {
+      if S::USIZE == 0 && this.layout.is_inline() {
+        // A zero-budget inline window is empty for every element type.
+        return Ok(Vec::new());
+      }
       let values = if cfg!(smol_slice_atomic)
         && Layout::<T, S>::COMPACT_EXTERNAL
         && size_of::<Self>() == 4 * size_of::<HandleWord>()
@@ -358,6 +377,36 @@ impl<T, S: InlineSize> Slice<T, S> {
     // SAFETY: A full raw marker carries the original length and has matching
     // capacity. For other backings the recovered vector supplies all three parts.
     Ok(unsafe { Vec::from_raw_parts(data, len, capacity) })
+  }
+
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline]
+  fn take_one_word_vec(self) -> Vec<T> {
+    let range = self.layout.inline_range();
+    let copy = |start, len| {
+      let mut values = Vec::with_capacity(len);
+      // SAFETY: Each call below transfers exactly the initialized window to
+      // a fresh allocation. Nonempty, non-ZST inline payloads are T-aligned.
+      // Dropping an inline handle never visits the transferred elements.
+      unsafe {
+        if size_of::<T>() != 0 && len != 0 {
+          let base = self.layout.payload.as_ptr().cast::<T>();
+          ptr::copy_nonoverlapping(base.add(start), values.as_mut_ptr(), len);
+        }
+        values.set_len(len);
+      }
+      values
+    };
+    // Full and single-element windows have a constant allocation and copy size.
+    let capacity = Self::INLINE_CAPACITY;
+    if range == (0..capacity) {
+      return copy(0, capacity);
+    }
+    match range.end - range.start {
+      0 => Vec::new(),
+      1 => copy(range.start, 1),
+      len => copy(range.start, len),
+    }
   }
 
   // Separate scalar arguments let the caller read a full raw vector's two
@@ -467,10 +516,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// including its pointer and capacity, even when the vector is short or
   /// empty. An empty vector without an allocation yields an empty inline
   /// handle. Zero-sized elements use inline storage when their count fits.
-  /// Smaller handles copy fitting elements inline.
+  /// On targets with suitable pointer alignment, a two-word handle also
+  /// keeps an allocated vector of non-zero-sized elements when the length fits
+  /// in 31 bits on 64-bit targets or 15 bits on 32-bit targets. Other smaller
+  /// handles copy fitting elements inline.
   ///
-  /// Returns the original vector if shared storage is needed and the handle is
-  /// smaller than three machine words or the length exceeds `isize::MAX`.
+  /// Returns the original vector if neither representation can hold it.
   /// The shared constructor requires `Send + Sync` because clones can share
   /// their elements across threads. It is available with `alloc` or `std` on
   /// targets with pointer-width atomics, or with the `extra-platforms` feature.
@@ -480,6 +531,11 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Copy + Send + Sync,
   {
+    if Layout::<T, S>::fits_two_word_vec(values.len()) && values.capacity() != 0 {
+      return Ok(Self {
+        layout: Layout::two_word_vec(values),
+      });
+    }
     if Layout::<T, S>::FITS_EXTERNAL {
       if size_of::<T>() != 0 {
         let empty = values.capacity() == 0;
@@ -505,14 +561,16 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// short and empty slices. An exclusively owned window can recover the
   /// original allocation through [`Self::try_into_vec`].
   ///
-  /// Returns the original box if the handle is smaller than three words or
-  /// the slice has more than `isize::MAX` elements.
+  /// Uses the same sizes, element lengths and target requirements as
+  /// [`Self::try_from_shared_vec`]. Returns the original box on failure.
   #[cfg(smol_slice_atomic)]
   pub fn try_from_boxed_slice(values: Box<[T]>) -> Result<Self, Box<[T]>>
   where
     T: Send + Sync,
   {
-    if !Layout::<T, S>::FITS_EXTERNAL || values.len() > isize::MAX as usize {
+    if (!Layout::<T, S>::FITS_EXTERNAL && !Layout::<T, S>::fits_two_word_vec(values.len()))
+      || values.len() > isize::MAX as usize
+    {
       return Err(values);
     }
     Self::try_from_shared_vec(values.into_vec()).map_err(Vec::into_boxed_slice)
@@ -528,8 +586,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Zero-sized vectors keep an owner that records their original pointer and
   /// logical offsets.
   ///
-  /// Returns the original vector if this handle is smaller than three words
-  /// or the length exceeds `isize::MAX`.
+  /// Handles of at least three words accept up to `isize::MAX` elements.
+  /// On targets with suitable pointer alignment, two words can hold a vector
+  /// of non-zero-sized elements with a length up to 2,147,483,647 on 64-bit
+  /// targets or 32,767 on 32-bit targets. The first share or window adjustment
+  /// of a two-word exact-capacity vector allocates its owner. Returns the
+  /// original vector if its backing cannot be represented.
   #[cfg(smol_slice_atomic)]
   #[inline]
   pub fn try_from_shared_vec(values: Vec<T>) -> Result<Self, Vec<T>>
@@ -538,6 +600,11 @@ impl<T, S: InlineSize> Slice<T, S> {
   {
     const { assert!(align_of::<vector::Vector<T>>() >= 2) };
     let len = values.len();
+    if Layout::<T, S>::fits_two_word_vec(len) {
+      return Ok(Self {
+        layout: Layout::two_word_vec(values),
+      });
+    }
     // A non-ZST Vec's allocation already limits its length to isize::MAX.
     if !Layout::<T, S>::FITS_EXTERNAL || (size_of::<T>() == 0 && len > isize::MAX as usize) {
       return Err(values);
@@ -573,6 +640,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn shared_slice(&self) -> &[T] {
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      return self.layout.two_word_slice();
+    }
     let data = self.layout.data();
     #[cfg(smol_slice_atomic)]
     let data = match self.indexed_zst_base() {
@@ -605,6 +676,12 @@ impl<T, S: InlineSize> Slice<T, S> {
       range.start <= range.end && range.end <= len,
       "slice range out of bounds"
     );
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      return Self {
+        layout: self.layout.share_two_word(range),
+      };
+    }
     let data = self.subwindow_data(range.start);
     let owner = self.layout.retain_owner(range.start, len - range.end);
     let layout = Layout::external(
@@ -620,6 +697,13 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn advance_shared(&mut self, count: usize) {
     let len = self.len();
     assert!(count <= len, "advance past end");
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      if count != 0 {
+        self.layout.keep_two_word(count..len);
+      }
+      return;
+    }
     let data = self.subwindow_data(count);
     let owner = self.layout.narrow_owner(count, 0);
     self.layout.external_prefix_mut().data = data.cast();
@@ -630,6 +714,11 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   pub(crate) fn truncate_shared(&mut self, len: usize) {
     debug_assert!(len <= self.len());
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      self.layout.keep_two_word(0..len);
+      return;
+    }
     let owner = self.layout.narrow_owner(0, self.len() - len);
     self
       .layout
@@ -665,13 +754,18 @@ impl<T, S: InlineSize> Slice<T, S> {
     if vector::raw(owner) {
       // SAFETY: The source pins this window and its raw geometry. Promotion
       // returns a reference for the peer, even when another clone wins.
+      let slot = self.layout.owner_slot();
+      let data = self.layout.data();
       let owner = unsafe {
-        vector::promote::<T>(
-          self.layout.owner_slot(),
-          owner,
-          self.layout.data(),
-          self.layout.external_len(),
-        )
+        if let Some(len) = vector::full_len(owner) {
+          vector::publish(
+            slot,
+            owner,
+            vector::Vector::<T>::new(data.cast(), len, len, 2),
+          )
+        } else {
+          vector::promote::<T>(slot, owner, data, self.layout.external_len())
+        }
       };
       return unsafe { self.copy_compact_vec(owner) };
     }
@@ -719,6 +813,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn clone_shared(&self) -> Self {
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::TWO_WORD_VEC {
+      return Self {
+        layout: self.layout.share_two_word(0..self.len()),
+      };
+    }
     let data = self.layout.data().cast();
     let len = self.layout.external_len();
     let owner = self.layout.retain_owner(0, 0);
@@ -731,6 +831,11 @@ impl<T, S: InlineSize> Slice<T, S> {
 impl<T, S: InlineSize> Drop for Slice<T, S> {
   #[inline(always)]
   fn drop(&mut self) {
+    if self.layout.is_two_word_vec() {
+      // SAFETY: Dropping this descriptor transfers its sole reference.
+      unsafe { self.layout.drop_two_word() };
+      return;
+    }
     if self.layout.uses_external_owner() {
       let prefix = *self.layout.external_prefix_mut();
       let len = self.layout.external_len();

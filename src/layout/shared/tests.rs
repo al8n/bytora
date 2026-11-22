@@ -90,6 +90,64 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
 }
 
 #[test]
+fn one_word_recovery_moves_the_visible_inline_elements() {
+  use core::mem::MaybeUninit;
+
+  type Word<T> = SliceN<T, { size_of::<usize>() }>;
+  const BYTES: usize = size_of::<usize>() - 1;
+  fn take<T: Copy>(input: &[T]) -> Vec<T> {
+    Word::try_from_slice(input)
+      .unwrap()
+      .try_into_vec()
+      .ok()
+      .unwrap()
+  }
+  let input: [u8; BYTES] = core::array::from_fn(|i| i as u8);
+  let full = Word::try_from_vec(input.to_vec()).unwrap();
+  for start in 0..=BYTES {
+    for end in start..=BYTES {
+      let mut slot = Some(full.slice(start..end));
+      let output = slot.take().unwrap().try_into_vec().ok().unwrap();
+      assert!(slot.is_none());
+      assert_eq!(output, input[start..end]);
+    }
+  }
+
+  // Opaque fragments of a pointer can be stored inline. Reassemble the
+  // original pointer after moving the fragments through the vector.
+  let pointer = input.as_ptr();
+  // SAFETY: A padding-free array of MaybeUninit bytes preserves pointer bytes.
+  let mut bytes: [MaybeUninit<u8>; size_of::<*const u8>()] =
+    unsafe { core::mem::transmute(pointer) };
+  let part = take(&bytes[..BYTES]);
+  bytes[..BYTES].copy_from_slice(&part);
+  // SAFETY: All bytes came from the same live pointer and kept their offsets.
+  let recovered: *const u8 = unsafe { core::mem::transmute(bytes) };
+  // SAFETY: input is nonempty and still alive.
+  assert_eq!(unsafe { *recovered }, input[0]);
+
+  #[repr(align(2))]
+  #[derive(Clone, Copy)]
+  struct Padded(MaybeUninit<u8>);
+
+  let mut input = [Padded(MaybeUninit::uninit()); Word::<Padded>::INLINE_CAPACITY];
+  input[0].0.write(97);
+  let output = take(&input);
+  assert_eq!(output.len(), input.len());
+  // SAFETY: The first field was initialized before the conversion.
+  assert_eq!(unsafe { output[0].0.assume_init() }, 97);
+
+  #[repr(align(256))]
+  #[derive(Clone, Copy)]
+  struct AlignedZst;
+
+  let input = [AlignedZst; Word::<AlignedZst>::INLINE_CAPACITY];
+  let output = take(&input);
+  assert_eq!(output.len(), input.len());
+  assert!(output.as_ptr().is_aligned());
+}
+
+#[test]
 fn four_word_recovery_preserves_packed_references_and_inline_padding() {
   use core::mem::MaybeUninit;
 
@@ -159,14 +217,15 @@ fn a_failed_four_word_take_retains_the_original_window_and_allocation() {
 
 #[test]
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
-  let short = vec![3u8; SliceN::<u8, 8>::INLINE_CAPACITY];
-  let inline = SliceN::<u8, 8>::try_from_vec(short).unwrap();
+  type OneWord = SliceN<u8, { size_of::<usize>() }>;
+  let short = vec![3u8; OneWord::INLINE_CAPACITY];
+  let inline = OneWord::try_from_vec(short).unwrap();
   assert!(inline.layout.is_inline());
-  assert_eq!(inline.as_slice(), &[3; 7]);
-  let input = vec![7u8; 8];
+  assert_eq!(inline.as_slice(), &[3; OneWord::INLINE_CAPACITY]);
+  let input = vec![7u8; OneWord::INLINE_CAPACITY + 1];
   let (ptr, cap) = (input.as_ptr(), input.capacity());
-  let returned = SliceN::<u8, 8>::try_from_vec(input).err().unwrap();
-  assert_eq!(returned, [7; 8]);
+  let returned = OneWord::try_from_vec(input).err().unwrap();
+  assert_eq!(returned, [7; OneWord::INLINE_CAPACITY + 1]);
   assert_eq!((returned.as_ptr(), returned.capacity()), (ptr, cap));
 }
 
@@ -182,6 +241,7 @@ fn zero_budget_vectors_keep_allocations_and_use_static_unallocated_empties() {
   let empty = SliceN::<std::string::String, 0>::try_from(Vec::new()).unwrap();
   assert_eq!(empty.layout.tag, COMPACT_STATIC);
   assert!(!empty.layout.uses_external_owner());
+  assert!(empty.try_into_vec().is_err());
   let allocated = Vec::<std::string::String>::with_capacity(1);
   let (base, capacity) = (allocated.as_ptr(), allocated.capacity());
   let empty = SliceN::<_, 0>::try_from(allocated).unwrap();

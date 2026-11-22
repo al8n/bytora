@@ -208,8 +208,30 @@ fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
   let source = [1u8, 2, 3];
   let copy = Slice::<u8>::copy_from_slice(&source);
   assert_eq!(copy.as_slice(), &source);
-  assert!(SliceN::<u8, 8>::try_copy_from_slice(&[9; 64]).is_none());
-  assert!(catch_unwind(|| SliceN::<u8, 8>::copy_from_slice(&[9; 64])).is_err());
+  type OneWord = SliceN<u8, { size_of::<usize>() }>;
+  assert!(OneWord::try_copy_from_slice(&[9; 64]).is_none());
+  assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
+}
+
+#[cfg(smol_slice_atomic)]
+#[test]
+fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
+  type TwoWords = SliceN<u8, { 2 * size_of::<usize>() }>;
+  let input = [17; 64];
+  assert!(TwoWords::try_from_slice(&input).is_none());
+  let copied = TwoWords::try_copy_from_slice(&input);
+  if TwoWords::try_from_vec(input.to_vec()).is_ok() {
+    let copied = copied.unwrap();
+    assert_eq!(copied.as_slice(), &input);
+    assert_ne!(copied.as_slice().as_ptr(), input.as_ptr());
+    assert_eq!(
+      copied.clone().as_slice().as_ptr(),
+      copied.as_slice().as_ptr()
+    );
+    assert_eq!(TwoWords::copy_from_slice(&input).as_slice(), &input);
+  } else {
+    assert!(copied.is_none());
+  }
 }
 
 #[cfg(smol_slice_atomic)]

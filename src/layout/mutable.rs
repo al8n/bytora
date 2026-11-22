@@ -685,10 +685,13 @@ impl<T, S: InlineSize> SliceMut<T, S> {
     Slice { layout }
   }
 
-  /// Freezes this view. Heap elements stay in place, including when mutable
-  /// siblings still own disjoint ranges. Returns the original handle when an
-  /// immutable descriptor cannot hold the heap window or its length. Positive
-  /// budgets require the current element type to be `Copy`.
+  /// Freezes this view and preserves the addresses of heap elements. Handles
+  /// of at least three words can freeze disjoint ranges while mutable siblings
+  /// are live. A two-word heap window must have a unique allocation and own
+  /// the initialized prefix from its base through the visible end. A window
+  /// that already relinquished its prefix is returned intact, as is any
+  /// window outside the immutable descriptor's limits. Positive budgets
+  /// require the current element type to be `Copy`.
   #[cfg(smol_slice_atomic)]
   pub fn try_freeze(self) -> Result<Slice<T, S>, Self>
   where
@@ -702,14 +705,29 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   }
 
   /// Freezes into a shared allocation for any `Send + Sync` element type.
-  /// Heap elements stay at their current address. Inline elements move into
-  /// a new allocation. Returns the original handle when its byte budget or
-  /// length cannot represent an external immutable window.
+  /// Heap elements stay at their current address. With at least three words,
+  /// inline elements can move into a new allocation. Returns the original
+  /// handle when its byte budget or length cannot represent an external window.
+  /// A two-word handle can freeze a unique heap allocation when its initialized
+  /// elements begin at the allocation base and their count fits the two-word
+  /// vector descriptor. The visible window can start within that prefix.
   #[cfg(smol_slice_atomic)]
   pub fn try_freeze_shared(mut self) -> Result<Slice<T, S>, Self>
   where
     T: Send + Sync,
   {
+    if Layout::<T, S>::TWO_WORD_VEC {
+      let Some((values, start)) = self
+        .window_mut()
+        .and_then(|window| window.take_vec_prefix(Layout::<T, S>::fits_two_word_vec))
+      else {
+        return Err(self);
+      };
+      let mut frozen = Slice::try_from_shared_vec(values)
+        .unwrap_or_else(|_| unreachable!("the original vector fits in the two-word handle"));
+      frozen.advance(start);
+      return Ok(frozen);
+    }
     if !Layout::<T, S>::FITS_EXTERNAL || self.len() > isize::MAX as usize {
       return Err(self);
     }
@@ -738,7 +756,8 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if the heap view exceeds its immutable descriptor's size or length limit.
+  /// Panics when [`Self::try_freeze`] cannot represent the view. This includes
+  /// a two-word heap window with live mutable siblings or a relinquished prefix.
   #[cfg(smol_slice_atomic)]
   #[track_caller]
   pub fn freeze(self) -> Slice<T, S>
