@@ -70,32 +70,41 @@ fn counts(owner: *const ()) -> (usize, usize) {
 // Its spare high bit distinguishes an embedded header at final release.
 const IN_TAIL: usize = 1 << (usize::BITS - 1);
 
-#[inline(never)]
+#[inline(always)]
 pub(super) fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   let base = values.as_mut_ptr();
   let len = values.len();
   let capacity = values.capacity();
+  let Some(header) = tail_header(base, len, capacity) else {
+    return box_vec(values);
+  };
+  // SAFETY: The exclusive Vec owns these aligned bytes beyond all of its
+  // initialized elements. Its raw base retains the original provenance.
+  unsafe { header.write(Vector::new(base, len | IN_TAIL, capacity, 1)) };
+  core::mem::forget(values);
+  (base, header.cast())
+}
+
+#[inline(always)]
+pub(super) fn box_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
+  // Keep the input live until allocation succeeds, including on unwind.
+  let header = Box::<Vector<T>>::new_uninit();
+  let base = values.as_mut_ptr();
+  let owner = Box::into_raw(header).cast::<Vector<T>>();
+  // SAFETY: The fresh box has the layout of the entire header.
+  unsafe { owner.write(Vector::new(base, values.len(), values.capacity(), 1)) };
+  core::mem::forget(values);
+  (base, owner.cast())
+}
+
+fn tail_header<T>(base: *mut T, len: usize, capacity: usize) -> Option<*mut Vector<T>> {
   // Non-ZST Vec allocations are at most isize::MAX bytes. ZSTs contribute
   // zero bytes even though Vec reports usize::MAX capacity for them.
   let spare_bytes = (capacity - len) * size_of::<T>();
-  if spare_bytes >= size_of::<Vector<T>>() {
-    let tail = base.wrapping_add(len).cast::<u8>();
-    let padding = tail.align_offset(align_of::<Vector<T>>());
-    if padding <= spare_bytes - size_of::<Vector<T>>() {
-      let header = tail.wrapping_add(padding).cast::<Vector<T>>();
-      // SAFETY: The exclusive Vec owns these aligned bytes beyond all of its
-      // initialized elements. The header and the visible window are disjoint.
-      // The raw base retains the allocation's original provenance and capacity.
-      unsafe { header.write(Vector::new(base, len | IN_TAIL, capacity, 1)) };
-      core::mem::forget(values);
-      return (base, header.cast());
-    }
-  }
-  // Keep the input live through allocation. It still owns all the elements
-  // if allocation unwinds before the ownership transfer.
-  let header = Box::new(Vector::new(base, len, capacity, 1));
-  core::mem::forget(values);
-  (base, Box::into_raw(header).cast())
+  let available = spare_bytes.checked_sub(size_of::<Vector<T>>())?;
+  let tail = base.wrapping_add(len).cast::<u8>();
+  let padding = tail.align_offset(align_of::<Vector<T>>());
+  (padding <= available).then(|| tail.wrapping_add(padding).cast())
 }
 
 pub(super) fn narrow(owner: *const (), front: usize, back: usize) -> Option<*const ()> {

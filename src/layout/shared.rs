@@ -46,18 +46,6 @@ impl WideVecWords {
       tag_word: ((tag as usize) << super::TAG_SHIFT).to_le(),
     }
   }
-
-  #[inline(never)]
-  fn uncached<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
-    let len = values.len();
-    if values.capacity() == len {
-      let base = values.as_mut_ptr();
-      core::mem::forget(values);
-      (base, vector::full_owner(len))
-    } else {
-      vector::from_vec(values)
-    }
-  }
 }
 
 // Strong Arc pointers are non-null and aligned. No actual managed pointer
@@ -75,19 +63,22 @@ impl<T, S: InlineSize> Layout<T, S> {
     assert!(vector::AVAILABLE && size_of::<T>() != 0);
     let len = values.len();
     let capacity = values.capacity();
-    let (data, owner) = if capacity == len && len <= vector::MAX_FULL_LEN {
+    let spare = capacity - len;
+    // A Vec with one spare element (for example just after a pop) cannot
+    // embed a header if an entire element is smaller than that header.
+    let (data, owner) = if size_of::<T>() < size_of::<vector::Vector<T>>() && spare == 1 {
+      vector::box_vec(values)
+    } else if spare == 0 {
+      if len == 0 {
+        return Self::empty_inline();
+      }
       let data = values.as_mut_ptr();
       core::mem::forget(values);
       (data, vector::full_owner(len))
     } else {
-      WideVecWords::uncached(values)
+      vector::from_vec(values)
     };
-    let tag = if capacity == 0 {
-      NonZeroU8::MIN.get()
-    } else {
-      EXTERNAL
-    };
-    let parts = WideVecWords::new(data, owner, len, tag);
+    let parts = WideVecWords::new(data, owner, len, EXTERNAL);
     let mut storage = core::mem::MaybeUninit::<Self>::uninit();
     let dest = storage.as_mut_ptr();
     let count = S::HANDLE_BYTES / size_of::<usize>();
@@ -156,25 +147,58 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   #[cfg(not(smol_slice_atomic))]
-  fn retain_owner(&self, _front: usize, _back: usize) -> *const () {
+  unsafe fn retain_owner(
+    &self,
+    _data: *const (),
+    _len: usize,
+    _front: usize,
+    _back: usize,
+  ) -> *const () {
     self.owner()
   }
 
+  /// # Safety
+  ///
+  /// `data` and `len` must be the current external descriptor's data word and
+  /// visible length. Removing `front` and `back` elements must stay within it.
   #[cfg(smol_slice_atomic)]
-  fn retain_owner(&self, front: usize, back: usize) -> *const () {
-    let owner = self.owner();
-    if vector::raw(owner) {
-      // SAFETY: The borrowed descriptor pins the vector, and its geometry
-      // and window remain immutable. Promotion also retains this new peer.
-      return unsafe { vector::promote::<T>(self.owner_slot(), owner, self.data(), self.len()) };
-    }
+  unsafe fn retain_owner(
+    &self,
+    data: *const (),
+    len: usize,
+    front: usize,
+    back: usize,
+  ) -> *const () {
+    let owner = if vector::AVAILABLE && self.uses_external_owner() {
+      let slot = self.owner_slot();
+      let owner = slot
+        .load(core::sync::atomic::Ordering::Acquire)
+        .cast_const();
+      // SAFETY: The borrowed source pins its immutable window. A full marker
+      // carries the allocation's original length and capacity. Publication
+      // retains the peer even if another borrower wins the race.
+      unsafe {
+        if let Some(full_len) = vector::full_len(owner) {
+          return vector::publish(
+            slot,
+            owner,
+            vector::Vector::<T>::new(data.cast(), full_len, full_len, 2),
+          );
+        }
+        if vector::raw(owner) {
+          return vector::promote::<T>(slot, owner, data, len);
+        }
+      }
+      owner
+    } else {
+      self.owner()
+    };
     // SAFETY: The source holds a live reference for this owner.
     unsafe {
       if owner::retain_direct::<T>(owner) {
         return owner;
       }
       if arc::is_arc(owner) {
-        let (data, len) = (self.data(), self.external_len());
         if let Some(narrowed) = arc::narrow(owner, front, back) {
           arc::retain::<T>(owner, data, len);
           return narrowed;
@@ -763,13 +787,14 @@ impl<T, S: InlineSize> Slice<T, S> {
     data.cast::<T>().wrapping_add(count)
   }
 
+  /// # Safety
+  ///
+  /// The source must be external, `len` its visible length, and `range` an
+  /// ordered subrange of `0..len`.
   #[track_caller]
-  pub(crate) fn slice_shared(&self, range: Range<usize>) -> Self {
-    let len = self.len();
-    assert!(
-      range.start <= range.end && range.end <= len,
-      "slice range out of bounds"
-    );
+  pub(crate) unsafe fn slice_shared(&self, range: Range<usize>, len: usize) -> Self {
+    debug_assert!(!self.layout.is_inline() && len == self.len());
+    debug_assert!(range.start <= range.end && range.end <= len);
     #[cfg(smol_slice_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return Self {
@@ -777,13 +802,22 @@ impl<T, S: InlineSize> Slice<T, S> {
       };
     }
     let data = self.subwindow_data(range.start);
-    let owner = self.layout.retain_owner(range.start, len - range.end);
-    let layout = Layout::external(
-      data,
-      owner,
-      range.len(),
-      Layout::<T, S>::external_kind(owner),
-    );
+    let kind = self.layout.tag;
+    // SAFETY: The original data word and visible length belong to this source.
+    // The checked range gives the number of elements omitted at each end.
+    let owner = unsafe {
+      self
+        .layout
+        .retain_owner(self.layout.data(), len, range.start, len - range.end)
+    };
+    // A packed tag also carries length bits. In wider handles the tag only
+    // distinguishes static and owned storage, which retention preserves.
+    let kind = if Layout::<T, S>::PACKED_LEN {
+      Layout::<T, S>::external_kind(owner)
+    } else {
+      kind
+    };
+    let layout = Layout::external(data, owner, range.end - range.start, kind);
     Self { layout }
   }
 
@@ -923,9 +957,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(smol_slice_atomic)]
   #[inline(never)]
   pub(crate) fn replace_external_clone(&mut self, source: &Self) {
-    let data = source.layout.data().cast();
+    let data = source.layout.data();
     let len = source.layout.external_len();
-    let owner = source.layout.retain_owner(0, 0);
+    // SAFETY: Cloning retains the source's complete external window.
+    let owner = unsafe { source.layout.retain_owner(data, len, 0, 0) };
     let previous = if self.layout.uses_external_owner() {
       Some((
         *self.layout.external_prefix_mut(),
@@ -936,7 +971,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     };
     // A bare Layout has no destructor. Install the newly retained window first
     // so even an unwinding destructor leaves a valid destination.
-    self.layout = Layout::external(data, owner, len, NonZeroU8::new(EXTERNAL).unwrap());
+    self.layout = Layout::external(data.cast(), owner, len, NonZeroU8::new(EXTERNAL).unwrap());
     if let Some((prefix, len)) = previous {
       // SAFETY: The exclusive destination transferred its old descriptor here.
       // Inline elements are Copy; all other owners are released exactly once.
@@ -951,10 +986,16 @@ impl<T, S: InlineSize> Slice<T, S> {
         layout: self.layout.share_two_word(0..self.len()),
       };
     }
-    let data = self.layout.data().cast();
+    let data = self.layout.data();
     let len = self.layout.external_len();
-    let owner = self.layout.retain_owner(0, 0);
-    let layout = Layout::external(data, owner, len, Layout::<T, S>::external_kind(owner));
+    // SAFETY: Cloning retains the source's complete external window.
+    let owner = unsafe { self.layout.retain_owner(data, len, 0, 0) };
+    let layout = Layout::external(
+      data.cast(),
+      owner,
+      len,
+      Layout::<T, S>::external_kind(owner),
+    );
     Self { layout }
   }
 }
