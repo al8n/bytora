@@ -340,7 +340,7 @@ fn full_table_returns_inputs_and_reuses_slots_in_place() {
   assert_eq!(root.as_slice().as_ptr(), base);
   // A single consumer interleaves all four origin shards. Filling these
   // exact vacancies again detects lost, duplicated, or stranded cache keys,
-  // including the partially full batch flushed by its TLS destructor.
+  // including the final batch flushed by its TLS destructor.
   thread::spawn(move || {
     for _ in 0..per_worker {
       for group in &mut remote {
