@@ -79,12 +79,10 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     assert_eq!(moved.len(), len);
     assert_eq!(moved.cursor.as_ref()[0], bytes[LEN_LOW_BYTES]);
     assert_eq!(moved.tag.get(), 0xe5);
-    // SAFETY: try_external wrote the packed prefix. Copy its fields by value
-    // to avoid taking unaligned references to the pointers.
-    let prefix = unsafe { &*moved.payload.as_ptr().cast::<ExternalPrefix>() };
-    assert_eq!(prefix.len_low, bytes[..LEN_LOW_BYTES]);
-    let stored_data = prefix.data.cast::<u16>();
-    let stored_owner = prefix.owner.cast::<u32>();
+    assert_eq!(moved.len_low(), bytes[..LEN_LOW_BYTES]);
+    let stored_data = moved.data().cast::<u16>();
+    // SAFETY: This private descriptor stores the unchanged pointer to the local.
+    let stored_owner = unsafe { (*moved.external_ptr()).owner.cast::<u32>() };
     assert!(ptr::eq(data, stored_data));
     assert!(ptr::eq(owner_ptr, stored_owner));
     // SAFETY: These are the original pointers to the live locals above.

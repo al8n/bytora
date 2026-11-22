@@ -174,13 +174,24 @@ assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
 `try_from_static` returns `None` when the handle occupies fewer than three
 words or the slice contains more than `isize::MAX` elements. The default
 `from_static` constructor panics on an oversized slice of zero-sized elements.
+Static constructors, `len` and `is_empty` are const functions. With shared heap
+ownership enabled, the handle contains an interior-mutable owner slot. Rust
+allows a `static` handle to be initialized at compile time and read at runtime.
+For a compile-time length, use the original static slice's length. In core-only
+builds, a constant can also read the length from the static handle itself.
 
 With `std` or `alloc` and shared ownership available,
 `Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. It
-copies short inputs inline. For larger inputs it retains the vector's buffer
-and allocates a shared owner. Each clone or range increments the owner's atomic
-reference count and keeps its own cursor. Dropping the last handle frees the
-owner and the vector.
+copies short inputs inline. For larger inputs it retains the vector's buffer.
+A non-zero-sized vector with no spare capacity needs no additional allocation
+on construction or drop. The first clone or range publishes a reference-counted
+owner. Concurrent first clones can allocate competing owners and publish only one.
+Later clones and ranges retain that owner and keep independent cursors.
+The descriptor also accommodates spare capacity, skipped prefixes and truncated
+suffixes up to `(1 << ((usize::BITS - 2) / 3)) - 1` elements each. Larger counts,
+zero-sized elements and targets with insufficient pointer alignment use a
+separately allocated owner. In both forms,
+the final handle owns the entire original vector allocation.
 `try_from_shared_vec` always shares the supplied vector, even for short inputs,
 and accepts any `T: Send + Sync`. `Slice::from_owner` and `try_from_owner`
 keep an `AsRef<[T]> + Send + 'static` owner alive without copying its slice;

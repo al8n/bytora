@@ -145,6 +145,10 @@ const TINY_INLINE: u8 = 0x40;
 // for a static slice with a larger length. Both external forms keep the same
 // typed data and owner pointers. Tiny inline-only handles have a separate tag encoding.
 const COMPACT_STATIC: NonZeroU8 = NonZeroU8::new(0x40).unwrap();
+// A compact source keeps this tag across concurrent first clones. Peers receive
+// the ordinary external tag and can use the direct Arc clone path immediately.
+#[cfg(smol_slice_atomic)]
+const COMPACT_VEC: NonZeroU8 = NonZeroU8::new(0x41).unwrap();
 const EXTERNAL: u8 = 0x80;
 const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
 
@@ -160,13 +164,51 @@ struct ExternalPrefix {
   len_low: [u8; LEN_LOW_BYTES],
 }
 
+#[repr(transparent)]
+struct Payload<P> {
+  #[cfg(smol_slice_atomic)]
+  bytes: core::cell::UnsafeCell<MaybeUninit<P>>,
+  #[cfg(not(smol_slice_atomic))]
+  bytes: MaybeUninit<P>,
+}
+
+impl<P> Payload<P> {
+  const fn new(bytes: MaybeUninit<P>) -> Self {
+    Self {
+      #[cfg(smol_slice_atomic)]
+      bytes: core::cell::UnsafeCell::new(bytes),
+      #[cfg(not(smol_slice_atomic))]
+      bytes,
+    }
+  }
+
+  const fn as_ptr(&self) -> *const P {
+    #[cfg(smol_slice_atomic)]
+    return self.bytes.get().cast();
+    #[cfg(not(smol_slice_atomic))]
+    self.bytes.as_ptr()
+  }
+
+  fn as_mut_ptr(&mut self) -> *mut P {
+    ptr::from_mut(self).cast()
+  }
+}
+
+// SAFETY: Shared writes are confined to the aligned atomic owner word of a
+// promotable external descriptor. A handle's tag, window and inline elements
+// are immutable through shared references. P is a sealed byte array.
+#[cfg(smol_slice_atomic)]
+unsafe impl<P: Sync> Sync for Payload<P> {}
+#[cfg(smol_slice_atomic)]
+impl<P: core::panic::RefUnwindSafe> core::panic::RefUnwindSafe for Payload<P> {}
+
 #[repr(C)]
 pub struct Layout<T, S: InlineSize> {
   // This zero-sized field aligns the start of the payload. Both byte arrays
   // have alignment one and no padding. Moving MaybeUninit preserves pointer
   // provenance and any uninitialized bytes in a stored T's padding.
   _align: [usize; 0],
-  payload: MaybeUninit<S::Payload>,
+  payload: Payload<S::Payload>,
   cursor: S::Cursor,
   tag: NonZeroU8,
   _element: PhantomData<T>,
@@ -189,7 +231,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   pub(crate) const fn empty_inline() -> Self {
     Self {
       _align: [],
-      payload: MaybeUninit::uninit(),
+      payload: Payload::new(MaybeUninit::uninit()),
       cursor: S::ZERO_CURSOR,
       tag: if size_of::<S::Cursor>() == 0 {
         NonZeroU8::new(TINY_INLINE).unwrap()
@@ -211,7 +253,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     let (cursor, tag) = Self::inline_cursor(0..len);
     let mut layout = Self {
       _align: [],
-      payload: MaybeUninit::uninit(),
+      payload: Payload::new(MaybeUninit::uninit()),
       cursor,
       tag,
       _element: PhantomData,
@@ -240,7 +282,11 @@ impl<T, S: InlineSize> Layout<T, S> {
   // Inline and compact static descriptors can be copied without an owner.
   #[cfg(smol_slice_atomic)]
   fn uses_external_owner(&self) -> bool {
-    Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
+    if Self::COMPACT_EXTERNAL {
+      self.tag.get() > COMPACT_STATIC.get()
+    } else {
+      Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
+    }
   }
 
   pub(super) fn clone_inline(&self) -> Self {
@@ -276,10 +322,20 @@ impl<T, S: InlineSize> Layout<T, S> {
     }
   }
 
-  const fn external_prefix(&self) -> &ExternalPrefix {
+  const fn external_ptr(&self) -> *const ExternalPrefix {
     assert!(!Self::inline_tag(self.tag), "expected external storage");
-    // SAFETY: The external tag is set only on a layout containing this packed prefix.
-    unsafe { &*self.payload.as_ptr().cast::<ExternalPrefix>() }
+    self.payload.as_ptr().cast()
+  }
+
+  const fn data(&self) -> *const () {
+    // SAFETY: This field is initialized in every external descriptor and only
+    // changes through &mut. Do not borrow the whole prefix across a promotion.
+    unsafe { (*self.external_ptr()).data }
+  }
+
+  const fn len_low(&self) -> [u8; LEN_LOW_BYTES] {
+    // SAFETY: The length bytes are initialized and disjoint from the owner word.
+    unsafe { (*self.external_ptr()).len_low }
   }
 
   pub(super) const fn len(&self) -> usize {
@@ -287,15 +343,15 @@ impl<T, S: InlineSize> Layout<T, S> {
       let range = self.inline_range();
       return range.end - range.start;
     }
-    let prefix = self.external_prefix();
+    let low = self.len_low();
     let mut bytes = [0; size_of::<usize>()];
     let mut i = 0;
     while i < LEN_LOW_BYTES {
-      bytes[i] = prefix.len_low[i];
+      bytes[i] = low[i];
       i += 1;
     }
     bytes[LEN_LOW_BYTES] = self.cursor_bytes()[0];
-    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag.get() == COMPACT_STATIC.get() {
+    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag.get() < EXTERNAL {
       0
     } else {
       self.tag.get() & !EXTERNAL
@@ -407,7 +463,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   const fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
-    assert!(tag.get() >= EXTERNAL, "expected external storage");
+    assert!(!Self::inline_tag(tag), "expected external storage");
     assert!(Self::FITS_EXTERNAL);
     let mut cursor = S::ZERO_CURSOR;
     // SAFETY: A size that fits the prefix has a cursor of one or three bytes.
@@ -418,7 +474,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     unsafe { payload.as_mut_ptr().cast::<ExternalPrefix>().write(prefix) };
     Self {
       _align: [],
-      payload,
+      payload: Payload::new(payload),
       cursor,
       tag,
       _element: PhantomData,

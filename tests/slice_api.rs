@@ -12,15 +12,31 @@ fn length_queries_are_const_for_static_windows_and_initialized_empty_handles() {
   static LARGE: SliceN<(), 0> = SliceN::<_, 0>::try_from_static(&ZSTS).unwrap();
   static TINY_EMPTY: SliceN<u8, 8> = SliceN::<_, 8>::new();
   static ZERO_EMPTY: SliceN<u8, 0> = SliceN::<_, 0>::empty();
-  const LENGTHS: [(usize, bool); 5] = [
-    measure(&SHORT),
-    measure(&WIDE),
-    measure(&LARGE),
-    measure(&TINY_EMPTY),
-    measure(&ZERO_EMPTY),
-  ];
+  const fn lengths() -> [(usize, bool); 5] {
+    [
+      measure(&SHORT),
+      measure(&WIDE),
+      measure(&LARGE),
+      measure(&TINY_EMPTY),
+      measure(&ZERO_EMPTY),
+    ]
+  }
+  #[cfg(not(smol_slice_atomic))]
+  const LENGTHS: [(usize, bool); 5] = lengths();
+  #[cfg(not(smol_slice_atomic))]
+  let result = LENGTHS;
+  #[cfg(smol_slice_atomic)]
+  let result = lengths();
+  const LOCAL_LEN: usize = {
+    let handle = Slice::<u8>::from_static(b"abc");
+    let len = handle.len();
+    #[cfg(smol_slice_atomic)]
+    core::mem::forget(handle);
+    len
+  };
+  assert_eq!(LOCAL_LEN, 3);
   assert_eq!(
-    LENGTHS,
+    result,
     [
       (3, false),
       (4, false),
@@ -36,16 +52,16 @@ fn new_is_const_and_accepts_non_copy_elements_for_every_handle_size() {
   #[repr(align(64))]
   struct NonCopy(core::cell::Cell<u8>);
 
-  const ZERO: SliceN<NonCopy, 0> = SliceN::<NonCopy, 0>::new();
-  const TINY: SliceN<NonCopy, 8> = SliceN::<NonCopy, 8>::new();
-  const DEFAULT: Slice<NonCopy> = Slice::new();
-  const WIDE: SliceN<NonCopy, 64> = SliceN::<NonCopy, 64>::new();
+  let zero = const { SliceN::<NonCopy, 0>::new() };
+  let tiny = const { SliceN::<NonCopy, 8>::new() };
+  let default = const { Slice::<NonCopy>::new() };
+  let wide = const { SliceN::<NonCopy, 64>::new() };
 
   for empty in [
-    ZERO.as_slice(),
-    TINY.as_slice(),
-    DEFAULT.as_slice(),
-    WIDE.as_slice(),
+    zero.as_slice(),
+    tiny.as_slice(),
+    default.as_slice(),
+    wide.as_slice(),
   ] {
     assert!(empty.is_empty());
     assert!(empty.as_ptr().is_aligned());
