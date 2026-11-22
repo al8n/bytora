@@ -90,6 +90,74 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
 }
 
 #[test]
+fn four_word_recovery_preserves_packed_references_and_inline_padding() {
+  use core::mem::MaybeUninit;
+
+  #[derive(Clone, Copy)]
+  #[repr(C, packed)]
+  struct Packed<'a> {
+    byte: u8,
+    first: &'a usize,
+    second: &'a usize,
+    unused: MaybeUninit<usize>,
+  }
+
+  #[derive(Clone, Copy)]
+  #[repr(C)]
+  struct Padded<'a> {
+    byte: u8,
+    value: &'a usize,
+  }
+
+  type FourWords<T> = SliceN<T, { 4 * size_of::<usize>() }>;
+  let first = 17;
+  let second = 29;
+  let packed = Packed {
+    byte: 37,
+    first: &first,
+    second: &second,
+    unused: MaybeUninit::uninit(),
+  };
+  let mut slot = Some(FourWords::try_from_slice(&[packed]).unwrap());
+  let taken = slot.take().unwrap();
+  assert!(slot.is_none());
+  let values = taken.try_into_vec().ok().unwrap();
+  let left = values[0].first;
+  let right = values[0].second;
+  assert_eq!((values[0].byte, *left, *right), (37, 17, 29));
+  assert!(core::ptr::eq(left, &first) && core::ptr::eq(right, &second));
+
+  let padded = Padded {
+    byte: 19,
+    value: &second,
+  };
+  let values = FourWords::try_from_slice(&[padded])
+    .unwrap()
+    .try_into_vec()
+    .ok()
+    .unwrap();
+  assert_eq!((values[0].byte, *values[0].value), (19, 29));
+}
+
+#[test]
+fn a_failed_four_word_take_retains_the_original_window_and_allocation() {
+  let values = vec![7u8, 8, 9, 10];
+  let (base, capacity) = (values.as_ptr(), values.capacity());
+  let source = SliceN::<_, { 4 * size_of::<usize>() }>::try_from_vec(values).unwrap();
+  let peer = source.clone();
+  let mut slot = Some(source);
+  slot.as_mut().unwrap().advance(1);
+  let original = slot.take().unwrap().try_into_vec().err().unwrap();
+  assert!(slot.is_none());
+  assert_eq!(original.as_slice(), &[8, 9, 10]);
+  assert_eq!(original.as_slice().as_ptr(), base.wrapping_add(1));
+  drop(peer);
+  let values = original.try_into_vec().ok().unwrap();
+  assert_eq!(values, [8, 9, 10]);
+  assert_eq!((values.as_ptr(), values.capacity()), (base, capacity));
+}
+
+#[test]
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
   let short = vec![3u8; SliceN::<u8, 8>::INLINE_CAPACITY];
   let inline = SliceN::<u8, 8>::try_from_vec(short).unwrap();

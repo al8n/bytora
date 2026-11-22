@@ -19,6 +19,9 @@ mod owner;
 #[cfg(smol_slice_atomic)]
 mod vector;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+type HandleWord = core::mem::MaybeUninit<[u8; size_of::<usize>()]>;
+
 // Strong Arc pointers are non-null and aligned. No actual managed pointer
 // tagged by adding one can have this address. The sentinel is never dereferenced.
 const STATIC_OWNER: *const () = ptr::without_provenance(1);
@@ -327,9 +330,26 @@ impl<T, S: InlineSize> Slice<T, S> {
     let (data, len, capacity) = if let Some(len) = full_len {
       (this.layout.data().cast_mut().cast(), len, len)
     } else {
-      // SAFETY: Only failure below reads the original handle again. On success
-      // or unwind the ManuallyDrop suppresses its destructor.
-      let Some(values) = (unsafe { Self::take_backing_vec(&mut this) }) else {
+      let values = if cfg!(smol_slice_atomic)
+        && Layout::<T, S>::COMPACT_EXTERNAL
+        && size_of::<Self>() == 4 * size_of::<HandleWord>()
+      {
+        let words = ptr::from_ref(&*this).cast::<HandleWord>();
+        // SAFETY: Four words cover the owned descriptor. Only None leaves
+        // ownership with this handle; success and unwind suppress its Drop.
+        unsafe {
+          Self::take_four_words(
+            words.read_unaligned(),
+            words.add(1).read_unaligned(),
+            words.add(2).read_unaligned(),
+            words.add(3).read_unaligned(),
+          )
+        }
+      } else {
+        // SAFETY: Only failure below reads the original handle again.
+        unsafe { Self::take_backing_vec(&mut this) }
+      };
+      let Some(values) = values else {
         return Err(ManuallyDrop::into_inner(this));
       };
       let mut values = ManuallyDrop::new(values);
@@ -340,6 +360,31 @@ impl<T, S: InlineSize> Slice<T, S> {
     Ok(unsafe { Vec::from_raw_parts(data, len, capacity) })
   }
 
+  // Separate scalar arguments let the caller read a full raw vector's two
+  // pointer words directly from an Option slot, even across Option::take.
+  /// # Safety
+  ///
+  /// The words must be the complete representation of one live, owned Self.
+  /// Only a failed take permits the caller to use the original handle again.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(never)]
+  unsafe fn take_four_words(
+    first: HandleWord,
+    second: HandleWord,
+    third: HandleWord,
+    fourth: HandleWord,
+  ) -> Option<Vec<T>> {
+    let words = [first, second, third, fourth];
+    // SAFETY: The caller transfers exactly the bytes of one valid Self. The
+    // four padding-free words preserve partial pointer provenance and every
+    // uninitialized byte. Their array need not have the alignment of Self.
+    let handle = unsafe { ptr::from_ref(&words).cast::<Self>().read_unaligned() };
+    let mut this = ManuallyDrop::new(handle);
+    // SAFETY: The copy carries the original handle's ownership. On failure
+    // it remains with the caller and this copy's destructor stays suppressed.
+    unsafe { Self::take_owned_window(&mut this) }
+  }
+
   /// # Safety
   ///
   /// The caller must own a live descriptor and may use it again only after `None`.
@@ -347,6 +392,13 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[inline(never)]
   unsafe fn take_backing_vec(this: &mut ManuallyDrop<Self>) -> Option<Vec<T>> {
+    // SAFETY: This transfers ownership under the same contract.
+    unsafe { Self::take_owned_window(this) }
+  }
+
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(always)]
+  unsafe fn take_owned_window(this: &mut ManuallyDrop<Self>) -> Option<Vec<T>> {
     #[cfg(smol_slice_atomic)]
     if this.layout.uses_external_owner() {
       let owner = this.layout.external_prefix_mut().owner;
