@@ -63,6 +63,11 @@ on:
         required: false
         default: 'budgets clone lazy_vec stages storage'
         type: string
+      codecheck:
+        description: "Also run the code-check lane ('true' or 'false'): per-op counts and the code per target"
+        required: false
+        default: 'true'
+        type: string
 
 # A dispatched matrix run lasts hours: it has a group of its own, keyed on the run id, so that two
 # dispatches never queue behind or cancel one another, and a push never cancels one.
@@ -272,4 +277,268 @@ jobs:
         with:
           name: bench-summary
           path: bench-summary.csv
+          if-no-files-found: warn
+
+  # ── code-check: counts and the code each target runs ─────────────────────────────────────────
+  #
+  # A clock A/B on a shared runner is too noisy to place a few nanoseconds (an A/A run moves the
+  # per-id median 0.3-1.5%, the p90 3-14%, and macOS's median 18%), so this lane takes what does not
+  # move: the instructions and the allocator calls of one operation, and the code that each target
+  # actually runs. `benches/opcount.rs` is a driver that runs one case `k` times (`opcount <case>
+  # <k>`, or `<case>@setup` for the setup alone), over the same handle types and operation bodies as
+  # `benches/budgets.rs`.
+  #
+  # On all five runners it builds `budgets` and `opcount` in the bench profile and collects the
+  # `cargo:rustc-cfg=` lines `build.rs` emitted for that build (`cfgs.txt`), both binaries (on Windows
+  # with their `.pdb`), their symbols (`llvm-nm -C`) and disassembly (`llvm-objdump -d --demangle`,
+  # from rustup's `llvm-tools`), `rustc -vV` and `machine.txt`. On the two Linux runners it also
+  # runs every case and its `@setup` under `valgrind --tool=callgrind` at k = 2000 and k = 4000;
+  # `ci/bench/callgrind_ops.py` turns each pair into a per-iteration count, which cancels the
+  # process's fixed cost, and prints the iteration less its setup per label against `bytes`.
+  #
+  # Dispatch only. `codecheck` defaults to 'true', so a dispatch that runs the matrix runs this too;
+  # `-f codecheck=false` leaves it out:
+  #   gh workflow run perf.yml --ref <branch> -f codecheck=true
+  #
+  # Windows: every multi-line step sets `shell: bash` (see bench-matrix), so no step pipes into
+  # `grep -q`.
+  code-check:
+    name: code check (${{ matrix.os }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.codecheck == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
+    env:
+      TOOLCHAIN: ${{ inputs.toolchain }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # windows-11-arm images may not ship rustup.
+            curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.exe https://win.rustup.rs/aarch64
+            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            # The Git Bash form for this step, the Windows form for the steps after it.
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cygpath -w "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$TOOLCHAIN"
+          if ! rustup component add llvm-tools; then
+            echo "::warning::llvm-tools is unavailable for this host; no symbols or disassembly"
+          fi
+      - name: Machine
+        shell: bash
+        run: |
+          mkdir -p codecheck
+          case "$RUNNER_OS" in
+            Linux) cpu=$(lscpu | grep 'Model name' | cut -d: -f2- | sed 's/^ *//') ;;
+            macOS) cpu=$(sysctl -n machdep.cpu.brand_string) ;;
+            Windows) cpu=$(powershell -NoProfile -Command '(Get-CimInstance Win32_Processor).Name' | tr -d '\r') ;;
+          esac
+          {
+            echo "runner=${{ matrix.os }}"
+            echo "os=$RUNNER_OS"
+            echo "arch=$RUNNER_ARCH"
+            echo "cpu=$cpu"
+            echo "head=$(git rev-parse HEAD)"
+            rustc -vV
+            cargo -V
+          } > codecheck/machine.txt
+          rustc -vV > codecheck/rustc-vV.txt
+          cat codecheck/machine.txt
+      - name: Resolve dependencies once
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          cp Cargo.lock codecheck/Cargo.lock
+      - name: Build budgets and opcount
+        shell: bash
+        run: cargo bench --locked --no-run --bench budgets --bench opcount 2>&1 | tee codecheck/build.log
+      - name: Build-script cfgs
+        shell: bash
+        run: |
+          # `cargo:rustc-cfg=` is what `build.rs` printed for this build; the file is
+          # `target/release/build/smol-slice-<hash>/output`, which only the run directory has.
+          found=0
+          : > codecheck/cfgs.txt
+          for f in target/release/build/smol-slice-*/output; do
+            if [ -f "$f" ]; then
+              found=1
+              echo "# $f" >> codecheck/cfgs.txt
+              grep '^cargo:rustc-cfg=' "$f" >> codecheck/cfgs.txt || echo "(no cargo:rustc-cfg line)" >> codecheck/cfgs.txt
+            fi
+          done
+          if [ "$found" = 0 ]; then
+            echo "(no build-script output found)" >> codecheck/cfgs.txt
+          fi
+          cat codecheck/cfgs.txt
+      - name: Binaries, symbols and disassembly
+        shell: bash
+        run: |
+          find_bin() {
+            local f found=""
+            for f in target/release/deps/"$1"-*; do
+              if [[ "$f" =~ /$1-[0-9a-f]+(\.exe)?$ ]]; then found="$f"; fi
+            done
+            if [ -z "$found" ]; then
+              echo "no $1 binary under target/release/deps" >&2
+              return 1
+            fi
+            echo "$found"
+          }
+          ext=""
+          sysroot=$(rustc --print sysroot)
+          if [ "$RUNNER_OS" = Windows ]; then
+            ext=".exe"
+            sysroot=$(cygpath -u "$sysroot")
+          fi
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          tools="$sysroot/lib/rustlib/$host/bin"
+          for b in budgets opcount; do
+            bin=$(find_bin "$b")
+            echo "$b: $bin" >> codecheck/binaries.txt
+            cp "$bin" "codecheck/$b$ext"
+            pdb="${bin%.exe}.pdb"
+            if [ -f "$pdb" ]; then cp "$pdb" "codecheck/$b.pdb"; fi
+            if [ -f "$tools/llvm-objdump$ext" ] && [ -f "$tools/llvm-nm$ext" ]; then
+              if ! "$tools/llvm-nm$ext" -C "$bin" | gzip -9 > "codecheck/$b.nm.gz"; then
+                echo "::warning::llvm-nm failed on $b"
+              fi
+              if ! "$tools/llvm-objdump$ext" -d --demangle "$bin" | gzip -9 > "codecheck/$b.dis.gz"; then
+                echo "::warning::llvm-objdump failed on $b"
+              fi
+            else
+              echo "llvm-tools is missing under $tools; no symbols or disassembly for $b" | tee -a codecheck/disasm-skipped.txt
+            fi
+          done
+          cat codecheck/binaries.txt
+          ls -l codecheck
+      - name: Count with callgrind
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y valgrind
+          valgrind --version
+          opcount="$PWD/codecheck/opcount"
+          mkdir -p codecheck/callgrind
+          failed=0
+          # Every case and its setup alone, each at two values of k, so that the fixed cost of the
+          # process cancels in the difference.
+          for name in $("$opcount" --list); do
+            for variant in "$name" "$name@setup"; do
+              for k in 2000 4000; do
+                out="codecheck/callgrind/callgrind.$variant.$k.out"
+                if ! valgrind --tool=callgrind --callgrind-out-file="$out" -q "$opcount" "$variant" "$k" > /dev/null 2> codecheck/callgrind/stderr.txt; then
+                  failed=$((failed + 1))
+                  echo "::warning::callgrind run failed: $variant k=$k"
+                  cat codecheck/callgrind/stderr.txt
+                  rm -f "$out"
+                fi
+              done
+            done
+          done
+          rm -f codecheck/callgrind/stderr.txt
+          echo "failed runs: $failed"
+          if [ "$failed" -ne 0 ]; then exit 1; fi
+      - name: Per-op counts
+        if: ${{ always() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          status=0
+          python3 -I ci/bench/callgrind_ops.py --dir codecheck/callgrind \
+            --platform "${{ matrix.os }}" --csv codecheck/callgrind_ops.csv \
+            > codecheck/callgrind_table.md || status=$?
+          cat codecheck/callgrind_table.md
+          if [ -d codecheck/callgrind ]; then
+            tar czf codecheck/callgrind.tar.gz -C codecheck callgrind
+            rm -rf codecheck/callgrind
+          fi
+          exit "$status"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codecheck-${{ matrix.os }}
+          path: codecheck
+          if-no-files-found: warn
+
+  # ── codecheck-summary: the cfgs and the counts of every platform ─────────────────────────────
+  #
+  # Runs after every code-check job, whether it passed or not. A platform with no artifact is
+  # named instead of being left out. Each platform's section is its machine, the `cargo:rustc-cfg=`
+  # lines its build emitted, and (Linux only) the per-op count tables.
+  codecheck-summary:
+    name: code check summary
+    needs: code-check
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.codecheck == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every platform's artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codecheck-*
+          path: codecheck-artifacts
+      - name: Summarize
+        shell: bash
+        run: |
+          {
+            echo "# code check"
+            echo
+            for runner in ubuntu-latest ubuntu-24.04-arm windows-latest windows-11-arm macos-latest; do
+              dir="codecheck-artifacts/codecheck-$runner"
+              echo "## $runner"
+              echo
+              if [ ! -d "$dir" ]; then
+                echo "No artifact: the job did not run or did not upload."
+                echo
+                continue
+              fi
+              if [ -f "$dir/machine.txt" ]; then
+                echo '```'
+                grep -E '^(cpu|arch|os|head)=|^rustc |^host:|^release:' "$dir/machine.txt" || true
+                echo '```'
+                echo
+              fi
+              echo 'Build-script cfgs, from cfgs.txt:'
+              echo
+              echo '```'
+              if [ -f "$dir/cfgs.txt" ]; then cat "$dir/cfgs.txt"; else echo "(missing)"; fi
+              echo '```'
+              echo
+              if [ -f "$dir/disasm-skipped.txt" ]; then
+                echo '```'
+                cat "$dir/disasm-skipped.txt"
+                echo '```'
+                echo
+              fi
+              if [ -f "$dir/callgrind_table.md" ]; then
+                cat "$dir/callgrind_table.md"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Combine the count CSVs
+        shell: bash
+        run: |
+          first=1
+          for f in codecheck-artifacts/*/callgrind_ops.csv; do
+            if [ ! -f "$f" ]; then continue; fi
+            if [ "$first" = 1 ]; then
+              cat "$f" > callgrind_ops_all.csv
+              first=0
+            else
+              tail -n +2 "$f" >> callgrind_ops_all.csv
+            fi
+          done
+      - name: Upload the combined CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: callgrind-summary
+          path: callgrind_ops_all.csv
           if-no-files-found: warn
