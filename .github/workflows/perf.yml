@@ -63,6 +63,11 @@ on:
         required: false
         default: 'budgets clone lazy_vec stages storage'
         type: string
+      control:
+        description: "With base: run base, head and head again per round and target ('true' or 'false'), so that every A/B change has its own A/A band"
+        required: false
+        default: 'false'
+        type: string
       codecheck:
         description: "Also run the code-check lane ('true' or 'false'): per-op counts and the code per target"
         required: false
@@ -141,8 +146,27 @@ jobs:
   # ceiling is 360) and a Benchmark step of 320, so that an overrun still reaches the upload with
   # the rounds already done. Narrow `filter` or lower `rounds` for a quick run.
   #
+  # With `base` and `control` set, each round and target runs base (`--save-baseline base`), head
+  # (`head1`) and head AGAIN (`head2`), all in the same job, in fresh processes. The summarizer reads
+  # the three baselines: A/B is base -> head1 and A/A is head1 -> head2, and an A/B change counts as
+  # moved only when it leaves that cell's A/A band (`ci/bench/summarize.py` says the rule). Both heads
+  # are the same build: the A/A band covers the noise of the process and the run, not the layout
+  # noise of a second build. For that, dispatch with `base` set to the head's own commit: the two
+  # builds are then identical code. A control run takes three bench runs per round instead of one or
+  # two: pass `rounds` of five and a narrow `filter` and `benches`.
+  #
+  # Every artifact `timed-<runner>` holds the bench executables that ran, head and base, each with
+  # its `.pdb` and `.map` when there are any, `sha256.txt`, `verified.txt` (that each executable on
+  # disk after the run is the one copied before it), and the `llvm-objdump` listing of each, so that
+  # every A/B carries the code of what it timed. It is a separate artifact so that `bench-summary`
+  # does not download it.
+  #
   # Windows: every multi-line step sets `shell: bash` explicitly (PowerShell breaks backslash
-  # continuations), which also turns `pipefail` on, so no step pipes into `grep -q`.
+  # continuations), which also turns `pipefail` on, so no step pipes into `grep -q`. On Windows both
+  # this job and `code-check` link with `-MAP` (RUSTFLAGS `-C link-arg=-MAP`: link.exe takes `-` as
+  # `/`, and a leading `/` would be rewritten to a path by Git Bash) so that the `.map` names the
+  # loops that the `.pdb` does not. A map only reads the link, but the flags are the same in both
+  # jobs, so that the timed binaries are the ones `code-check` lists.
   bench-matrix:
     name: bench matrix (${{ matrix.os }})
     if: github.event_name == 'workflow_dispatch'
@@ -158,6 +182,7 @@ jobs:
       TOOLCHAIN: ${{ inputs.toolchain }}
       ROUNDS: ${{ inputs.rounds }}
       BENCHES: ${{ inputs.benches }}
+      CONTROL: ${{ inputs.control }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -175,6 +200,10 @@ jobs:
           fi
           rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$TOOLCHAIN"
+      - name: Link maps on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTFLAGS=-C link-arg=-MAP" >> "$GITHUB_ENV"
       - name: Machine
         shell: bash
         run: |
@@ -208,6 +237,46 @@ jobs:
           mv machine.tmp machine.txt
           # Both sides build against the same resolved dependencies.
           cp Cargo.lock "$RUNNER_TEMP/base-src/Cargo.lock"
+      - name: Build the timed binaries
+        shell: bash
+        run: |
+          # Build every bench target once, up front, and copy the executables that cargo names:
+          # the Benchmark step below runs these same files (it is checked afterwards).
+          source ci/bench/cargo_artifacts.sh
+          mkdir -p timed
+          : > timed/paths.txt
+          : > timed/sha256.txt
+          ext=""
+          if [ "$RUNNER_OS" = Windows ]; then ext=".exe"; fi
+          heads=()
+          for b in $BENCHES; do heads+=(--bench "$b"); done
+          status=0
+          cargo bench --locked --no-run "${heads[@]}" --message-format=json-render-diagnostics > timed/head.jsonl 2> timed/head-build.log || status=$?
+          cat timed/head-build.log
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          for b in $BENCHES; do
+            bin=$(timed_collect timed/head.jsonl "$PWD" "$b" timed/head)
+            printf '%s\t%s\t%s\n' head "$b" "$bin" >> timed/paths.txt
+            echo "$(sha256_of "timed/head/$b$ext")  head/$b$ext" >> timed/sha256.txt
+          done
+          if [ -n "$BASE_REF" ]; then
+            bases=()
+            for b in $BENCHES; do
+              if [ -f "$RUNNER_TEMP/base-src/benches/$b.rs" ]; then bases+=(--bench "$b"); fi
+            done
+            if [ "${#bases[@]}" -gt 0 ]; then
+              (cd "$RUNNER_TEMP/base-src" && cargo bench --locked --no-run "${bases[@]}" --message-format=json-render-diagnostics) > timed/base.jsonl 2> timed/base-build.log || status=$?
+              cat timed/base-build.log
+              if [ "$status" -ne 0 ]; then exit "$status"; fi
+              for b in $BENCHES; do
+                if [ ! -f "$RUNNER_TEMP/base-src/benches/$b.rs" ]; then continue; fi
+                bin=$(timed_collect timed/base.jsonl "$RUNNER_TEMP/base-src" "$b" timed/base)
+                printf '%s\t%s\t%s\n' base "$b" "$bin" >> timed/paths.txt
+                echo "$(sha256_of "timed/base/$b$ext")  base/$b$ext" >> timed/sha256.txt
+              done
+            fi
+          fi
+          cat timed/sha256.txt
       - name: Benchmark
         shell: bash
         timeout-minutes: 320
@@ -227,6 +296,17 @@ jobs:
               for b in $BENCHES; do order="$b $order"; done
             fi
             for b in $order; do
+              if [ -n "$BASE_REF" ] && [ "$CONTROL" = true ]; then
+                # Base, head, then head again, each under its own baseline name. The two heads are
+                # adjacent in time, so that A/A sees the drift that A/B sees. A bench the base lacks
+                # still gets its two heads.
+                if [ -f "$RUNNER_TEMP/base-src/benches/$b.rs" ]; then
+                  (cd "$RUNNER_TEMP/base-src" && cargo bench --locked --bench "$b" -- "${args[@]}" --save-baseline base)
+                fi
+                cargo bench --locked --bench "$b" -- "${args[@]}" --save-baseline head1
+                cargo bench --locked --bench "$b" -- "${args[@]}" --save-baseline head2
+                continue
+              fi
               if [ -n "$BASE_REF" ] && [ -f "$RUNNER_TEMP/base-src/benches/$b.rs" ]; then
                 (cd "$RUNNER_TEMP/base-src" && cargo bench --locked --bench "$b" -- "${args[@]}" --save-baseline base)
                 compare=(--baseline-lenient base)
@@ -246,6 +326,54 @@ jobs:
             criterion-rounds
             machine.txt
             Cargo.lock
+          if-no-files-found: warn
+      - name: Verify and list the timed binaries
+        if: always()
+        shell: bash
+        run: |
+          source ci/bench/cargo_artifacts.sh
+          if [ ! -s timed/paths.txt ]; then
+            echo "no timed binary was recorded"
+            exit 0
+          fi
+          ext=""
+          if [ "$RUNNER_OS" = Windows ]; then ext=".exe"; fi
+          if ! rustup component add llvm-tools; then
+            echo "::warning::llvm-tools is unavailable for this host; no listings"
+          fi
+          tools=$(llvm_tools_dir)
+          echo "llvm tools: $tools"
+          : > timed/verified.txt
+          # The loop reads paths.txt on its stdin, so every tool in it reads /dev/null.
+          while IFS=$'\t' read -r side b bin; do
+            copy="timed/$side/$b$ext"
+            was=$(sha256_of "$copy")
+            now=$(sha256_of "$bin")
+            if [ "$was" = "$now" ]; then
+              echo "same     $side/$b $was" >> timed/verified.txt
+            else
+              echo "CHANGED  $side/$b was $was now $now" >> timed/verified.txt
+              echo "::warning::the $side $b executable changed after it was copied"
+            fi
+            if [ -f "$tools/llvm-objdump$ext" ] && [ -f "$tools/llvm-nm$ext" ]; then
+              if ! "$tools/llvm-nm$ext" -C "$copy" < /dev/null | gzip -9 > "timed/$side/$b.nm.gz"; then
+                echo "::warning::llvm-nm failed on $side/$b"
+              fi
+              if ! "$tools/llvm-objdump$ext" -d --demangle "$copy" < /dev/null | gzip -9 > "timed/$side/$b.dis.gz"; then
+                echo "::warning::llvm-objdump failed on $side/$b"
+              fi
+            else
+              echo "llvm-tools is missing under $tools; no listing for $side/$b" | tee -a timed/disasm-skipped.txt
+            fi
+          done < timed/paths.txt
+          cat timed/verified.txt
+          ls -l timed timed/head
+      - name: Upload the timed binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timed-${{ matrix.os }}
+          path: timed
           if-no-files-found: warn
 
   # ── bench-summary: one summary for every platform ────────────────────────────────────────────
@@ -293,7 +421,8 @@ jobs:
   # binaries (found by the `executable` field of cargo's JSON messages, never by a guessed path; on
   # Windows with their `.pdb`), their symbols (`llvm-nm -C`) and disassembly (`llvm-objdump -d --demangle`,
   # from rustup's `llvm-tools`), `rustc -vV` and `machine.txt`. On the two Linux runners it also
-  # runs every case and its `@setup` under `valgrind --tool=callgrind` at k = 2000 and k = 4000;
+  # runs every case and its `@setup`, dropping and (`--forget`) forgetting what the loop makes,
+  # under `valgrind --tool=callgrind` at k = 2000 and k = 4000;
   # `ci/bench/callgrind_ops.py` turns each pair into a per-iteration count, which cancels the
   # process's fixed cost, and prints the iteration less its setup per label against `bytes`.
   #
@@ -332,6 +461,10 @@ jobs:
           if ! rustup component add llvm-tools; then
             echo "::warning::llvm-tools is unavailable for this host; no symbols or disassembly"
           fi
+      - name: Link maps on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTFLAGS=-C link-arg=-MAP" >> "$GITHUB_ENV"
       - name: Machine
         shell: bash
         run: |
@@ -440,6 +573,15 @@ jobs:
                 break
               fi
             done
+            # With `-MAP` (Windows), link.exe names the symbols the `.pdb` lacks, in a map file
+            # named after its output, beside it or in its own directory.
+            for map in "${bin%.exe}.map" "$(dirname "$bin")/$b"*.map "./$(basename "${bin%.exe}").map"; do
+              if [ -f "$map" ]; then
+                cp "$map" "codecheck/$b.map"
+                echo "$b map: $map" >> codecheck/binaries.txt
+                break
+              fi
+            done
             if [ -f "$tools/llvm-objdump$ext" ] && [ -f "$tools/llvm-nm$ext" ]; then
               if ! "$tools/llvm-nm$ext" -C "$bin" | gzip -9 > "codecheck/$b.nm.gz"; then
                 echo "::warning::llvm-nm failed on $b"
@@ -463,18 +605,28 @@ jobs:
           opcount="$PWD/codecheck/opcount"
           mkdir -p codecheck/callgrind
           failed=0
+          count() {
+            local out=$1
+            shift
+            if ! valgrind --tool=callgrind --callgrind-out-file="$out" -q "$opcount" "$@" > /dev/null 2> codecheck/callgrind/stderr.txt; then
+              failed=$((failed + 1))
+              echo "::warning::callgrind run failed: $*"
+              cat codecheck/callgrind/stderr.txt
+              rm -f "$out"
+            fi
+          }
           # Every case and its setup alone, each at two values of k, so that the fixed cost of the
-          # process cancels in the difference.
+          # process cancels in the difference. Then the same with `--forget` (file name suffix
+          # `@forget`), which leaks what the loop would drop, so that no drop is counted; the `drop`
+          # op has no such variant.
           for name in $("$opcount" --list); do
             for variant in "$name" "$name@setup"; do
               for k in 2000 4000; do
-                out="codecheck/callgrind/callgrind.$variant.$k.out"
-                if ! valgrind --tool=callgrind --callgrind-out-file="$out" -q "$opcount" "$variant" "$k" > /dev/null 2> codecheck/callgrind/stderr.txt; then
-                  failed=$((failed + 1))
-                  echo "::warning::callgrind run failed: $variant k=$k"
-                  cat codecheck/callgrind/stderr.txt
-                  rm -f "$out"
-                fi
+                count "codecheck/callgrind/callgrind.$variant.$k.out" "$variant" "$k"
+                case "$name" in
+                  *-drop-*) ;;
+                  *) count "codecheck/callgrind/callgrind.$variant@forget.$k.out" --forget "$variant" "$k" ;;
+                esac
               done
             done
           done
