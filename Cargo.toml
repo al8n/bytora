@@ -57,6 +57,16 @@ path = "benches/budgets.rs"
 name = "budgets"
 harness = false
 
+[[bench]]
+path = "benches/stages.rs"
+name = "stages"
+harness = false
+
+[[bench]]
+path = "benches/storage.rs"
+name = "storage"
+harness = false
+
 [profile.bench]
 opt-level = 3
 debug = false
