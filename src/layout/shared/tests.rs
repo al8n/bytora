@@ -235,6 +235,8 @@ fn unique_vector_owners_return_their_allocation_from_either_conversion() {
         let mut values = Vec::with_capacity(INPUT.len() + spare);
         values.extend_from_slice(&INPUT);
         let (base, capacity) = (values.as_ptr(), values.capacity());
+        // The spare count selects the owner encoding only at this exact capacity.
+        assert_eq!(capacity, INPUT.len() + spare);
         let mut source = if wide {
           Slice::<usize, S>::try_from_vec(values)
         } else {
@@ -295,6 +297,8 @@ fn shared_vector_owners_keep_the_handle_and_copy_until_the_last_peer() {
       let mut values = Vec::with_capacity(INPUT.len() + spare);
       values.extend_from_slice(&INPUT);
       let (base, capacity) = (values.as_ptr(), values.capacity());
+      // The spare count selects the owner encoding only at this exact capacity.
+      assert_eq!(capacity, INPUT.len() + spare);
       let mut source = Slice::<usize, S>::try_from_shared_vec(values).unwrap();
       let (start, visible) = if trim {
         source.advance(1);
