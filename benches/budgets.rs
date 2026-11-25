@@ -72,6 +72,25 @@ mod ownership {
     }
   }
 
+  // `N = 0`'s own constructor, `TryFrom<Vec<T>>`, which reaches `adopt_vec` through
+  // `try_from_shared_vec`. `Bytes` has no fallible or shared-vector constructor: its nearest
+  // equivalent is `Bytes::from(Vec<u8>)`, the same body as its `from_vec`.
+  trait Adopt: Handle {
+    fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
+  }
+
+  impl Adopt for Slice<u8, smol_slice::typenum::U0> {
+    fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
+      <Self as TryFrom<Vec<u8>>>::try_from(values)
+    }
+  }
+
+  impl Adopt for Bytes {
+    fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
+      Ok(Self::from(values))
+    }
+  }
+
   fn bench(
     group: &mut BenchmarkGroup<'_, WallTime>,
     operation: &str,
@@ -184,6 +203,51 @@ mod ownership {
     black_box(&peer);
   }
 
+  fn adopt_cases<T: Adopt, const PAD: usize>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    label: &str,
+    len: usize,
+  ) {
+    let stride = if PAD == 0 { size_of::<T>() } else { STRIDE };
+    assert_eq!(size_of::<(T, [u8; PAD])>(), stride);
+    assert_eq!(size_of::<(Option<T>, [u8; PAD])>(), stride);
+    let source = match T::try_from_vec(input(len)) {
+      Ok(source) => source,
+      Err(values) => {
+        assert_eq!(values, &CONTENTS[..len]);
+        eprintln!("budgets: try_from_vec {label}/len_{len} unrepresentable; skipped");
+        return;
+      }
+    };
+    assert_eq!(source.as_bytes(), &CONTENTS[..len]);
+    if len != 0 {
+      assert!(source.is_unique());
+    }
+    drop(source);
+
+    bench(group, "try_from_vec", label, len, |b| {
+      b.iter_batched(
+        || input(len),
+        |values| {
+          black_box((
+            T::try_from_vec(black_box(values)).expect("representable input"),
+            [0u8; PAD],
+          ))
+        },
+        BATCH,
+      );
+    });
+  }
+
+  // `N = 0` and `Bytes` are the same size, so one padding serves both.
+  fn adoption<const PAD: usize>(group: &mut BenchmarkGroup<'_, WallTime>) {
+    let label = format!("n_0_handle_{}", size_of::<SliceN<u8, 0>>());
+    for len in [0, 7, 64] {
+      adopt_cases::<SliceN<u8, 0>, PAD>(group, &label, len);
+      adopt_cases::<Bytes, PAD>(group, "bytes", len);
+    }
+  }
+
   fn assert_layout<const N: usize>()
   where
     [u8; N]: AssocInlineSize,
@@ -237,6 +301,7 @@ mod ownership {
     for len in [0, 3, 7, 64] {
       cases::<Bytes, { STRIDE - size_of::<Bytes>() }>(&mut group, "bytes", len);
     }
+    adoption::<{ STRIDE - size_of::<Bytes>() }>(&mut group);
     group.finish();
 
     // Native stride exposes real array density instead of padding all handles.
@@ -245,6 +310,7 @@ mod ownership {
     for len in [0, 3, 7, 64] {
       cases::<Bytes, 0>(&mut group, "bytes", len);
     }
+    adoption::<0>(&mut group);
     group.finish();
   }
 }
