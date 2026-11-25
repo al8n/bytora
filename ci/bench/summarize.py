@@ -25,6 +25,30 @@ the median over rounds, with the operation and key it came from; with a base, a 
 the largest |change| against the base), then each platform's full tables. A runner named by
 --expect whose artifact is missing is named in the overview.
 
+The CPU. Parity is a statement about a CPU model, not a runner name, and two dispatches of the same
+runner can land on different CPUs. So `machine.txt`'s `cpu` is a column of every CSV row, the
+overview columns are labelled by it and ordered by it (identical CPUs sit together), and each
+platform's section is titled with it.
+
+The A/A control. A run with `control` (see `perf.yml`) saves each round's base, head and a second
+head under the criterion baseline names `base`, `head1` and `head2`, in one job, in that order and
+in fresh processes. Per round and cell, A/B is the change of `head1` against `base`, and A/A the
+change of `head2` against `head1`: the same code twice, so the A/A change is pure noise, of the
+size that the A/B change carries on top of any real difference. The headline ns of such a run are
+`head1`'s. The rule, per cell:
+  - the A/A band is the largest |A/A| over the rounds, but at least 1% (criterion's own default
+    noise threshold). A/B is the difference of two runs just as A/A is, so its noise has the same
+    spread, and the largest of n rounds of A/A is the band that the next A/B draw of pure noise
+    falls inside with probability n / (n + 1). No further multiple is applied: the rule below also
+    asks for every round, which squares the odds against a false call.
+  - the cell has MOVED only when its A/B change leaves the band in every round that has an A/A
+    pair, always on the same side. It LEANS when only its median over the rounds leaves the band.
+    Otherwise it has NOT MOVED.
+  - five rounds are the least that supports a call: with fewer, the largest A/A is a poor estimate
+    of the band, and the output states the number of rounds.
+Both heads are one build, so the band covers the noise of the process and of the machine, not the
+layout noise of a second build. Dispatch with `base` set to the head's own commit to measure that.
+
 Bench ids understood as a table of (labels x operations):
   budgets_*/{op}/{label}/len_{len}            one table per (group, len)
   stages_*/{op}/{label}/len_{len}_cap_{cap}   one table per (group, len, cap)
@@ -41,6 +65,7 @@ import sys
 
 DASH = "—"
 CONTROL = "bytes"
+BAND_FLOOR_PCT = 1.0  # criterion's default noise threshold
 LABEL_RE = re.compile(r"^n_(\d+)_handle_(\d+)$")
 
 
@@ -91,7 +116,11 @@ def read_tree(root):
         change = median_of(load_json(os.path.join(d, "change", "estimates.json")))
         if change is not None:
             change = tuple(100.0 * v for v in change)  # criterion stores a fraction
-        out[full_id] = {"est": est, "base": base, "change": change}
+        head1 = median_of(load_json(os.path.join(d, "head1", "estimates.json")))
+        head2 = median_of(load_json(os.path.join(d, "head2", "estimates.json")))
+        if head1 is not None:
+            est = head1  # a control run: `new` is the second head
+        out[full_id] = {"est": est, "base": base, "change": change, "head1": head1, "head2": head2}
     return out
 
 
@@ -140,6 +169,15 @@ def med(values):
     return statistics.median(values) if values else None
 
 
+def pct(new, old):
+    return (new - old) / old * 100.0 if new is not None and old else None
+
+
+def percentile(values, q):
+    values = sorted(values)
+    return values[int(q * (len(values) - 1))] if values else None
+
+
 class Model:
     """One platform: its rounds, per-id medians and the ratio against the control."""
 
@@ -149,18 +187,95 @@ class Model:
         self.ids = sorted({i for r in self.rounds for i in r}, key=num_order)
         self.rows = {}
         for i in self.ids:
-            ns = [r[i]["est"][0] if i in r else None for r in self.rounds]
-            ch = [r[i]["change"][0] if i in r and r[i]["change"] else None for r in self.rounds]
-            if all(c is None for c in ch) and i in base_tree:
-                b = base_tree[i]["est"][0]
-                ch = [(n - b) / b * 100.0 if n is not None and b else None for n in ns]
+            entries = [r.get(i) for r in self.rounds]
+            ns = [e["est"][0] if e else None for e in entries]
+            controlled = any(e and e["head1"] for e in entries)
+            aa = [pct(e["head2"][0], e["head1"][0]) if e and e["head1"] and e["head2"] else None
+                  for e in entries]
+            if controlled:
+                # base -> head1, from the saved baselines; criterion's `change` would be head2's.
+                ch = [pct(e["head1"][0], e["base"][0]) if e and e["head1"] and e["base"] else None
+                      for e in entries]
+            else:
+                ch = [e["change"][0] if e and e["change"] else None for e in entries]
+                if all(c is None for c in ch) and i in base_tree:
+                    b = base_tree[i]["est"][0]
+                    ch = [pct(n, b) for n in ns]
             base_ns = [
                 (base_tree[i]["est"][0] if i in base_tree
-                 else (r[i]["base"][0] if i in r and r[i]["base"] else None))
-                for r in self.rounds
+                 else (e["base"][0] if e and e["base"] else None))
+                for e in entries
             ]
-            self.rows[i] = {"ns": ns, "change": ch, "base_ns": base_ns}
+            self.rows[i] = {"ns": ns, "change": ch, "base_ns": base_ns, "aa": aa}
         self.has_base = any(any(c is not None for c in r["change"]) for r in self.rows.values())
+        self.has_control = any(any(a is not None for a in r["aa"]) for r in self.rows.values())
+
+    def verdict(self, i):
+        """The A/B verdict of one cell against its own A/A band, or None without both."""
+        row = self.rows[i]
+        pairs = [(a, b) for a, b in zip(row["change"], row["aa"]) if a is not None and b is not None]
+        if not pairs:
+            return None
+        band = max(BAND_FLOOR_PCT, max(abs(b) for _, b in pairs))
+        ab = [a for a, _ in pairs]
+        one_side = all(a > 0 for a in ab) or all(a < 0 for a in ab)
+        median = statistics.median(ab)
+        if one_side and all(abs(a) > band for a in ab):
+            state = "moved"
+        elif abs(median) > band:
+            state = "leans"
+        else:
+            state = "not moved"
+        return {"state": state, "ab": median, "band": band, "n": len(pairs)}
+
+    def aa_spread(self):
+        """(median |A/A|, p90 |A/A|, count) over every cell and round, or None."""
+        values = [abs(a) for r in self.rows.values() for a in r["aa"] if a is not None]
+        if not values:
+            return None
+        return statistics.median(values), percentile(values, 0.9), len(values)
+
+    def verdict_stats(self):
+        """{(group, label): counts and the largest moved and not-moved A/B changes}"""
+        res = {}
+        for i in self.ids:
+            p = parse_id(i)
+            v = self.verdict(i) if p else None
+            if p is None or v is None or p[4] == CONTROL:
+                continue
+            group, kind, key, op, label = p
+            cur = res.setdefault((group, label), {"n": 0, "moved": 0, "leans": 0,
+                                                  "top_moved": None, "top_unmoved": None})
+            cur["n"] += 1
+            where = f"{op} @ {key}"
+            if v["state"] == "moved":
+                cur["moved"] += 1
+                if cur["top_moved"] is None or abs(v["ab"]) > abs(cur["top_moved"][0]):
+                    cur["top_moved"] = (v["ab"], where)
+            else:
+                if v["state"] == "leans":
+                    cur["leans"] += 1
+                if cur["top_unmoved"] is None or abs(v["ab"]) > abs(cur["top_unmoved"][0]):
+                    cur["top_unmoved"] = (v["ab"], where)
+        return res
+
+    def moved_table(self):
+        """The cells that moved or lean, with their A/B and A/A per round."""
+        rows = []
+        for i in self.ids:
+            v = self.verdict(i)
+            if v and v["state"] != "not moved":
+                rows.append((i, v))
+        if not rows:
+            return ["No cell moved or leans beyond its A/A band.\n"]
+        out = ["| id | A/B per round | A/A per round | band | verdict |", "|---|---|---|---:|---|"]
+        for i, v in rows:
+            ab = ", ".join(DASH if c is None else f"{c:+.1f}%" for c in self.rows[i]["change"])
+            aa = ", ".join(DASH if c is None else f"{c:+.1f}%" for c in self.rows[i]["aa"])
+            out.append(f"| `{i}` | {ab} | {aa} | ±{v['band']:.1f}% | **{v['state']}** "
+                       f"({v['ab']:+.1f}%, {v['n']} rounds) |")
+        out.append("")
+        return out
 
     def ratio(self, i, rd):
         p = parse_id(i)
@@ -178,8 +293,9 @@ class Model:
     def med_change(self, i):
         return med(self.rows[i]["change"])
 
-    def csv_rows(self, platform):
+    def csv_rows(self, platform, cpu=""):
         for i in self.ids:
+            v = self.verdict(i)
             for rd, tree in enumerate(self.rounds):
                 if i not in tree:
                     continue
@@ -187,8 +303,11 @@ class Model:
                 r = self.ratio(i, rd)
                 b = self.rows[i]["base_ns"][rd]
                 c = self.rows[i]["change"][rd]
-                yield [platform, i, rd + 1, est[0], est[1], est[2], "" if r is None else r,
-                       "" if b is None else b, "" if c is None else c]
+                a = self.rows[i]["aa"][rd]
+                h2 = tree[i]["head2"]
+                yield [platform, cpu, i, rd + 1, est[0], est[1], est[2], "" if r is None else r,
+                       "" if b is None else b, "" if c is None else c, "" if a is None else a,
+                       "" if h2 is None else h2[0], v["state"] if v else ""]
 
     def tables(self, level="###"):
         out = []
@@ -205,11 +324,14 @@ class Model:
             labels = tables[(group, key)]
             ops = sorted({op for l in labels.values() for op in l}, key=num_order)
             head = ["label"] + ops + ["max ratio"] + (["largest change vs base"] if self.has_base else [])
+            if self.has_control:
+                head.append("A/B moved")
             out.append(f"{level} {group} · {key}\n")
             out.append("| " + " | ".join(head) + " |")
             out.append("|" + "|".join(["---"] + ["---:"] * (len(head) - 1)) + "|")
             for label in sorted(labels, key=label_order):
                 cells, best, best_op, worst = [], None, None, None
+                judged = moved = leans = 0
                 for op in ops:
                     i = labels[label].get(op)
                     if i is None:
@@ -223,9 +345,17 @@ class Model:
                     c = self.med_change(i)
                     if c is not None and (worst is None or abs(c) > abs(worst)):
                         worst = c
+                    v = self.verdict(i) if self.has_control else None
+                    if v:
+                        judged += 1
+                        moved += v["state"] == "moved"
+                        leans += v["state"] == "leans"
                 line = [f"`{label}`"] + cells + [DASH if best is None else f"{best:.2f}× {best_op}"]
                 if self.has_base:
                     line.append(fmt_pct(worst))
+                if self.has_control:
+                    line.append(DASH if not judged
+                                else f"{moved}/{judged}" + (f" (+{leans} lean)" if leans else ""))
                 out.append("| " + " | ".join(line) + " |")
             out.append("")
         if flat:
@@ -274,22 +404,55 @@ def read_machine(path):
     return info
 
 
-def overview(models, missing, key_idx, title, fmt):
-    """One table per bench group: rows = labels, columns = platforms."""
-    names = list(models) + list(missing)
+def overview(models, columns, key_idx, title, fmt):
+    """One table per bench group: rows = labels, columns = platforms, headed by their CPU."""
+    names = [n for n, _ in columns]
     ext = {n: models[n].extremes() for n in models}
     groups = sorted({g for e in ext.values() for (g, _) in e}, key=num_order)
     out = [f"### {title}\n"]
     for group in groups:
         labels = sorted({l for e in ext.values() for (g, l) in e if g == group}, key=label_order)
         out.append(f"**{group}**\n")
-        out.append("| label | " + " | ".join(names) + " |")
+        out.append("| label | " + " | ".join(h for _, h in columns) + " |")
         out.append("|---|" + "|".join(["---:"] * len(names)) + "|")
         for label in labels:
             cells = []
             for n in names:
                 v = ext.get(n, {}).get((group, label))
                 cells.append(fmt(v) if v and v[key_idx] is not None else DASH)
+            out.append(f"| `{label}` | " + " | ".join(cells) + " |")
+        out.append("")
+    return out
+
+
+def verdict_overview(models, columns):
+    """One table per bench group: how many A/B cells of a label moved beyond their A/A band."""
+    stats = {n: models[n].verdict_stats() for n in models if models[n].has_control}
+    groups = sorted({g for st in stats.values() for (g, _) in st}, key=num_order)
+    out = ["### Overview: A/B changes against their own A/A bands\n",
+           "Per cell, the A/B change (base to head) counts as MOVED only when it leaves that cell's "
+           "A/A band (head against head again, same job) in every round, on one side; it LEANS when "
+           "only its median does (rule in `ci/bench/summarize.py`). A cell is one operation at one "
+           "len/cap (or backing); the cell shows how many of a label's cells moved, then the largest "
+           "moved change and the largest one that did not.\n"]
+    for group in groups:
+        labels = sorted({l for st in stats.values() for (g, l) in st if g == group}, key=label_order)
+        out.append(f"**{group}**\n")
+        out.append("| label | " + " | ".join(h for _, h in columns) + " |")
+        out.append("|---|" + "|".join(["---:"] * len(columns)) + "|")
+        for label in labels:
+            cells = []
+            for n, _ in columns:
+                v = stats.get(n, {}).get((group, label))
+                if not v:
+                    cells.append(DASH)
+                    continue
+                text = f"{v['moved']}/{v['n']} moved" + (f", {v['leans']} lean" if v["leans"] else "")
+                if v["top_moved"]:
+                    text += f"<br>largest moved {v['top_moved'][0]:+.1f}% {v['top_moved'][1]}"
+                if v["top_unmoved"]:
+                    text += f"<br>largest not moved {v['top_unmoved'][0]:+.1f}% {v['top_unmoved'][1]}"
+                cells.append(text)
             out.append(f"| `{label}` | " + " | ".join(cells) + " |")
         out.append("")
     return out
@@ -320,43 +483,63 @@ def platforms_mode(args):
             continue
         models[n] = m
 
+    cpu_of = {n: (infos.get(n, {}).get("cpu") or "") for n in names}
+    order = sorted(models, key=lambda n: (cpu_of[n], n))
+    columns = [(n, f"`{n}`<br>{cpu_of[n] or DASH}") for n in order] + [(n, f"`{n}`<br>{DASH}") for n in missing]
+    controlled = [n for n in order if models[n].has_control]
     out = [f"## Benchmark matrix: {len(models)} of {len(names)} platform(s) with results\n",
            "A cell is the label's largest ratio against `bytes` in the same run, over every operation and "
            "len/cap (or backing) key of the group, the median over rounds, with the operation and key it "
            "came from. Absolute ns do not compare across runners; ratios do.\n"]
-    out.append("| platform | CPU | head | base | state |")
-    out.append("|---|---|---|---|---|")
+    out.append("| platform | CPU | head | base | state |" + (" A/A \\|change\\|: median, p90 |" if controlled else ""))
+    out.append("|---|---|---|---|---|" + ("---:|" if controlled else ""))
     for n in names:
         i = infos.get(n, {})
         state = "ok" if n in models else ("artifact present, no benchmark results" if n in empty
                                            else "**MISSING: no artifact (the job failed or never ran)**")
-        out.append(f"| {n} | {i.get('cpu', DASH) or DASH} | `{(i.get('head') or DASH)[:10]}` | "
-                   f"`{(i.get('base') or DASH)[:10]}` | {state} |")
+        row = (f"| {n} | {i.get('cpu', DASH) or DASH} | `{(i.get('head') or DASH)[:10]}` | "
+               f"`{(i.get('base') or DASH)[:10]}` | {state} |")
+        if controlled:
+            spread = models[n].aa_spread() if n in models else None
+            row += (f" {spread[0]:.1f}%, {spread[1]:.1f}% (n={spread[2]}) |" if spread else f" {DASH} |")
+        out.append(row)
     out.append("")
     if missing:
         out.append("Missing platforms (shown as `—` below): " + ", ".join(f"`{n}`" for n in missing) + "\n")
     if models:
-        out += overview(models, missing, 0, "Overview: largest ratio against `bytes`",
+        out += overview(models, columns, 0, "Overview: largest ratio against `bytes`, by CPU",
                         lambda v: f"{v[0]:.2f}× {v[1]}")
+        if controlled:
+            out += verdict_overview(models, columns)
         if any(m.has_base for m in models.values()):
-            out += overview(models, missing, 2, "Overview: largest change against the base",
+            out += overview(models, columns, 2,
+                            "Overview: largest change against the base"
+                            + (" (not corrected for the A/A band: see the verdicts above)" if controlled else ""),
                             lambda v: f"{v[2]:+.1f}% {v[3]}")
-        for n, m in models.items():
+        for n in order:
+            m = models[n]
             i = infos[n]
             out.append(f"## {n} · {i.get('cpu', DASH) or DASH}\n")
+            if m.has_control:
+                spread = m.aa_spread()
+                out.append(f"A/A (head against head again, same job): median |change| {spread[0]:.1f}%, "
+                           f"p90 {spread[1]:.1f}% over {spread[2]} cell-rounds. "
+                           f"{len(m.rounds)} round(s); five are the least that supports a verdict.\n")
+                out.append("#### Cells that moved or lean\n")
+                out += m.moved_table()
             out += m.tables("###")
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(CSV_HEAD)
-            for n, m in models.items():
-                w.writerows(m.csv_rows(n))
+            for n in order:
+                w.writerows(models[n].csv_rows(n, cpu_of[n]))
     sys.stdout.write("\n".join(out) + "\n")
     return 0
 
 
-CSV_HEAD = ["platform", "id", "round", "median_ns", "ci_low_ns", "ci_high_ns", "ratio_vs_bytes",
-            "base_median_ns", "change_pct"]
+CSV_HEAD = ["platform", "cpu", "id", "round", "median_ns", "ci_low_ns", "ci_high_ns", "ratio_vs_bytes",
+            "base_median_ns", "change_pct", "aa_change_pct", "head2_median_ns", "ab_verdict"]
 
 
 def glob_rounds(d):
@@ -384,7 +567,7 @@ def main(argv=None):
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(CSV_HEAD)
-            w.writerows(m.csv_rows(args.title))
+            w.writerows(m.csv_rows(args.title, ""))
     out = []
     if args.title:
         out.append(f"## {args.title}\n")
