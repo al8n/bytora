@@ -289,8 +289,9 @@ jobs:
   # `benches/budgets.rs`.
   #
   # On all five runners it builds `budgets` and `opcount` in the bench profile and collects the
-  # `cargo:rustc-cfg=` lines `build.rs` emitted for that build (`cfgs.txt`), both binaries (on Windows
-  # with their `.pdb`), their symbols (`llvm-nm -C`) and disassembly (`llvm-objdump -d --demangle`,
+  # cfgs `build.rs` set for that build (`cfgs.txt`, from cargo's build-script-executed message), both
+  # binaries (found by the `executable` field of cargo's JSON messages, never by a guessed path; on
+  # Windows with their `.pdb`), their symbols (`llvm-nm -C`) and disassembly (`llvm-objdump -d --demangle`,
   # from rustup's `llvm-tools`), `rustc -vV` and `machine.txt`. On the two Linux runners it also
   # runs every case and its `@setup` under `valgrind --tool=callgrind` at k = 2000 and k = 4000;
   # `ci/bench/callgrind_ops.py` turns each pair into a per-iteration count, which cancels the
@@ -356,41 +357,53 @@ jobs:
         run: |
           cargo generate-lockfile
           cp Cargo.lock codecheck/Cargo.lock
+      # Cargo's layout of `target/` changes between releases (the build-dir layout moved the bench
+      # binaries out of `target/release/deps`), so no step guesses a path: the JSON messages of this
+      # build say where each executable is and what the build script set.
       - name: Build budgets and opcount
         shell: bash
-        run: cargo bench --locked --no-run --bench budgets --bench opcount 2>&1 | tee codecheck/build.log
+        run: |
+          status=0
+          cargo bench --locked --no-run --bench budgets --bench opcount --message-format=json-render-diagnostics > codecheck/build.jsonl 2> codecheck/build.log || status=$?
+          cat codecheck/build.log
+          exit "$status"
       - name: Build-script cfgs
         shell: bash
         run: |
-          # `cargo:rustc-cfg=` is what `build.rs` printed for this build; the file is
-          # `target/release/build/smol-slice-<hash>/output`, which only the run directory has.
-          found=0
+          source ci/bench/cargo_artifacts.sh
+          # The `cfgs` of the package's build-script-executed message are what `build.rs` set with
+          # `cargo:rustc-cfg=`. The package is the one that owns the `budgets` bench; its package_id
+          # is not a name.
+          pid=$(cargo_json codecheck/build.jsonl pid budgets)
+          if [ -z "$pid" ]; then
+            echo "no compiler-artifact message for budgets in codecheck/build.jsonl" >&2
+            exit 1
+          fi
+          seen=0
           : > codecheck/cfgs.txt
-          for f in target/release/build/smol-slice-*/output; do
-            if [ -f "$f" ]; then
-              found=1
+          echo "# build-script-executed, $pid" >> codecheck/cfgs.txt
+          lines=$(cargo_json codecheck/build.jsonl cfgs budgets)
+          while IFS= read -r line; do
+            case "$line" in
+              msg) seen=1 ;;
+              cfg:*) echo "cargo:rustc-cfg=${line#cfg:}" >> codecheck/cfgs.txt ;;
+            esac
+          done <<< "$lines"
+          if [ "$seen" = 0 ]; then
+            # Only if cargo sent no such message: read the build script's own output file.
+            echo "(no build-script-executed message; the output files under target/ follow)" >> codecheck/cfgs.txt
+            outputs=$(find target -path '*smol-slice*' -name output -type f || true)
+            while IFS= read -r f; do
+              if [ -z "$f" ]; then continue; fi
               echo "# $f" >> codecheck/cfgs.txt
               grep '^cargo:rustc-cfg=' "$f" >> codecheck/cfgs.txt || echo "(no cargo:rustc-cfg line)" >> codecheck/cfgs.txt
-            fi
-          done
-          if [ "$found" = 0 ]; then
-            echo "(no build-script output found)" >> codecheck/cfgs.txt
+            done <<< "$outputs"
           fi
           cat codecheck/cfgs.txt
       - name: Binaries, symbols and disassembly
         shell: bash
         run: |
-          find_bin() {
-            local f found=""
-            for f in target/release/deps/"$1"-*; do
-              if [[ "$f" =~ /$1-[0-9a-f]+(\.exe)?$ ]]; then found="$f"; fi
-            done
-            if [ -z "$found" ]; then
-              echo "no $1 binary under target/release/deps" >&2
-              return 1
-            fi
-            echo "$found"
-          }
+          source ci/bench/cargo_artifacts.sh
           ext=""
           sysroot=$(rustc --print sysroot)
           if [ "$RUNNER_OS" = Windows ]; then
@@ -399,12 +412,34 @@ jobs:
           fi
           host=$(rustc -vV | sed -n 's/^host: //p')
           tools="$sysroot/lib/rustlib/$host/bin"
+          if [ ! -f "$tools/llvm-objdump$ext" ]; then
+            found=$(find "$sysroot/lib/rustlib" -name "llvm-objdump$ext" -type f 2>/dev/null | tail -n 1 || true)
+            if [ -n "$found" ]; then tools=$(dirname "$found"); fi
+          fi
+          echo "llvm tools: $tools"
           for b in budgets opcount; do
-            bin=$(find_bin "$b")
+            # `executable` of the compiler-artifact message for the bench target, as cargo wrote it.
+            bin=$(cargo_json codecheck/build.jsonl exe "$b" | tail -n 1)
+            if [ -z "$bin" ]; then
+              echo "no executable for $b in codecheck/build.jsonl" >&2
+              exit 1
+            fi
+            if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); fi
+            if [ ! -f "$bin" ]; then
+              echo "$b: cargo named $bin, which is not a file; its directory holds:" >&2
+              ls -l "$(dirname "$bin")" >&2
+              exit 1
+            fi
             echo "$b: $bin" >> codecheck/binaries.txt
             cp "$bin" "codecheck/$b$ext"
-            pdb="${bin%.exe}.pdb"
-            if [ -f "$pdb" ]; then cp "$pdb" "codecheck/$b.pdb"; fi
+            # A Windows build leaves its `.pdb` beside the executable.
+            for pdb in "${bin%.exe}.pdb" "$(dirname "$bin")/$b"*.pdb; do
+              if [ -f "$pdb" ]; then
+                cp "$pdb" "codecheck/$b.pdb"
+                echo "$b pdb: $pdb" >> codecheck/binaries.txt
+                break
+              fi
+            done
             if [ -f "$tools/llvm-objdump$ext" ] && [ -f "$tools/llvm-nm$ext" ]; then
               if ! "$tools/llvm-nm$ext" -C "$bin" | gzip -9 > "codecheck/$b.nm.gz"; then
                 echo "::warning::llvm-nm failed on $b"
