@@ -332,6 +332,56 @@ fn shared_vector_owners_keep_the_handle_and_copy_until_the_last_peer() {
 }
 
 #[test]
+fn zero_sized_vector_windows_recover_their_slots_and_drop_the_hidden_ones() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  static DROPS: AtomicUsize = AtomicUsize::new(0);
+  #[repr(align(64))]
+  struct Count;
+  impl Drop for Count {
+    fn drop(&mut self) {
+      DROPS.fetch_add(1, Relaxed);
+    }
+  }
+
+  // The data word of a zero-sized window is a slot index, which recovery
+  // turns into the hidden prefix. The owner keeps the vector's aligned pointer.
+  fn window<S: InlineSize>() -> (Slice<Count, S>, *const Count) {
+    let values: Vec<Count> = (0..6).map(|_| Count).collect();
+    let base = values.as_ptr();
+    let mut source = Slice::<Count, S>::try_from_shared_vec(values).ok().unwrap();
+    source.advance(1);
+    source.truncate(3);
+    assert_eq!((source.as_slice().as_ptr(), source.len()), (base, 3));
+    (source, base)
+  }
+  fn check<S: InlineSize>() {
+    let (unique, base) = window::<S>();
+    let recovered = unique.try_into_vec().ok().unwrap();
+    assert_eq!((recovered.as_ptr(), recovered.len()), (base, 3));
+    assert_eq!(DROPS.swap(0, Relaxed), 3);
+    drop(recovered);
+    assert_eq!(DROPS.swap(0, Relaxed), 3);
+
+    let (shared, base) = window::<S>();
+    let peer = shared.clone();
+    let shared = shared.try_into_vec().err().unwrap();
+    assert_eq!((shared.as_slice().as_ptr(), shared.len()), (base, 3));
+    drop(shared);
+    assert_eq!(DROPS.load(Relaxed), 0);
+    let recovered = peer.try_into_vec().ok().unwrap();
+    assert_eq!((recovered.as_ptr(), recovered.len()), (base, 3));
+    assert_eq!(DROPS.swap(0, Relaxed), 3);
+    drop(recovered);
+    assert_eq!(DROPS.swap(0, Relaxed), 3);
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+}
+
+#[test]
 fn frozen_windows_copy_while_shared_and_return_their_allocation_once_unique() {
   fn check<S: InlineSize>() {
     let mut values = Vec::with_capacity(8);
