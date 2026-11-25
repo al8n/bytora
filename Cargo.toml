@@ -67,6 +67,11 @@ path = "benches/storage.rs"
 name = "storage"
 harness = false
 
+[[bench]]
+path = "benches/opcount.rs"
+name = "opcount"
+harness = false
+
 [profile.bench]
 opt-level = 3
 debug = false
