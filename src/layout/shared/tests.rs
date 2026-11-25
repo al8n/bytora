@@ -216,6 +216,232 @@ fn a_failed_four_word_take_retains_the_original_window_and_allocation() {
 }
 
 #[test]
+fn unique_vector_owners_return_their_allocation_from_either_conversion() {
+  static INPUT: [usize; 6] = [3, 5, 7, 11, 13, 17];
+
+  fn check<S: InlineSize>() {
+    // Word-sized elements keep the spare tail aligned for an embedded header.
+    // An exact vector is a raw marker, one spare element boxes the header
+    // and eight hold it in the allocation.
+    for (spare, wide) in [
+      (0, false),
+      (0, true),
+      (1, false),
+      (1, true),
+      (8, false),
+      (8, true),
+    ] {
+      for (trim, fallible) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut values = Vec::with_capacity(INPUT.len() + spare);
+        values.extend_from_slice(&INPUT);
+        let (base, capacity) = (values.as_ptr(), values.capacity());
+        let mut source = if wide {
+          Slice::<usize, S>::try_from_vec(values)
+        } else {
+          Slice::<usize, S>::try_from_shared_vec(values)
+        }
+        .unwrap();
+        let owner = source.layout.owner();
+        let header = owner.addr().wrapping_sub(base.addr());
+        match spare {
+          0 => assert_eq!(
+            vector::full_len(owner),
+            vector::AVAILABLE.then_some(INPUT.len())
+          ),
+          1 => assert!(!vector::raw(owner) && header >= capacity * size_of::<usize>()),
+          _ => assert!(!vector::raw(owner) && header < capacity * size_of::<usize>()),
+        }
+        let visible = if trim {
+          source.advance(1);
+          source.truncate(3);
+          assert_eq!(vector::full_len(source.layout.owner()), None);
+          &INPUT[1..4]
+        } else {
+          &INPUT[..]
+        };
+        let mut slot = Some(source);
+        let taken = slot.take().unwrap();
+        assert!(slot.is_none());
+        let recovered = if fallible {
+          taken.try_into_vec().ok().unwrap()
+        } else {
+          taken.into_vec()
+        };
+        assert_eq!((recovered.as_ptr(), recovered.capacity()), (base, capacity));
+        assert_eq!(recovered, visible);
+      }
+    }
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+}
+
+#[test]
+fn shared_vector_owners_keep_the_handle_and_copy_until_the_last_peer() {
+  static INPUT: [usize; 6] = [3, 5, 7, 11, 13, 17];
+
+  fn check<S: InlineSize>() {
+    for (spare, trim) in [
+      (0, false),
+      (0, true),
+      (1, false),
+      (1, true),
+      (8, false),
+      (8, true),
+    ] {
+      let mut values = Vec::with_capacity(INPUT.len() + spare);
+      values.extend_from_slice(&INPUT);
+      let (base, capacity) = (values.as_ptr(), values.capacity());
+      let mut source = Slice::<usize, S>::try_from_shared_vec(values).unwrap();
+      let (start, visible) = if trim {
+        source.advance(1);
+        source.truncate(3);
+        (1, &INPUT[1..4])
+      } else {
+        (0, &INPUT[..])
+      };
+      let peer = source.clone();
+      assert!(!vector::raw(source.layout.owner()));
+      let mut slot = Some(source);
+      let source = slot.take().unwrap().try_into_vec().err().unwrap();
+      assert!(slot.is_none());
+      assert_eq!(source.as_slice().as_ptr(), base.wrapping_add(start));
+      let copied = source.into_vec();
+      assert_eq!(copied, visible);
+      // Both buffers are live, so the copy lies outside the original allocation.
+      let offset = copied.as_ptr().addr().wrapping_sub(base.addr());
+      assert!(offset >= capacity * size_of::<usize>());
+      assert_eq!(peer.as_slice().as_ptr(), base.wrapping_add(start));
+      let recovered = peer.into_vec();
+      assert_eq!((recovered.as_ptr(), recovered.capacity()), (base, capacity));
+      assert_eq!(recovered, visible);
+    }
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+}
+
+#[test]
+fn frozen_windows_copy_while_shared_and_return_their_allocation_once_unique() {
+  fn check<S: InlineSize>() {
+    let mut values = Vec::with_capacity(8);
+    values.extend_from_slice(b"abcdef");
+    let (base, capacity) = (values.as_ptr(), values.capacity());
+    let mutable = SliceMut::<u8, S>::try_from_vec(values).ok().unwrap();
+    let mut frozen = mutable.try_freeze_shared().ok().unwrap();
+    assert_eq!(frozen.as_slice().as_ptr(), base);
+    frozen.advance(1);
+    frozen.truncate(3);
+    let peer = frozen.clone();
+    let frozen = frozen.try_into_vec().err().unwrap();
+    assert_eq!(frozen.as_slice().as_ptr(), base.wrapping_add(1));
+    let copied = frozen.into_vec();
+    assert_eq!(copied, b"bcd");
+    assert!(copied.as_ptr().addr().wrapping_sub(base.addr()) >= capacity);
+    let recovered = peer.try_into_vec().ok().unwrap();
+    assert_eq!((recovered.as_ptr(), recovered.capacity()), (base, capacity));
+    assert_eq!(recovered, b"bcd");
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+}
+
+#[test]
+fn static_and_opaque_owners_keep_the_handle_and_copy_on_demand() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  static DATA: &[u8] = b"static window";
+
+  fn check<S: InlineSize>() {
+    let mut borrowed = Slice::<u8, S>::try_from_static(DATA).unwrap();
+    borrowed.advance(7);
+    let borrowed = borrowed.try_into_vec().err().unwrap();
+    assert_eq!(borrowed.as_slice().as_ptr(), DATA[7..].as_ptr());
+    let copied = borrowed.into_vec();
+    assert_eq!(copied, b"window");
+    assert_ne!(copied.as_ptr(), DATA[7..].as_ptr());
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut opaque = Slice::<u8, S>::try_from_owner(ArrayOwner::new(&drops))
+      .ok()
+      .unwrap();
+    let base = opaque.as_slice().as_ptr();
+    opaque.advance(7);
+    let opaque = opaque.try_into_vec().err().unwrap();
+    assert_eq!(opaque.as_slice().as_ptr(), base.wrapping_add(7));
+    assert_eq!(drops.load(Relaxed), 0);
+    let copied = opaque.into_vec();
+    assert_eq!(copied, b"owner");
+    assert_eq!(drops.load(Relaxed), 1);
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+}
+
+#[test]
+fn inline_and_empty_windows_convert_into_a_fresh_vector() {
+  fn inline<S: InlineSize>() {
+    for fallible in [false, true] {
+      let mut source = Slice::<u8, S>::try_from_slice(b"inline").unwrap();
+      assert!(source.layout.is_inline());
+      source.advance(1);
+      let mut slot = Some(source);
+      let taken = slot.take().unwrap();
+      assert!(slot.is_none());
+      let values = if fallible {
+        taken.try_into_vec().ok().unwrap()
+      } else {
+        taken.into_vec()
+      };
+      assert_eq!(values, b"nline");
+    }
+  }
+  fn empty<S: InlineSize>() {
+    for source in [
+      Slice::<u8, S>::new(),
+      Slice::<u8, S>::try_from_vec(Vec::new()).unwrap(),
+    ] {
+      assert!(source.layout.is_inline());
+      assert!(source.clone().into_vec().is_empty());
+      assert!(source.try_into_vec().ok().unwrap().is_empty());
+    }
+    // An exact vector without an allocation is a raw marker of length zero.
+    let unallocated = Slice::<u8, S>::try_from_shared_vec(Vec::new()).unwrap();
+    assert_eq!(
+      vector::full_len(unallocated.layout.owner()),
+      vector::AVAILABLE.then_some(0)
+    );
+    let values = unallocated.try_into_vec().ok().unwrap();
+    assert_eq!((values.len(), values.capacity()), (0, 0));
+  }
+  inline::<crate::DefaultSize>();
+  inline::<typenum::U24>();
+  inline::<typenum::U32>();
+  inline::<typenum::U40>();
+  empty::<typenum::U0>();
+  empty::<crate::DefaultSize>();
+  empty::<typenum::U24>();
+  empty::<typenum::U32>();
+  empty::<typenum::U40>();
+
+  // The zero-budget constant is a static window, so it converts by copying.
+  let unowned = Slice::<u8, typenum::U0>::empty();
+  let unowned = unowned.try_into_vec().err().unwrap();
+  assert!(unowned.into_vec().is_empty());
+}
+
+#[test]
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
   type OneWord = SliceN<u8, { size_of::<usize>() }>;
   let short = vec![3u8; OneWord::INLINE_CAPACITY];
