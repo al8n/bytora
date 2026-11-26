@@ -1,4 +1,4 @@
-use paguro::{
+use bytora::{
   AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Slice, SliceMut, SliceMutN, SliceN,
   typenum::{Sum, U0, U8, U24, U4096, Unsigned},
 };
@@ -61,8 +61,8 @@ fn default_and_zero_budget_handles_and_options_match_bytes() {
   check::<SliceMutN<u8, 0>>();
   #[cfg(any(feature = "std", feature = "alloc"))]
   {
-    check::<paguro::LocalSlice<u8>>();
-    check::<paguro::LocalSliceN<u8, 0>>();
+    check::<bytora::LocalSlice<u8>>();
+    check::<bytora::LocalSliceN<u8, 0>>();
   }
 }
 

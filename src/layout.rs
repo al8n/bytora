@@ -172,26 +172,26 @@ struct ExternalPrefix {
 
 #[repr(transparent)]
 struct Payload<P> {
-  #[cfg(paguro_atomic)]
+  #[cfg(bytora_atomic)]
   bytes: core::cell::UnsafeCell<MaybeUninit<P>>,
-  #[cfg(not(paguro_atomic))]
+  #[cfg(not(bytora_atomic))]
   bytes: MaybeUninit<P>,
 }
 
 impl<P> Payload<P> {
   const fn new(bytes: MaybeUninit<P>) -> Self {
     Self {
-      #[cfg(paguro_atomic)]
+      #[cfg(bytora_atomic)]
       bytes: core::cell::UnsafeCell::new(bytes),
-      #[cfg(not(paguro_atomic))]
+      #[cfg(not(bytora_atomic))]
       bytes,
     }
   }
 
   const fn as_ptr(&self) -> *const P {
-    #[cfg(paguro_atomic)]
+    #[cfg(bytora_atomic)]
     return self.bytes.get().cast();
-    #[cfg(not(paguro_atomic))]
+    #[cfg(not(bytora_atomic))]
     self.bytes.as_ptr()
   }
 
@@ -203,9 +203,9 @@ impl<P> Payload<P> {
 // SAFETY: Shared writes are confined to the aligned atomic owner word of a
 // promotable external descriptor. A handle's tag, window and inline elements
 // are immutable through shared references. P is a sealed byte array.
-#[cfg(paguro_atomic)]
+#[cfg(bytora_atomic)]
 unsafe impl<P: Sync> Sync for Payload<P> {}
-#[cfg(paguro_atomic)]
+#[cfg(bytora_atomic)]
 impl<P: core::panic::RefUnwindSafe> core::panic::RefUnwindSafe for Payload<P> {}
 
 #[repr(C)]
@@ -222,12 +222,12 @@ pub struct Layout<T, S: InlineSize> {
 
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
-  const TWO_WORD_VEC: bool = cfg!(paguro_atomic) && S::HANDLE_BYTES == 2 * size_of::<usize>();
+  const TWO_WORD_VEC: bool = cfg!(bytora_atomic) && S::HANDLE_BYTES == 2 * size_of::<usize>();
   const FITS_EXTERNAL: bool = S::HANDLE_BYTES >= 3 * size_of::<usize>();
   const PACKED_LEN: bool = S::HANDLE_BYTES == 3 * size_of::<usize>();
   pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::HANDLE_BYTES <= 32;
   pub(super) const SPARSE_CLONE: bool =
-    cfg!(paguro_atomic) && Self::FITS_EXTERNAL && !Self::COMPACT_EXTERNAL && S::HANDLE_BYTES <= 128;
+    cfg!(bytora_atomic) && Self::FITS_EXTERNAL && !Self::COMPACT_EXTERNAL && S::HANDLE_BYTES <= 128;
   pub(super) const INLINE_CAPACITY: usize = if S::USIZE == 0 {
     0
   } else if size_of::<T>() == 0 {
@@ -314,7 +314,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   // Inline and compact static descriptors can be copied without an owner.
-  #[cfg(paguro_atomic)]
+  #[cfg(bytora_atomic)]
   fn uses_external_owner(&self) -> bool {
     Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
   }
@@ -368,7 +368,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       let range = self.inline_range();
       return range.end - range.start;
     }
-    #[cfg(paguro_atomic)]
+    #[cfg(bytora_atomic)]
     if Self::TWO_WORD_VEC {
       return self.two_word_len();
     }
@@ -530,7 +530,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     unsafe { ptr::from_mut(self).cast::<usize>().add(2).write(word) };
   }
 
-  #[cfg(any(test, paguro_atomic))]
+  #[cfg(any(test, bytora_atomic))]
   const fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
     if !Self::FITS_EXTERNAL || len > isize::MAX as usize {
       return None;

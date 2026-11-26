@@ -525,7 +525,7 @@ jobs:
           if [ "$seen" = 0 ]; then
             # Only if cargo sent no such message: read the build script's own output file.
             echo "(no build-script-executed message; the output files under target/ follow)" >> codecheck/cfgs.txt
-            outputs=$(find target -path '*paguro*' -name output -type f || true)
+            outputs=$(find target -path '*bytora*' -name output -type f || true)
             while IFS= read -r f; do
               if [ -z "$f" ]; then continue; fi
               echo "# $f" >> codecheck/cfgs.txt

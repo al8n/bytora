@@ -5,10 +5,10 @@
 //! observations rather than asserting counts, so the same runner can compare
 //! different implementations of the owner.
 
-#[cfg(paguro_atomic)]
+#[cfg(bytora_atomic)]
 mod measurement {
   use bytes::Bytes;
-  use paguro::{Slice, SliceN};
+  use bytora::{Slice, SliceN};
   use std::hint::black_box;
 
   const LEN: usize = 64;
@@ -154,8 +154,8 @@ mod measurement {
 }
 
 fn main() {
-  #[cfg(paguro_atomic)]
+  #[cfg(bytora_atomic)]
   measurement::run();
-  #[cfg(not(paguro_atomic))]
+  #[cfg(not(bytora_atomic))]
   eprintln!("allocation measurements require shared ownership support");
 }

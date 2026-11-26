@@ -1,8 +1,8 @@
 use bytes::{Buf, Bytes};
+use bytora::{InlineSize, Slice, SliceN};
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-use paguro::{InlineSize, Slice, SliceN};
 use smol_bytes::{Bytes as SmolBytes, compact::Bytes as CompactSmolBytes};
 use std::{
   hint::black_box,

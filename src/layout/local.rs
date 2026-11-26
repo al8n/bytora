@@ -18,12 +18,12 @@ use std::rc::Rc;
 ///
 /// ```compile_fail
 /// fn send<T: Send>() {}
-/// send::<paguro::LocalSlice<u8>>();
+/// send::<bytora::LocalSlice<u8>>();
 /// ```
 ///
 /// ```compile_fail
 /// fn sync<T: Sync>() {}
-/// sync::<paguro::LocalSlice<u8>>();
+/// sync::<bytora::LocalSlice<u8>>();
 /// ```
 #[repr(transparent)]
 pub struct LocalSlice<T, S: InlineSize = DefaultSize> {
