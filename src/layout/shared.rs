@@ -890,6 +890,23 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(smol_slice_atomic)]
   #[inline(always)]
   unsafe fn copy_retained_descriptor(&self, owner: *const ()) -> Self {
+    // Where this clone is inlined, rebuild a four-word descriptor from its
+    // fields as separate words. A sixteen-byte copy of the length and final
+    // words is stored and reloaded as one value on its way to the destination,
+    // which costs several nanoseconds after the retain on some x86-64
+    // processors. The final word of this external form holds only the tag.
+    // AArch64 keeps the copy: its clone returns through memory, and the caller
+    // reloads each sixteen-byte half as one value.
+    if cfg!(not(target_arch = "aarch64")) && S::HANDLE_BYTES == 4 * size_of::<usize>() {
+      return Self {
+        layout: Layout::external(
+          self.layout.data().cast(),
+          owner,
+          self.layout.external_len(),
+          self.layout.tag,
+        ),
+      };
+    }
     let word = size_of::<usize>();
     let src = ptr::from_ref(self).cast::<u8>();
     let mut copy = core::mem::MaybeUninit::<Self>::uninit();
