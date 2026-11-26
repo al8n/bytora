@@ -874,7 +874,7 @@ fn header_refs<T, S: InlineSize>(handle: &Slice<T, S>) -> usize {
 }
 
 #[test]
-fn four_word_clones_rebuild_each_word_and_share_one_vector_header() {
+fn four_word_clones_reproduce_each_word_and_share_one_vector_header() {
   static INPUT: [usize; 6] = [3, 5, 7, 11, 13, 17];
 
   fn check<S: InlineSize>() {
@@ -1055,6 +1055,8 @@ fn the_last_four_word_clone_of_a_vector_releases_each_element_once() {
       let mut values = Vec::with_capacity(drops.len() + spare);
       values.extend(drops.iter().map(Count));
       let base = values.as_ptr();
+      // The spare count selects the owner encoding only at this exact capacity.
+      assert_eq!(values.capacity(), drops.len() + spare);
       let mut source = Slice::<_, S>::try_from_shared_vec(values).ok().unwrap();
       if trim {
         source.advance(1);
