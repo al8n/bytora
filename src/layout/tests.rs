@@ -105,6 +105,43 @@ fn packed_static_tags_stay_external_across_short_windows() {
 }
 
 #[test]
+fn zero_budget_inline_ranges_are_the_empty_handle_with_every_word_written() {
+  type Zero<T> = crate::Vector<T, typenum::U0>;
+
+  fn check<T>(source: &Zero<T>) {
+    assert!(source.layout.is_inline() && source.is_empty());
+    for range in [
+      source.slice(..),
+      source.slice(0..0),
+      source.slice(..0),
+      source.slice(0..),
+    ] {
+      assert!(range.layout.is_inline() && range.is_empty());
+      assert_eq!(range.layout.tag, NonZeroU8::MIN);
+      // SAFETY: A four-word handle is four aligned words, and the range of a
+      // zero-budget inline window writes each of them.
+      let words = unsafe { ptr::from_ref(&range).cast::<[usize; 4]>().read() };
+      assert_eq!(words, [0, 0, 0, (1usize << TAG_SHIFT).to_le()]);
+      // A range of that range takes the same path.
+      assert!(range.slice(..).layout.is_inline());
+    }
+  }
+  check(&Zero::<u8>::new());
+  check(&Zero::<core::cell::Cell<u8>>::new());
+  check(&Zero::<()>::default());
+  // Truncating a static window to nothing leaves the empty inline handle.
+  let mut truncated = Zero::<u8>::try_from_static(b"static").unwrap();
+  truncated.truncate(0);
+  check(&truncated);
+}
+
+#[test]
+#[should_panic(expected = "slice range out of bounds")]
+fn zero_budget_inline_ranges_still_reject_a_range_past_the_end() {
+  let _ = crate::Vector::<u8, typenum::U0>::new().slice(0..1);
+}
+
+#[test]
 fn moved_external_prefix_preserves_pointer_provenance() {
   fn check<S: InlineSize>() {
     let values = [11u16, 13];

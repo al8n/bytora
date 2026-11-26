@@ -92,6 +92,13 @@ impl<T, S: InlineSize> Vector<T, S> {
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
     let len = self.len();
     let range = checked_range(range, len);
+    if S::USIZE == 0 && self.layout.is_inline() {
+      // A zero-budget inline window is always empty, and so is the only range
+      // that the check admits.
+      return Self {
+        layout: Layout::empty_inline_words(),
+      };
+    }
     if !self.layout.is_inline() {
       // SAFETY: The tag selects external storage and checked_range validated
       // both endpoints against this immutable window's length.

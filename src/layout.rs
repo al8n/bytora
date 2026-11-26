@@ -252,6 +252,26 @@ impl<T, S: InlineSize> Layout<T, S> {
     }
   }
 
+  // The empty inline handle of a four-word size, with every word written.
+  // Built from its fields, an empty handle receives only its cursor and tag:
+  // two bytes that a caller moving the handle by words reloads inside a wider
+  // load. Compact handles are routinely moved as words.
+  #[inline]
+  pub(super) fn empty_inline_words() -> Self {
+    assert!(S::HANDLE_BYTES == 4 * size_of::<usize>());
+    let mut layout = Self::empty_inline();
+    let tag_word = ((layout.tag.get() as usize) << TAG_SHIFT).to_le();
+    // SAFETY: This handle is four aligned words. Its payload bytes may hold
+    // any value, a zero cursor is the empty window, and the final address
+    // byte receives the same nonzero inline tag on either endian.
+    unsafe {
+      ptr::from_mut(&mut layout)
+        .cast::<[usize; 4]>()
+        .write([0, 0, 0, tag_word]);
+    }
+    layout
+  }
+
   pub(super) fn try_inline(values: &[T]) -> Option<Self>
   where
     T: Copy,
