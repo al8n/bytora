@@ -946,6 +946,94 @@ fn four_word_clones_rebuild_each_word_and_share_one_vector_header() {
 }
 
 #[test]
+fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
+  static INPUT: [usize; 6] = [3, 5, 7, 11, 13, 17];
+
+  // The data word, the owner word, the length and the bytes of the final word.
+  fn words<T, S: InlineSize>(
+    handle: &Slice<T, S>,
+  ) -> (*const (), *const (), usize, [u8; size_of::<usize>()]) {
+    assert_eq!(S::HANDLE_BYTES, 4 * size_of::<usize>());
+    assert!(!handle.layout.is_inline());
+    let word = ptr::from_ref(handle);
+    // SAFETY: An external handle initializes its data and length words, and
+    // neither changes through a shared reference.
+    let (data, len) = unsafe {
+      (
+        word.cast::<*const ()>().read(),
+        word.cast::<usize>().add(2).read(),
+      )
+    };
+    (data, handle.layout.owner(), len, final_word(handle))
+  }
+  // Each target's clone uses one of the two constructions. Both run here, on
+  // a source that holds the vector header they serve.
+  fn compare<T, S: InlineSize>(source: &Slice<T, S>) {
+    let held = header_refs(source);
+    let owner = source.layout.owner();
+    // SAFETY: A clone retains the header once for the handle it builds. Each
+    // construction gets its own reference here and releases it when dropped.
+    let (rebuilt, copied) = unsafe {
+      vector::Vector::<T>::retain(owner);
+      vector::Vector::<T>::retain(owner);
+      (
+        source.rebuild_retained_descriptor(owner),
+        source.copy_retained_words(owner),
+      )
+    };
+    assert_eq!(words(&rebuilt), words(&copied));
+    assert_eq!(words(&rebuilt), words(source));
+    assert_eq!(header_refs(source), held + 2);
+    drop(rebuilt);
+    drop(copied);
+    assert_eq!(header_refs(source), held);
+  }
+  fn check<S: InlineSize>() {
+    for (spare, wide) in [
+      (0, false),
+      (0, true),
+      (1, false),
+      (1, true),
+      (8, false),
+      (8, true),
+    ] {
+      for trim in [false, true] {
+        let mut values = Vec::with_capacity(INPUT.len() + spare);
+        values.extend_from_slice(&INPUT);
+        // The spare count selects the owner encoding only at this exact capacity.
+        assert_eq!(values.capacity(), INPUT.len() + spare);
+        let mut source = if wide {
+          Slice::<usize, S>::try_from_vec(values)
+        } else {
+          Slice::<usize, S>::try_from_shared_vec(values)
+        }
+        .unwrap();
+        if trim {
+          source.advance(1);
+          source.truncate(3);
+        }
+        // The first clone turns a raw marker or raw geometry into a header.
+        let peer = source.clone();
+        compare(&source);
+        compare(&peer);
+        // A window that ran out of elements keeps its descriptor.
+        let mut end = peer.clone();
+        end.advance(end.len());
+        compare(&end);
+      }
+    }
+    // The data word of a zero-sized vector window is null, then a slot index.
+    let mut slots = Slice::<(), S>::try_from_shared_vec(vec![(); 6]).unwrap();
+    compare(&slots);
+    slots.advance(1);
+    slots.truncate(3);
+    compare(&slots);
+  }
+  check::<typenum::U0>();
+  check::<crate::DefaultSize>();
+}
+
+#[test]
 fn the_last_four_word_clone_of_a_vector_releases_each_element_once() {
   use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
   struct Count<'a>(&'a AtomicUsize);
