@@ -1016,7 +1016,8 @@ fn a_four_word_clone_that_loses_the_first_promotion_retains_the_published_header
         (0, &b"abcdef"[..])
       };
       let unshared = source.layout.owner();
-      if !vector::raw(unshared) {
+      assert_eq!(vector::raw(unshared), vector::AVAILABLE);
+      if !vector::AVAILABLE {
         // Without raw owners there is no first promotion to lose.
         return;
       }
