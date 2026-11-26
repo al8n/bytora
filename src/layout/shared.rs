@@ -193,7 +193,7 @@ impl<T, S: InlineSize> Layout<T, S> {
         return vector::publish(
           self.owner_slot(),
           owner,
-          vector::Vector::<T>::new(data.cast(), full_len, full_len, 2),
+          vector::VecHeader::<T>::new(data.cast(), full_len, full_len, 2),
         );
       }
       if vector::raw(owner) {
@@ -684,7 +684,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Send + Sync,
   {
-    const { assert!(align_of::<vector::Vector<T>>() >= 2) };
+    const { assert!(align_of::<vector::VecHeader<T>>() >= 2) };
     let len = values.len();
     if Layout::<T, S>::fits_two_word_vec(len) {
       return Ok(Self {
@@ -791,7 +791,7 @@ impl<T, S: InlineSize> Slice<T, S> {
           return unsafe { self.slice_tagged_owner(owner, range, len) };
         }
         // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
-        unsafe { vector::Vector::<T>::retain(owner) };
+        unsafe { vector::VecHeader::<T>::retain(owner) };
         (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
       } else {
         // A short static window has this tag in either descriptor size.
@@ -959,7 +959,7 @@ impl<T, S: InlineSize> Slice<T, S> {
           vector::publish(
             slot,
             owner,
-            vector::Vector::<T>::new(data.cast(), len, len, 2),
+            vector::VecHeader::<T>::new(data.cast(), len, len, 2),
           )
         } else {
           vector::promote::<T>(slot, owner, data, self.layout.external_len())
@@ -1006,7 +1006,7 @@ impl<T, S: InlineSize> Slice<T, S> {
         if owner.addr() & 1 != 0 || vector::raw(owner) {
           return self.clone_tagged_owner(owner);
         }
-        vector::Vector::<T>::retain(owner);
+        vector::VecHeader::<T>::retain(owner);
         return self.copy_retained_descriptor(owner);
       }
     }

@@ -1,4 +1,4 @@
-use super::vector::{self, Vector};
+use super::vector::{self, VecHeader};
 use super::{Arc, STATIC_OWNER, arc};
 use crate::{InlineSize, Slice, layout::mutable::Window};
 use core::{mem::ManuallyDrop, ops::Range};
@@ -34,22 +34,22 @@ impl<T> StorageVtable<T> {
   };
 
   const VECTOR: Self = Self {
-    clone: Vector::<T>::retain,
+    clone: VecHeader::<T>::retain,
     into_vec: vector_into_vec,
     into_mut: vector_into_window,
     is_unique: |owner| {
       // SAFETY: A direct vector supplies a strong reference to its header.
-      vector::raw(owner) || unsafe { Vector::<T>::strong_count(owner) == 1 }
+      vector::raw(owner) || unsafe { VecHeader::<T>::strong_count(owner) == 1 }
     },
-    drop: Vector::<T>::release,
+    drop: VecHeader::<T>::release,
     zst_base: Some(|owner| {
       // SAFETY: ZST vectors always use a live direct vector header.
-      unsafe { (*owner.cast::<Vector<T>>()).base.cast() }
+      unsafe { (*owner.cast::<VecHeader<T>>()).base.cast() }
     }),
   };
 }
 
-// Shared Vec owners keep their direct Vector<T> pointer. Other managed owners put
+// Shared Vec owners keep their direct VecHeader<T> pointer. Other managed owners put
 // a pointer to their typed operations first and tag their Arc pointer. Keeping
 // the table in constant storage lets scoped T (such as &'a str) use it too.
 // Tagging the address by adding one leaves a low 001 on every target,
@@ -147,7 +147,7 @@ pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
 pub(super) unsafe fn release_owner<T>(owner: *const (), data: *const (), len: usize) {
   if vector::raw(owner) {
     // SAFETY: The consuming descriptor transfers its unpromoted allocation.
-    unsafe { drop(Vector::<T>::take_raw(owner, data, len)) };
+    unsafe { drop(VecHeader::<T>::take_raw(owner, data, len)) };
     return;
   }
   if owner.addr() & 1 == 0 {
@@ -232,8 +232,8 @@ pub(super) unsafe fn direct_into_vec<T>(
   data: *const (),
   len: usize,
 ) -> Option<Vec<T>> {
-  // SAFETY: The caller transfers a strong reference to a real Vector<T> header.
-  let original = unsafe { Vector::<T>::try_take(owner) }?;
+  // SAFETY: The caller transfers a strong reference to a real VecHeader<T>.
+  let original = unsafe { VecHeader::<T>::try_take(owner) }?;
   Some(visible_vec(original, data, len))
 }
 
@@ -251,11 +251,11 @@ fn visible_vec<T>(mut original: Vec<T>, data: *const (), len: usize) -> Vec<T> {
 unsafe fn take_vector<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
   if vector::raw(owner) {
     // SAFETY: A consuming take transfers the raw descriptor's original vector.
-    Some(unsafe { Vector::<T>::take_raw(owner, data, len) })
+    Some(unsafe { VecHeader::<T>::take_raw(owner, data, len) })
   } else {
     // SAFETY: A direct descriptor transfers its strong reference, or restores
     // it when other immutable views still exist.
-    unsafe { Vector::<T>::try_take(owner) }
+    unsafe { VecHeader::<T>::try_take(owner) }
   }
 }
 
@@ -353,5 +353,5 @@ mod covariance {
   // allocation still inside. Both stored types must admit the same coercion.
   const _: fn(StorageVtable<AnyArg>) -> StorageVtable<StaticArg> = |ops| ops;
   const _: fn(Frozen<AnyArg>) -> Frozen<StaticArg> = |managed| managed;
-  const _: fn(Vector<AnyArg>) -> Vector<StaticArg> = |buffer| buffer;
+  const _: fn(VecHeader<AnyArg>) -> VecHeader<StaticArg> = |buffer| buffer;
 }

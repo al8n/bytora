@@ -684,8 +684,8 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
   fn expected<T>(spare: usize) -> Owner {
     if spare == 0 && vector::AVAILABLE && size_of::<T>() != 0 {
       Owner::Marker
-    } else if spare.saturating_mul(size_of::<T>()) >= size_of::<vector::Vector<T>>() {
-      assert!(align_of::<T>() >= align_of::<vector::Vector<T>>());
+    } else if spare.saturating_mul(size_of::<T>()) >= size_of::<vector::VecHeader<T>>() {
+      assert!(align_of::<T>() >= align_of::<vector::VecHeader<T>>());
       Owner::Tail
     } else {
       Owner::Boxed
@@ -795,7 +795,7 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
       check::<T, typenum::U136>(element, shared);
     }
   }
-  const { assert!(size_of::<[usize; 4]>() == size_of::<vector::Vector<[usize; 4]>>()) };
+  const { assert!(size_of::<[usize; 4]>() == size_of::<vector::VecHeader<[usize; 4]>>()) };
   at_each_size(usize::MAX / 3);
   // One spare element of this size holds the header itself.
   at_each_size([usize::MAX / 3; 4]);
@@ -941,7 +941,7 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
     let owner = source.layout.owner();
     assert!(!vector::raw(owner));
     // SAFETY: This test only passes a live, directly owned Vec handle.
-    unsafe { vector::Vector::<Item<'_>>::strong_count(owner) }
+    unsafe { vector::VecHeader::<Item<'_>>::strong_count(owner) }
   }
   fn check<const BYTES: usize>()
   where
@@ -1023,7 +1023,7 @@ fn header_refs<T, S: InlineSize>(handle: &Slice<T, S>) -> usize {
   let owner = handle.layout.owner();
   assert!(owner.addr() & 1 == 0 && !vector::raw(owner));
   // SAFETY: An even owner without a raw marker is this handle's live header.
-  unsafe { vector::Vector::<T>::strong_count(owner) }
+  unsafe { vector::VecHeader::<T>::strong_count(owner) }
 }
 
 #[test]
@@ -1127,8 +1127,8 @@ fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
     // SAFETY: A clone retains the header once for the handle it builds. Each
     // construction gets its own reference here and releases it when dropped.
     let (rebuilt, copied) = unsafe {
-      vector::Vector::<T>::retain(owner);
-      vector::Vector::<T>::retain(owner);
+      vector::VecHeader::<T>::retain(owner);
+      vector::VecHeader::<T>::retain(owner);
       (
         source.rebuild_retained_descriptor(owner),
         source.copy_retained_words(owner),

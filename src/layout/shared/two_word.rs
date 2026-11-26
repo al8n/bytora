@@ -1,4 +1,4 @@
-use super::vector::{self, AtomicPtr, Vector};
+use super::vector::{self, AtomicPtr, VecHeader};
 use super::{HandleWord, InlineSize, Layout, Slice, SliceMut, Window};
 use core::{
   mem::{ManuallyDrop, MaybeUninit},
@@ -120,15 +120,15 @@ impl<T, S: InlineSize> Layout<T, S> {
     layout
   }
 
-  fn two_word_header(state: *mut (), meta: usize, strong: usize) -> Vector<T> {
+  fn two_word_header(state: *mut (), meta: usize, strong: usize) -> VecHeader<T> {
     let len = meta & MAX_LEN;
-    Vector::new(raw_base(state, meta), len, len, strong)
+    VecHeader::new(raw_base(state, meta), len, len, strong)
   }
 
   pub(super) fn two_word_unique(&self) -> bool {
     let state = self.two_word_slot().load(Ordering::Acquire);
     // SAFETY: An even pointer identifies the header pinned by this handle.
-    state.addr() & 1 != 0 || unsafe { Vector::<T>::strong_count(state) == 1 }
+    state.addr() & 1 != 0 || unsafe { VecHeader::<T>::strong_count(state) == 1 }
   }
 
   pub(super) fn two_word_slice(&self) -> &[T] {
@@ -138,7 +138,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       raw_base(state, meta)
     } else {
       // SAFETY: Acquire observes a fully initialized live header.
-      unsafe { (*state.cast::<Vector<T>>()).base }
+      unsafe { (*state.cast::<VecHeader<T>>()).base }
     };
     // SAFETY: The checked, immutable window stays within the original
     // allocation, which remains pinned across a concurrent promotion.
@@ -157,7 +157,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       unsafe { vector::publish(slot, state, Self::two_word_header(state, meta, 2)) }
     } else {
       // SAFETY: This source pins a published header. Retain it for the peer.
-      unsafe { Vector::<T>::retain(state) };
+      unsafe { VecHeader::<T>::retain(state) };
       state.cast_const()
     };
     Self::two_words(owner.cast_mut(), new_meta)
@@ -185,7 +185,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       return Some(unsafe { Vec::from_raw_parts(raw_base(state, meta), len, len) });
     }
     // SAFETY: Only a successful take consumes this strong reference.
-    unsafe { Vector::<T>::try_take(state) }
+    unsafe { VecHeader::<T>::try_take(state) }
   }
 
   pub(super) unsafe fn drop_two_word(&mut self) {
@@ -197,7 +197,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       unsafe { drop(Vec::<T>::from_raw_parts(raw_base(state, meta), len, len)) };
     } else {
       // SAFETY: The descriptor transfers its owned reference to the header.
-      unsafe { Vector::<T>::release(state) };
+      unsafe { VecHeader::<T>::release(state) };
     }
   }
 }
@@ -399,15 +399,15 @@ mod tests {
               // SAFETY: An even state is the live header this handle owns.
               let (held, strong) = unsafe {
                 (
-                  (*state.cast::<Vector<T>>()).base,
-                  Vector::<T>::strong_count(state),
+                  (*state.cast::<VecHeader<T>>()).base,
+                  VecHeader::<T>::strong_count(state),
                 )
               };
               assert_eq!((held, strong), (base, 1));
               let offset = state.addr().wrapping_sub(base.addr());
-              if spare * size_of::<T>() >= size_of::<Vector<T>>() {
+              if spare * size_of::<T>() >= size_of::<VecHeader<T>>() {
                 // Nothing pads a word-aligned tail.
-                assert!(align_of::<T>() >= align_of::<Vector<T>>());
+                assert!(align_of::<T>() >= align_of::<VecHeader<T>>());
                 assert_eq!(offset, len * size_of::<T>());
               } else {
                 // A box lies outside every byte of the vector's allocation.
@@ -430,7 +430,7 @@ mod tests {
         }
       }
     }
-    const { assert!(size_of::<[usize; 4]>() == size_of::<Vector<[usize; 4]>>()) };
+    const { assert!(size_of::<[usize; 4]>() == size_of::<VecHeader<[usize; 4]>>()) };
     for shared in [false, true] {
       check(usize::MAX / 3, shared);
       // One spare element of this size holds the header itself.
