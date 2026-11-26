@@ -3,30 +3,30 @@ use super::mutable::Window;
 use super::{COMPACT_STATIC, EXTERNAL, ExternalPrefix, InlineSize, Layout};
 use crate::{Slice, SliceMut};
 use core::{mem::ManuallyDrop, num::NonZeroU8, ops::Range, ptr, slice};
-#[cfg(all(smol_slice_atomic, feature = "extra-platforms"))]
+#[cfg(all(paguro_atomic, feature = "extra-platforms"))]
 pub(super) use portable_atomic_util::Arc;
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 use std::boxed::Box;
-#[cfg(all(smol_slice_atomic, not(feature = "extra-platforms")))]
+#[cfg(all(paguro_atomic, not(feature = "extra-platforms")))]
 pub(super) use std::sync::Arc;
 #[cfg(any(feature = "std", feature = "alloc"))]
 use std::vec::Vec;
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod arc;
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod owner;
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod two_word;
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod vector;
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 type HandleWord = core::mem::MaybeUninit<[u8; size_of::<usize>()]>;
 
 // Vec's accessors supply the raw parts independently of its private field
 // order. This record describes the initialized words of the resulting handle.
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[repr(C)]
 struct WideVecWords {
   prefix: ExternalPrefix,
@@ -34,7 +34,7 @@ struct WideVecWords {
   tag_word: usize,
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 impl WideVecWords {
   fn new<T>(data: *const T, owner: *const (), len: usize, tag: u8) -> Self {
     Self {
@@ -53,7 +53,7 @@ impl WideVecWords {
 const STATIC_OWNER: *const () = ptr::without_provenance(1);
 
 impl<T, S: InlineSize> Layout<T, S> {
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(always)]
   fn adopt_wide_vec(mut values: Vec<T>) -> Self {
     const {
@@ -117,7 +117,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   fn owner_slot(&self) -> &vector::AtomicPtr<()> {
     let prefix = self.external_ptr().cast_mut();
     // SAFETY: The external descriptor guarantees that the whole field exists.
@@ -130,7 +130,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   fn owner(&self) -> *const () {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if vector::AVAILABLE && self.uses_external_owner() {
       return self
         .owner_slot()
@@ -141,7 +141,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     unsafe { (*self.external_ptr()).owner }
   }
 
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(paguro_atomic))]
   unsafe fn retain_owner(
     &self,
     _data: *const (),
@@ -156,7 +156,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   ///
   /// `data` and `len` must be the current external descriptor's data word and
   /// visible length. Removing `front` and `back` elements must stay within it.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   unsafe fn retain_owner(
     &self,
     data: *const (),
@@ -174,7 +174,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   /// load if its slot can be promoted. `data` and `len` must be the source's
   /// data word and visible length. The ends omitted by `front` and `back`
   /// must fit together within that window.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline]
   unsafe fn retain_loaded_owner(
     &self,
@@ -216,14 +216,14 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   fn narrow_owner(&mut self, _front: usize, _back: usize) -> *const () {
     let owner = self.external_prefix_mut().owner;
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if vector::raw(owner) {
       let owner = vector::narrow(owner, _front, _back)
         .unwrap_or_else(|| vector::box_raw::<T>(owner, self.data(), self.len()));
       self.external_prefix_mut().owner = owner;
       return owner;
     }
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if arc::is_arc(owner) {
       let narrowed = arc::narrow(owner, _front, _back).unwrap_or_else(|| {
         let (data, len) = (self.data(), self.external_len());
@@ -268,7 +268,7 @@ impl<T> Slice<T, typenum::U0> {
 ///
 /// Returns the original vector if it contains more than `isize::MAX` elements.
 /// `Send + Sync` allows the owning handles to be cloned and used across threads.
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
   type Error = Vec<T>;
 
@@ -280,7 +280,7 @@ impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
   }
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 impl<T: Send + Sync, S: InlineSize> TryFrom<Box<[T]>> for Slice<T, S> {
   type Error = Box<[T]>;
 
@@ -312,7 +312,7 @@ impl<T> Slice<T> {
   /// # Panics
   ///
   /// Panics if the owner exposes more than `isize::MAX` elements.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[track_caller]
   pub fn from_owner<O>(owner: O) -> Self
   where
@@ -348,7 +348,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     if self.layout.is_inline() {
       return true;
     }
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     {
       if Layout::<T, S>::TWO_WORD_VEC {
         return self.layout.two_word_unique();
@@ -357,7 +357,7 @@ impl<T, S: InlineSize> Slice<T, S> {
       // SAFETY: This handle keeps the tagged owner and its table alive.
       unsafe { (owner::operations::<T>(owner).is_unique)(owner) }
     }
-    #[cfg(not(smol_slice_atomic))]
+    #[cfg(not(paguro_atomic))]
     false
   }
 
@@ -369,7 +369,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     SliceMut::from_inline_layout(unsafe { ptr::read(&this.layout) })
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   unsafe fn take_external<R>(
     owner: *const (),
     data: *const (),
@@ -395,7 +395,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     if self.layout.is_inline() {
       return Ok(self.into_inline_mut());
     }
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     {
       if Layout::<T, S>::TWO_WORD_VEC {
         return self.take_two_word_mut();
@@ -409,7 +409,7 @@ impl<T, S: InlineSize> Slice<T, S> {
         None => Err(ManuallyDrop::into_inner(this)),
       }
     }
-    #[cfg(not(smol_slice_atomic))]
+    #[cfg(not(paguro_atomic))]
     Err(self)
   }
 
@@ -453,19 +453,19 @@ impl<T, S: InlineSize> Slice<T, S> {
       }
       return Ok(self.take_one_word_box().into_vec());
     }
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return self.take_two_word_vec();
     }
     let mut this = ManuallyDrop::new(self);
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     let full_len = if vector::AVAILABLE && this.layout.uses_external_owner() {
       // SAFETY: The consuming handle has exclusive access to its owner slot.
       vector::full_len(unsafe { (*this.layout.external_ptr()).owner })
     } else {
       None
     };
-    #[cfg(not(smol_slice_atomic))]
+    #[cfg(not(paguro_atomic))]
     let full_len = None;
     let (data, len, capacity) = if let Some(len) = full_len {
       (this.layout.data().cast_mut().cast(), len, len)
@@ -519,7 +519,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[inline(always)]
   unsafe fn take_owned_window(this: &mut ManuallyDrop<Self>) -> Option<Vec<T>> {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if this.layout.uses_external_owner() {
       let owner = this.layout.external_prefix_mut().owner;
       let (data, len) = (this.layout.data(), this.layout.external_len());
@@ -567,7 +567,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   ///
   /// ```compile_fail
   /// use core::cell::Cell;
-  /// use smol_slice::Slice;
+  /// use paguro::Slice;
   ///
   /// fn handle(cells: &'static [Cell<u8>]) -> Slice<Cell<u8>> {
   ///     Slice::from_static(cells)
@@ -596,7 +596,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// The shared constructor requires `Send + Sync` because clones can share
   /// their elements across threads. It is available with `alloc` or `std` on
   /// targets with pointer-width atomics, or with the `extra-platforms` feature.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline]
   pub fn try_from_vec(values: Vec<T>) -> Result<Self, Vec<T>>
   where
@@ -649,7 +649,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   ///
   /// Uses the same sizes, element lengths and target requirements as
   /// [`Self::try_from_shared_vec`]. Returns the original box on failure.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   pub fn try_from_boxed_slice(values: Box<[T]>) -> Result<Self, Box<[T]>>
   where
     T: Send + Sync,
@@ -678,7 +678,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// targets or 32,767 on 32-bit targets. The first share or window adjustment
   /// of a two-word exact-capacity vector allocates its owner. Returns the
   /// original vector if its backing cannot be represented.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline]
   pub fn try_from_shared_vec(values: Vec<T>) -> Result<Self, Vec<T>>
   where
@@ -700,7 +700,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     })
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(always)]
   fn adopt_vec(mut values: Vec<T>) -> Layout<T, S> {
     let len = values.len();
@@ -719,7 +719,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     )
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   fn indexed_zst_base(&self) -> Option<owner::ZstBase> {
     if size_of::<T>() == 0 {
       let owner = self.layout.owner();
@@ -731,12 +731,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn shared_slice(&self) -> &[T] {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return self.layout.two_word_slice();
     }
     let data = self.layout.data();
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     let data = match self.indexed_zst_base() {
       // SAFETY: The callback belongs to this live Vec or frozen Window and
       // returns its original aligned ZST pointer, independent of slot offset.
@@ -752,7 +752,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   // count has been checked against the remainder of this descriptor's window.
   fn subwindow_data(&self, count: usize) -> *const T {
     let data = self.layout.data();
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if self.indexed_zst_base().is_some() {
       // This sum is bounded by the originally accepted length (isize::MAX).
       return ptr::without_provenance(data.addr() + count);
@@ -768,7 +768,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) unsafe fn slice_shared(&self, range: Range<usize>, len: usize) -> Self {
     debug_assert!(!self.layout.is_inline() && len == self.len());
     debug_assert!(range.start <= range.end && range.end <= len);
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return Self {
         layout: self.layout.share_two_word(range),
@@ -776,7 +776,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
     let data = self.subwindow_data(range.start);
     let kind = self.layout.tag;
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if (Layout::<T, S>::PACKED_LEN || S::HANDLE_BYTES == 4 * size_of::<usize>())
       && vector::AVAILABLE
       && size_of::<T>() != 0
@@ -825,7 +825,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Its promotable slot must have yielded `owner` with an acquire load and
   /// at least one of the two low bits set. `len` is the source's visible
   /// length and `range` must be an ordered subrange of it.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(never)]
   unsafe fn slice_tagged_owner(&self, owner: *const (), range: Range<usize>, len: usize) -> Self {
     let data = self.layout.data();
@@ -855,7 +855,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn advance_shared(&mut self, count: usize) {
     let len = self.len();
     assert!(count <= len, "advance past end");
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       if count != 0 {
         self.layout.keep_two_word(count..len);
@@ -872,7 +872,7 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   pub(crate) fn truncate_shared(&mut self, len: usize) {
     debug_assert!(len <= self.len());
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       self.layout.keep_two_word(0..len);
       return;
@@ -883,7 +883,7 @@ impl<T, S: InlineSize> Slice<T, S> {
       .set_external_len(len, Layout::<T, S>::external_kind(owner));
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(always)]
   unsafe fn copy_retained_descriptor(&self, owner: *const ()) -> Self {
     // On targets that inline the clone, rebuild a four-word descriptor from
@@ -903,7 +903,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   // The caller must have retained this four-word external window. Its final
   // word holds only the tag, so these fields reproduce every word that
   // copy_retained_words copies.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(always)]
   unsafe fn rebuild_retained_descriptor(&self, owner: *const ()) -> Self {
     Self {
@@ -916,7 +916,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(always)]
   unsafe fn copy_retained_words(&self, owner: *const ()) -> Self {
     let word = size_of::<usize>();
@@ -946,7 +946,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(never)]
   unsafe fn clone_tagged_owner(&self, owner: *const ()) -> Self {
     if vector::raw(owner) {
@@ -987,9 +987,9 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   // A call boundary keeps the inline payload copy separate from construction
   // of a sparse external descriptor in the caller's return slot on AArch64.
-  #[cfg_attr(all(target_arch = "aarch64", smol_slice_atomic), inline(never))]
+  #[cfg_attr(all(target_arch = "aarch64", paguro_atomic), inline(never))]
   pub(crate) fn clone_descriptor(&self) -> Self {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if self.layout.uses_external_owner() {
       let owner = if vector::AVAILABLE {
         self
@@ -1017,7 +1017,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     unsafe { ptr::read(self) }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   #[inline(never)]
   pub(crate) fn replace_external_clone(&mut self, source: &Self) {
     let data = source.layout.data();
@@ -1043,7 +1043,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn clone_shared(&self) -> Self {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::TWO_WORD_VEC {
       return Self {
         layout: self.layout.share_two_word(0..self.len()),
@@ -1063,7 +1063,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 impl<T, S: InlineSize> Drop for Slice<T, S> {
   #[inline(always)]
   fn drop(&mut self) {
@@ -1082,5 +1082,5 @@ impl<T, S: InlineSize> Drop for Slice<T, S> {
   }
 }
 
-#[cfg(all(test, smol_slice_atomic))]
+#[cfg(all(test, paguro_atomic))]
 mod tests;

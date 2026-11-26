@@ -1,4 +1,4 @@
-use smol_slice::{
+use paguro::{
   AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Slice, SliceMut, SliceMutN, SliceN,
   typenum::{Sum, U0, U8, U24, U4096, Unsigned},
 };
@@ -61,8 +61,8 @@ fn default_and_zero_budget_handles_and_options_match_bytes() {
   check::<SliceMutN<u8, 0>>();
   #[cfg(any(feature = "std", feature = "alloc"))]
   {
-    check::<smol_slice::LocalSlice<u8>>();
-    check::<smol_slice::LocalSliceN<u8, 0>>();
+    check::<paguro::LocalSlice<u8>>();
+    check::<paguro::LocalSliceN<u8, 0>>();
   }
 }
 

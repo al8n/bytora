@@ -1,4 +1,4 @@
-# smol-slice
+# paguro
 
 `Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
 inline. An immutable `Slice` can also borrow static data or share owned data.
@@ -15,7 +15,7 @@ and [`bytes::BytesMut`](https://docs.rs/bytes/1.12.2/bytes/struct.BytesMut.html)
 while their generic element types and inline storage introduce the limits described below.
 
 ```rust
-use smol_slice::{SliceMut, SliceMutN, typenum::U24};
+use paguro::{SliceMut, SliceMutN, typenum::U24};
 
 let mut bytes: SliceMut<u8, U24> = SliceMutN::<u8, 24>::try_from_slice(b"key=value").unwrap();
 bytes.advance(4);
@@ -47,7 +47,7 @@ The same size and alignment rules apply to downstream types, including
 Use `MAX_HANDLE_BYTES` for the largest supported total handle size.
 
 ```rust
-use smol_slice::{SliceN, MAX_HANDLE_BYTES};
+use paguro::{SliceN, MAX_HANDLE_BYTES};
 
 #[repr(transparent)]
 struct UserId(u16);
@@ -67,7 +67,7 @@ Generic mutable constructors can use `S: WritableSize<T>`: positive sizes requir
 `T: Copy`, while `U0` accepts any element type.
 
 ```rust
-use smol_slice::{InlineSize, Slice, typenum::U24};
+use paguro::{InlineSize, Slice, typenum::U24};
 
 fn copy_inline<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
     assert_eq!(size_of::<Slice<T, S>>(), S::HANDLE_BYTES);
@@ -83,7 +83,7 @@ corresponding type-level size. The numeric aliases cover every supported size,
 including values without a named typenum constant.
 
 ```rust
-use smol_slice::{AssocInlineSize, SliceN};
+use paguro::{AssocInlineSize, SliceN};
 
 fn copy_inline<T: Copy, const N: usize>(values: &[T]) -> Option<SliceN<T, N>>
 where
@@ -98,33 +98,33 @@ assert_eq!(copy_inline::<_, 4104>(b"small").unwrap().as_slice(), b"small");
 An unsupported size is a compile-time error.
 
 ```compile_fail
-use smol_slice::{InlineSize, typenum::U1};
+use paguro::{InlineSize, typenum::U1};
 fn supported<S: InlineSize>() {}
 supported::<U1>();
 ```
 
 ```compile_fail
 use core::mem::size_of;
-use smol_slice::SliceN;
+use paguro::SliceN;
 let _ = SliceN::<u8, { size_of::<usize>() / 2 }>::try_from_slice(b"a");
 ```
 
 ```compile_fail
 use core::mem::size_of;
-use smol_slice::SliceN;
+use paguro::SliceN;
 let _ = SliceN::<u8, { 2 * size_of::<usize>() + size_of::<usize>() / 2 }>::try_from_slice(b"abc");
 ```
 
 ```compile_fail
 use core::mem::size_of;
-use smol_slice::SliceMutN;
+use paguro::SliceMutN;
 let _ = SliceMutN::<u8, { 8192 + size_of::<usize>() }>::try_from_slice(&[]);
 ```
 
 The crate seals `InlineSize` so each supported size has a checked layout.
 
 ```compile_fail
-use smol_slice::InlineSize;
+use paguro::InlineSize;
 struct CustomSize;
 impl InlineSize for CustomSize {}
 ```
@@ -147,7 +147,7 @@ Static storage works with just `core` on targets with or without atomics.
 Elements can be any `Sync` type, including types with no `Clone` implementation.
 
 ```rust
-use smol_slice::{Slice, SliceN};
+use paguro::{Slice, SliceN};
 
 static HEADER: Slice<u8> = Slice::from_static(b"content-type");
 let field = HEADER.slice(8..);
@@ -163,7 +163,7 @@ the elements. For a wide handle, reusing an existing destination with
 The generated code depends on the compiler and the caller.
 
 ```rust
-use smol_slice::SliceN;
+use paguro::SliceN;
 
 let source = SliceN::<u8, 4096>::try_from_static(b"shared").unwrap();
 let mut destination = SliceN::<u8, 4096>::try_from_slice(&[]).unwrap();
@@ -244,7 +244,7 @@ elements allocates a small owner for that view and its descendants.
 extern crate alloc;
 use alloc::rc::Rc;
 use core::cell::Cell;
-use smol_slice::LocalSlice;
+use paguro::LocalSlice;
 
 let values: Rc<[Cell<u8>]> = Rc::from([Cell::new(3), Cell::new(9)]);
 let whole = LocalSlice::<_>::from_rc(values.clone());
@@ -270,7 +270,7 @@ storage when available, returning `None` if the input cannot fit;
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
 # {
-use smol_slice::Slice;
+use paguro::Slice;
 
 let whole = Slice::<u8>::try_from_vec((0..32).collect()).unwrap();
 let mut tail = whole.clone();
@@ -294,7 +294,7 @@ drops, even when its window is empty.
 # #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 # {
 use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use smol_slice::SliceN;
+use paguro::SliceN;
 
 let counters = SliceN::<AtomicUsize, 0>::try_from(vec![AtomicUsize::new(0)]).unwrap();
 let peer = counters.clone();
@@ -368,7 +368,7 @@ new vector without requiring `Clone`.
 ```rust
 # #[cfg(any(feature = "std", feature = "alloc"))]
 # {
-use smol_slice::SliceMutN;
+use paguro::SliceMutN;
 
 let mut words = SliceMutN::<String, 0>::from(vec!["one".into(), "two".into()]);
 words.advance(1);
@@ -380,7 +380,7 @@ assert_eq!(words.as_slice(), &["two!"]);
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
 # {
-use smol_slice::SliceMut;
+use paguro::SliceMut;
 
 let mut first = SliceMut::<u8>::with_capacity(32);
 first.extend_from_slice(b"hello");
@@ -419,7 +419,7 @@ critical section with these downstream dependencies:
 
 ```toml
 [dependencies]
-smol-slice = { path = "../smol-slice", default-features = false, features = ["extra-platforms"] }
+paguro = { path = "../paguro", default-features = false, features = ["extra-platforms"] }
 portable-atomic = { version = "1", default-features = false, features = ["critical-section"] }
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 ```

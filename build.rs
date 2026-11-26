@@ -18,7 +18,7 @@ fn typenum(bytes: usize) -> String {
 
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
-  println!("cargo:rustc-check-cfg=cfg(smol_slice_atomic)");
+  println!("cargo:rustc-check-cfg=cfg(paguro_atomic)");
   let alloc =
     env::var_os("CARGO_FEATURE_STD").is_some() || env::var_os("CARGO_FEATURE_ALLOC").is_some();
   let native_cas = env::var("CARGO_CFG_TARGET_HAS_ATOMIC")
@@ -26,7 +26,7 @@ fn main() {
     .split(',')
     .any(|width| width == "ptr");
   if alloc && (native_cas || env::var_os("CARGO_FEATURE_EXTRA_PLATFORMS").is_some()) {
-    println!("cargo:rustc-cfg=smol_slice_atomic");
+    println!("cargo:rustc-cfg=paguro_atomic");
   }
 
   let word = match env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() {

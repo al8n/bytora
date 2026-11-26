@@ -1,4 +1,4 @@
-use smol_slice::{InlineSize, Slice, SliceN};
+use paguro::{InlineSize, Slice, SliceN};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
@@ -21,16 +21,16 @@ fn length_queries_are_const_for_static_windows_and_initialized_empty_handles() {
       measure(&ZERO_EMPTY),
     ]
   }
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(paguro_atomic))]
   const LENGTHS: [(usize, bool); 5] = lengths();
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(paguro_atomic))]
   let result = LENGTHS;
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   let result = lengths();
   const LOCAL_LEN: usize = {
     let handle = Slice::<u8>::from_static(b"abc");
     let len = handle.len();
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     core::mem::forget(handle);
     len
   };
@@ -213,7 +213,7 @@ fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
   assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
   type TwoWords = SliceN<u8, { 2 * size_of::<usize>() }>;
@@ -234,7 +234,7 @@ fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
   }
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn copied_values_spill_and_reject_unrepresentable_zst_lengths() {
   let source = vec![7u8; Slice::<u8>::INLINE_CAPACITY + 3];
@@ -251,7 +251,7 @@ fn copied_values_spill_and_reject_unrepresentable_zst_lengths() {
   assert!(SliceN::<(), 0>::try_copy_from_slice(too_long).is_none());
 }
 
-#[cfg(not(smol_slice_atomic))]
+#[cfg(not(paguro_atomic))]
 #[test]
 fn core_only_copy_does_not_require_send_or_sync() {
   #[derive(Clone, Copy)]
@@ -265,7 +265,7 @@ fn core_only_copy_does_not_require_send_or_sync() {
   );
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn owned_split_edges_and_clear_release_exactly_the_expected_owner() {
   use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -324,7 +324,7 @@ fn owned_split_edges_and_clear_release_exactly_the_expected_owner() {
   drop(suffix);
   assert_eq!(drops.load(SeqCst), 10);
 }
-#[cfg(all(feature = "std", smol_slice_atomic))]
+#[cfg(all(feature = "std", paguro_atomic))]
 #[test]
 fn unallocated_vecs_clone_and_thaw_without_allocating() {
   #[derive(Clone, Copy)]
@@ -333,9 +333,9 @@ fn unallocated_vecs_clone_and_thaw_without_allocating() {
     _value: u8,
   }
 
-  fn check<S: smol_slice::InlineSize>() {
+  fn check<S: paguro::InlineSize>() {
     let allocations = allocation_counter::measure(|| {
-      let empty = smol_slice::Slice::<Aligned, S>::try_from_vec(Vec::new())
+      let empty = paguro::Slice::<Aligned, S>::try_from_vec(Vec::new())
         .ok()
         .unwrap();
       let clone = core::hint::black_box(&empty).clone();
@@ -347,8 +347,8 @@ fn unallocated_vecs_clone_and_thaw_without_allocating() {
     assert_eq!(allocations.count_total, 0);
   }
 
-  check::<smol_slice::typenum::U0>();
-  check::<smol_slice::typenum::U24>();
-  check::<smol_slice::typenum::U32>();
-  check::<smol_slice::typenum::U136>();
+  check::<paguro::typenum::U0>();
+  check::<paguro::typenum::U24>();
+  check::<paguro::typenum::U32>();
+  check::<paguro::typenum::U136>();
 }

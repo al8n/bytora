@@ -37,10 +37,10 @@
 //! `--forget`, every case and every `@setup` case runs once, dropping and forgetting, as a smoke
 //! check.
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod driver {
   use bytes::Bytes;
-  use smol_slice::{InlineSize, Slice, SliceN, typenum};
+  use paguro::{InlineSize, Slice, SliceN, typenum};
   use std::{
     hint::black_box,
     ops::Range,
@@ -412,18 +412,18 @@ mod driver {
   }
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 fn main() -> std::process::ExitCode {
   driver::main()
 }
 
 // Without shared ownership there is nothing to count; `cargo bench -- --test` still passes.
-#[cfg(not(smol_slice_atomic))]
+#[cfg(not(paguro_atomic))]
 fn main() -> std::process::ExitCode {
   let smoke = std::env::args()
     .nth(1)
     .is_some_and(|arg| arg.starts_with('-'));
-  eprintln!("opcount: shared ownership (smol_slice_atomic) is unavailable on this build");
+  eprintln!("opcount: shared ownership (paguro_atomic) is unavailable on this build");
   if smoke {
     std::process::ExitCode::SUCCESS
   } else {

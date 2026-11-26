@@ -1,10 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 mod ownership {
   use bytes::Bytes;
   use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime};
-  use smol_slice::{InlineSize, Slice, SliceN};
+  use paguro::{InlineSize, Slice, SliceN};
   use std::{
     hint::black_box,
     mem::size_of,
@@ -519,9 +519,9 @@ mod ownership {
 }
 
 fn benchmarks(c: &mut Criterion) {
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   ownership::benchmarks(c);
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(paguro_atomic))]
   let _ = c;
 }
 

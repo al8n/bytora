@@ -1,4 +1,4 @@
-use smol_slice::SliceMutN;
+use paguro::SliceMutN;
 
 #[test]
 fn bounded_growth_split_and_reclaim_cover_inline_capacity() {
@@ -94,7 +94,7 @@ fn promotions_and_vector_recovery_preserve_allocations_and_spare_capacity() {
   assert_eq!(allocated.capacity(), capacity);
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn heap_splits_partition_unused_space_and_rejoin_without_moving_elements() {
   let mut data = Vec::with_capacity(32);
@@ -124,7 +124,7 @@ fn heap_splits_partition_unused_space_and_rejoin_without_moving_elements() {
   assert_eq!(joined.as_ptr(), base);
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn freeze_and_thaw_keep_disjoint_siblings_isolated_across_threads() {
   let mut raw = Vec::with_capacity(16);
@@ -156,7 +156,7 @@ fn freeze_and_thaw_keep_disjoint_siblings_isolated_across_threads() {
   assert_eq!(joined.as_ptr(), base);
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn shared_reclaim_cannot_overwrite_a_live_sibling() {
   use core::cell::Cell;
@@ -251,11 +251,11 @@ fn resize_and_reclaim_are_panic_safe_for_arbitrary_elements() {
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
 fn thawing_a_generic_empty_cannot_create_noncopy_inline_elements() {
-  use smol_slice::Slice;
+  use paguro::Slice;
   let mut buffer = Slice::<String>::new().try_into_mut().ok().unwrap();
   assert_eq!(buffer.capacity(), 0);
   buffer.resize(1, "owned".to_string());
-  #[cfg(smol_slice_atomic)]
+  #[cfg(paguro_atomic)]
   {
     let original = buffer.as_slice().as_ptr();
     let frozen = buffer.try_freeze_shared().ok().unwrap();
@@ -266,11 +266,11 @@ fn thawing_a_generic_empty_cannot_create_noncopy_inline_elements() {
   }
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn widening_immutable_then_thawing_moves_replacements_into_shared_storage() {
   use core::marker::PhantomData;
-  use smol_slice::{Slice, SliceMut};
+  use paguro::{Slice, SliceMut};
 
   struct Element<F>(u8, PhantomData<F>);
   impl Copy for Element<fn(&())> {}
@@ -361,7 +361,7 @@ fn reserve_reclaims_near_maximum_zst_offsets_and_preserves_length_on_overflow() 
   assert_eq!(all.capacity(), usize::MAX);
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn zero_sized_windows_use_indices_for_adjacency() {
   let mut head = SliceMutN::<_, 0>::from(vec![(); usize::MAX]);
@@ -391,7 +391,7 @@ fn two_word_spill_keeps_its_buffer_through_freeze() {
   assert_eq!(original.as_ptr(), base);
 }
 
-#[cfg(smol_slice_atomic)]
+#[cfg(paguro_atomic)]
 #[test]
 fn independently_coerced_siblings_drop_new_values_through_each_windows_current_type() {
   use core::{any::TypeId, marker::PhantomData};

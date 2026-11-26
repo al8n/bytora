@@ -2,7 +2,7 @@ use bytes::Bytes;
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-use smol_slice::{AssocInlineSize, InlineSize, Slice, SliceN};
+use paguro::{AssocInlineSize, InlineSize, Slice, SliceN};
 use std::{
   hint::black_box,
   mem::size_of,

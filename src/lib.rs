@@ -144,7 +144,7 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
 
   #[inline]
   fn clone_from(&mut self, source: &Self) {
-    #[cfg(smol_slice_atomic)]
+    #[cfg(paguro_atomic)]
     if Layout::<T, S>::SPARSE_CLONE {
       if source.layout.is_inline() {
         *self = Self {
