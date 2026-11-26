@@ -63,9 +63,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     assert!(vector::AVAILABLE && size_of::<T>() != 0);
     let len = values.len();
     let capacity = values.capacity();
-    let (data, owner) = if vector::single_spare_needs_box(&values) {
-      vector::box_vec(values)
-    } else if capacity == len {
+    let (data, owner) = if capacity == len {
       if len == 0 {
         return Self::empty_inline();
       }
@@ -73,7 +71,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       core::mem::forget(values);
       (data, vector::full_owner(len))
     } else {
-      vector::from_vec(values)
+      vector::place_header(values)
     };
     let parts = WideVecWords::new(data, owner, len, EXTERNAL);
     let mut storage = core::mem::MaybeUninit::<Self>::uninit();
@@ -706,14 +704,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline(always)]
   fn adopt_vec(mut values: Vec<T>) -> Layout<T, S> {
     let len = values.len();
-    let (data, owner) = if vector::single_spare_needs_box(&values) {
-      vector::box_vec(values)
-    } else if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
+    let (data, owner) = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
       let data = values.as_mut_ptr();
       core::mem::forget(values);
       (data, vector::full_owner(len))
     } else {
-      vector::from_vec(values)
+      vector::place_header(values)
     };
     Layout::external(
       owner::initial_data(data),
