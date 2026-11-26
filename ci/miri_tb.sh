@@ -15,20 +15,23 @@ fi
 
 TARGET="$1"
 
-# A C compiler for the target. `cargo miri test` builds the dev-dependencies for TARGET, and a
-# build script among them (criterion's `alloca` compiles C) needs one. Miri itself links nothing.
+# A C compiler and libc headers for the target. `cargo miri test` builds the dev-dependencies for
+# TARGET, and a build script among them (criterion's `alloca` compiles C) needs both. Miri itself
+# links nothing. The headers are named explicitly: `gcc-<arch>-linux-gnu` only Recommends its
+# `libc6-dev-<arch>-cross`, so `--no-install-recommends` leaves out `bits/libc-header-start.h` and
+# the build script fails with it. `cc` finds the compiler by its `<arch>-linux-gnu-gcc` name.
 if [ "$(uname)" = "Linux" ]; then
-  packages=""
+  packages=()
   case "$TARGET" in
-    aarch64-unknown-linux-gnu) packages="gcc-aarch64-linux-gnu" ;;
-    i686-unknown-linux-gnu) packages="gcc-multilib" ;;
-    powerpc64-unknown-linux-gnu) packages="gcc-powerpc64-linux-gnu" ;;
-    s390x-unknown-linux-gnu) packages="gcc-s390x-linux-gnu" ;;
-    riscv64gc-unknown-linux-gnu) packages="gcc-riscv64-linux-gnu" ;;
+    aarch64-unknown-linux-gnu) packages=(gcc-aarch64-linux-gnu libc6-dev-arm64-cross) ;;
+    i686-unknown-linux-gnu) packages=(gcc-multilib) ;;
+    powerpc64-unknown-linux-gnu) packages=(gcc-powerpc64-linux-gnu libc6-dev-ppc64-cross) ;;
+    s390x-unknown-linux-gnu) packages=(gcc-s390x-linux-gnu libc6-dev-s390x-cross) ;;
+    riscv64gc-unknown-linux-gnu) packages=(gcc-riscv64-linux-gnu libc6-dev-riscv64-cross) ;;
   esac
-  if [ -n "$packages" ]; then
+  if [ "${#packages[@]}" -gt 0 ]; then
     sudo apt-get update
-    sudo apt-get install -y --no-install-recommends "$packages"
+    sudo apt-get install -y --no-install-recommends "${packages[@]}"
   fi
 fi
 
