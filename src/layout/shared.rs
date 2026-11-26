@@ -900,9 +900,16 @@ impl<T, S: InlineSize> Vector<T, S> {
     unsafe { self.copy_retained_words(owner) }
   }
 
-  // The caller must have retained this four-word external window. Its final
-  // word holds only the tag, so these fields reproduce every word that
-  // copy_retained_words copies.
+  /// Builds the retained clone of a four-word descriptor from its fields. The
+  /// final word of such a descriptor holds only the tag, so the result has
+  /// every word that `copy_retained_words` copies.
+  ///
+  /// # Safety
+  ///
+  /// This handle must be external, and `owner` must own its window: the word
+  /// in its owner slot, or the header that a promotion published there. The
+  /// caller must have retained `owner` once for the returned handle, which
+  /// releases it when dropped. A static owner needs no retain.
   #[cfg(bytora_atomic)]
   #[inline(always)]
   unsafe fn rebuild_retained_descriptor(&self, owner: *const ()) -> Self {
@@ -916,6 +923,16 @@ impl<T, S: InlineSize> Vector<T, S> {
     }
   }
 
+  /// Copies an external descriptor word by word, with `owner` in place of its
+  /// owner word. That slot is the one word a concurrent promotion can replace,
+  /// so the copy never reads it.
+  ///
+  /// # Safety
+  ///
+  /// This handle must be external, and `owner` must own its window: the word
+  /// in its owner slot, or the header that a promotion published there. The
+  /// caller must have retained `owner` once for the returned handle, which
+  /// releases it when dropped. A static owner needs no retain.
   #[cfg(bytora_atomic)]
   #[inline(always)]
   unsafe fn copy_retained_words(&self, owner: *const ()) -> Self {
