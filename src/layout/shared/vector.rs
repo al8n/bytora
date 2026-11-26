@@ -288,7 +288,7 @@ pub(super) unsafe fn publish<T>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::Slice;
+  use crate::Vector;
 
   #[test]
   fn full_length_markers_respect_the_encoding_and_alignment_limits() {
@@ -340,7 +340,7 @@ mod tests {
         let spare = capacity - len;
         let tail = base.wrapping_add(len);
         let padding = tail.align_offset(align);
-        let source = Slice::<u8>::try_from_shared_vec(values).unwrap();
+        let source = Vector::<u8>::try_from_shared_vec(values).unwrap();
         let owner = source.layout.owner();
         assert!(!raw(owner));
         if padding <= spare && bytes <= spare - padding {
@@ -454,7 +454,7 @@ mod tests {
     for trim_front in [false, true] {
       let input = std::vec![3u8; MASK + 4];
       let (base, capacity) = (input.as_ptr(), input.capacity());
-      let mut source = Slice::<u8>::try_from_shared_vec(input).unwrap();
+      let mut source = Vector::<u8>::try_from_shared_vec(input).unwrap();
       assert_eq!(raw(source.layout.owner()), AVAILABLE);
       if trim_front {
         source.advance(MASK + 1);

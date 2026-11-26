@@ -1,17 +1,17 @@
-use bytora::{InlineSize, Slice, SliceN};
+use bytora::{InlineSize, Vector, VectorN};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
 fn length_queries_are_const_for_static_windows_and_initialized_empty_handles() {
-  const fn measure<T, S: InlineSize>(slice: &Slice<T, S>) -> (usize, bool) {
-    (slice.len(), slice.is_empty())
+  const fn measure<T, S: InlineSize>(vector: &Vector<T, S>) -> (usize, bool) {
+    (vector.len(), vector.is_empty())
   }
-  static SHORT: Slice<u8> = Slice::from_static(b"xyz");
-  static WIDE: SliceN<u8, 8192> = SliceN::<_, 8192>::try_from_static(b"wide").unwrap();
+  static SHORT: Vector<u8> = Vector::from_static(b"xyz");
+  static WIDE: VectorN<u8, 8192> = VectorN::<_, 8192>::try_from_static(b"wide").unwrap();
   static ZSTS: [(); isize::MAX as usize] = [(); isize::MAX as usize];
-  static LARGE: SliceN<(), 0> = SliceN::<_, 0>::try_from_static(&ZSTS).unwrap();
-  static TINY_EMPTY: SliceN<u8, 8> = SliceN::<_, 8>::new();
-  static ZERO_EMPTY: SliceN<u8, 0> = SliceN::<_, 0>::empty();
+  static LARGE: VectorN<(), 0> = VectorN::<_, 0>::try_from_static(&ZSTS).unwrap();
+  static TINY_EMPTY: VectorN<u8, 8> = VectorN::<_, 8>::new();
+  static ZERO_EMPTY: VectorN<u8, 0> = VectorN::<_, 0>::empty();
   const fn lengths() -> [(usize, bool); 5] {
     [
       measure(&SHORT),
@@ -28,7 +28,7 @@ fn length_queries_are_const_for_static_windows_and_initialized_empty_handles() {
   #[cfg(bytora_atomic)]
   let result = lengths();
   const LOCAL_LEN: usize = {
-    let handle = Slice::<u8>::from_static(b"abc");
+    let handle = Vector::<u8>::from_static(b"abc");
     let len = handle.len();
     #[cfg(bytora_atomic)]
     core::mem::forget(handle);
@@ -52,10 +52,10 @@ fn new_is_const_and_accepts_non_copy_elements_for_every_handle_size() {
   #[repr(align(64))]
   struct NonCopy(core::cell::Cell<u8>);
 
-  let zero = const { SliceN::<NonCopy, 0>::new() };
-  let tiny = const { SliceN::<NonCopy, 8>::new() };
-  let default = const { Slice::<NonCopy>::new() };
-  let wide = const { SliceN::<NonCopy, 64>::new() };
+  let zero = const { VectorN::<NonCopy, 0>::new() };
+  let tiny = const { VectorN::<NonCopy, 8>::new() };
+  let default = const { Vector::<NonCopy>::new() };
+  let wide = const { VectorN::<NonCopy, 64>::new() };
 
   for empty in [
     zero.as_slice(),
@@ -66,23 +66,23 @@ fn new_is_const_and_accepts_non_copy_elements_for_every_handle_size() {
     assert!(empty.is_empty());
     assert!(empty.as_ptr().is_aligned());
   }
-  assert!(SliceN::<NonCopy, 8>::default().is_empty());
+  assert!(VectorN::<NonCopy, 8>::default().is_empty());
   let value = NonCopy(core::cell::Cell::new(7));
   assert_eq!(value.0.get(), 7);
 }
 
 #[test]
 fn slice_ref_accepts_subsets_and_rejects_nonempty_out_of_range_slices() {
-  fn check<S: InlineSize>(data: Slice<u8, S>) {
+  fn check<S: InlineSize>(data: Vector<u8, S>) {
     let view = data.as_slice();
     assert_eq!(data.slice_ref(&view[1..4]).as_slice(), b"bcd");
     assert!(data.slice_ref(&[]).is_empty());
     assert!(catch_unwind(AssertUnwindSafe(|| data.slice_ref(b"other"))).is_err());
   }
 
-  check(Slice::<u8>::try_from_slice(b"abcde").unwrap());
+  check(Vector::<u8>::try_from_slice(b"abcde").unwrap());
   static VALUES: &[u8] = b"abcdef";
-  let shared = Slice::from_static(&VALUES[1..5]);
+  let shared = Vector::from_static(&VALUES[1..5]);
   let inside = &VALUES[2..4];
   let result = shared.slice_ref(inside);
   assert_eq!(result.as_slice(), b"cd");
@@ -101,7 +101,7 @@ fn slice_ref_supports_non_copy_elements_and_element_offsets() {
     AtomicUsize::new(7),
     AtomicUsize::new(11),
   ];
-  let data = SliceN::<AtomicUsize, 0>::try_from_static(&VALUES).unwrap();
+  let data = VectorN::<AtomicUsize, 0>::try_from_static(&VALUES).unwrap();
   let selected = &data.as_slice()[1..3];
   let result = data.slice_ref(selected);
   assert_eq!(result.len(), 2);
@@ -121,7 +121,7 @@ fn slice_ref_uses_a_checked_prefix_for_zero_sized_elements() {
     byte: u8,
   }
 
-  let data = Slice::<Aligned>::try_from_slice(&[Aligned; 4]).unwrap();
+  let data = Vector::<Aligned>::try_from_slice(&[Aligned; 4]).unwrap();
   let view = data.as_slice();
   assert_eq!(data.slice_ref(&view[2..4]).len(), 2);
   let short = data.slice(..2);
@@ -141,7 +141,7 @@ fn slice_ref_uses_a_checked_prefix_for_zero_sized_elements() {
 fn splits_cover_all_boundaries_without_changing_a_rejected_request() {
   static VALUES: &[u8] = b"abcdef";
   for at in 0..=VALUES.len() {
-    let mut head = Slice::from_static(VALUES);
+    let mut head = Vector::from_static(VALUES);
     let tail = head.split_off(at);
     assert_eq!(head.as_slice(), &VALUES[..at]);
     assert_eq!(tail.as_slice(), &VALUES[at..]);
@@ -152,13 +152,13 @@ fn splits_cover_all_boundaries_without_changing_a_rejected_request() {
       assert_eq!(tail.as_slice().as_ptr(), VALUES[at..].as_ptr());
     }
 
-    let mut tail = Slice::<u8>::try_from_slice(VALUES).unwrap();
+    let mut tail = Vector::<u8>::try_from_slice(VALUES).unwrap();
     let head = tail.split_to(at);
     assert_eq!(head.as_slice(), &VALUES[..at]);
     assert_eq!(tail.as_slice(), &VALUES[at..]);
   }
 
-  let mut data = Slice::from_static(VALUES);
+  let mut data = Vector::from_static(VALUES);
   assert!(catch_unwind(AssertUnwindSafe(|| data.split_off(VALUES.len() + 1))).is_err());
   assert_eq!(data.as_slice(), VALUES);
   assert!(catch_unwind(AssertUnwindSafe(|| data.split_to(usize::MAX))).is_err());
@@ -167,7 +167,7 @@ fn splits_cover_all_boundaries_without_changing_a_rejected_request() {
 
 #[test]
 fn truncate_and_clear_follow_the_current_window() {
-  let mut data = Slice::<u8>::try_from_slice(b"abcdef").unwrap();
+  let mut data = Vector::<u8>::try_from_slice(b"abcdef").unwrap();
   data.advance(2);
   data.truncate(usize::MAX);
   assert_eq!(data.as_slice(), b"cdef");
@@ -182,21 +182,21 @@ fn truncate_and_clear_follow_the_current_window() {
 #[test]
 fn inline_truncation_preserves_advanced_windows_in_each_cursor_encoding() {
   fn check<S: InlineSize>(skip: usize, keep: usize) {
-    let values: Vec<u8> = (0..Slice::<u8, S>::INLINE_CAPACITY)
+    let values: Vec<u8> = (0..Vector::<u8, S>::INLINE_CAPACITY)
       .map(|i| (i ^ (i >> 8)) as u8)
       .collect();
-    let mut slice = Slice::<u8, S>::try_from_slice(&values).unwrap();
-    slice.advance(skip);
-    let start = slice.as_slice().as_ptr();
-    slice.truncate(keep);
-    slice.truncate(usize::MAX);
-    assert_eq!(slice.as_slice(), &values[skip..skip + keep]);
-    assert_eq!(slice.as_slice().as_ptr(), start);
-    let suffix = slice.split_off(keep / 2);
-    assert_eq!(slice.as_slice(), &values[skip..skip + keep / 2]);
+    let mut vector = Vector::<u8, S>::try_from_slice(&values).unwrap();
+    vector.advance(skip);
+    let start = vector.as_slice().as_ptr();
+    vector.truncate(keep);
+    vector.truncate(usize::MAX);
+    assert_eq!(vector.as_slice(), &values[skip..skip + keep]);
+    assert_eq!(vector.as_slice().as_ptr(), start);
+    let suffix = vector.split_off(keep / 2);
+    assert_eq!(vector.as_slice(), &values[skip..skip + keep / 2]);
     assert_eq!(suffix.as_slice(), &values[skip + keep / 2..skip + keep]);
-    slice.truncate(0);
-    assert!(slice.is_empty());
+    vector.truncate(0);
+    assert!(vector.is_empty());
   }
   check::<typenum::U8>(2, 4);
   check::<typenum::U128>(39, 70);
@@ -206,9 +206,9 @@ fn inline_truncation_preserves_advanced_windows_in_each_cursor_encoding() {
 #[test]
 fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
   let source = [1u8, 2, 3];
-  let copy = Slice::<u8>::copy_from_slice(&source);
+  let copy = Vector::<u8>::copy_from_slice(&source);
   assert_eq!(copy.as_slice(), &source);
-  type OneWord = SliceN<u8, { size_of::<usize>() }>;
+  type OneWord = VectorN<u8, { size_of::<usize>() }>;
   assert!(OneWord::try_copy_from_slice(&[9; 64]).is_none());
   assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
 }
@@ -216,7 +216,7 @@ fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
 #[cfg(bytora_atomic)]
 #[test]
 fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
-  type TwoWords = SliceN<u8, { 2 * size_of::<usize>() }>;
+  type TwoWords = VectorN<u8, { 2 * size_of::<usize>() }>;
   let input = [17; 64];
   assert!(TwoWords::try_from_slice(&input).is_none());
   let copied = TwoWords::try_copy_from_slice(&input);
@@ -237,18 +237,18 @@ fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
 #[cfg(bytora_atomic)]
 #[test]
 fn copied_values_spill_and_reject_unrepresentable_zst_lengths() {
-  let source = vec![7u8; Slice::<u8>::INLINE_CAPACITY + 3];
+  let source = vec![7u8; Vector::<u8>::INLINE_CAPACITY + 3];
   let original_ptr = source.as_ptr();
-  let copy = Slice::<u8>::copy_from_slice(&source);
+  let copy = Vector::<u8>::copy_from_slice(&source);
   assert_eq!(copy.as_slice(), source.as_slice());
   assert_ne!(copy.as_slice().as_ptr(), original_ptr);
   let tail = copy.slice(2..);
   assert_eq!(tail.as_slice().as_ptr(), copy.as_slice()[2..].as_ptr());
-  let zero_budget = SliceN::<u8, 0>::try_copy_from_slice(&[3, 4, 5]).unwrap();
+  let zero_budget = VectorN::<u8, 0>::try_copy_from_slice(&[3, 4, 5]).unwrap();
   assert_eq!(zero_budget.as_slice(), &[3, 4, 5]);
 
   let too_long = &[(); isize::MAX as usize + 1];
-  assert!(SliceN::<(), 0>::try_copy_from_slice(too_long).is_none());
+  assert!(VectorN::<(), 0>::try_copy_from_slice(too_long).is_none());
 }
 
 #[cfg(not(bytora_atomic))]
@@ -259,7 +259,7 @@ fn core_only_copy_does_not_require_send_or_sync() {
 
   let source = [Local(core::ptr::null_mut())];
   assert!(
-    Slice::<Local>::copy_from_slice(&source).as_slice()[0]
+    Vector::<Local>::copy_from_slice(&source).as_slice()[0]
       .0
       .is_null()
   );
@@ -277,8 +277,8 @@ fn owned_split_edges_and_clear_release_exactly_the_expected_owner() {
       self.0.fetch_add(1, SeqCst);
     }
   }
-  fn tracked(counter: &Arc<AtomicUsize>) -> SliceN<Dropper, 0> {
-    SliceN::<Dropper, 0>::try_from(vec![Dropper(counter.clone()), Dropper(counter.clone())])
+  fn tracked(counter: &Arc<AtomicUsize>) -> VectorN<Dropper, 0> {
+    VectorN::<Dropper, 0>::try_from(vec![Dropper(counter.clone()), Dropper(counter.clone())])
       .ok()
       .unwrap()
   }
@@ -335,7 +335,7 @@ fn unallocated_vecs_clone_and_thaw_without_allocating() {
 
   fn check<S: bytora::InlineSize>() {
     let allocations = allocation_counter::measure(|| {
-      let empty = bytora::Slice::<Aligned, S>::try_from_vec(Vec::new())
+      let empty = bytora::Vector::<Aligned, S>::try_from_vec(Vec::new())
         .ok()
         .unwrap();
       let clone = core::hint::black_box(&empty).clone();

@@ -1,23 +1,23 @@
 # bytora
 
-`Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
-inline. An immutable `Slice` can also borrow static data or share owned data.
-With `std` or `alloc`, a `SliceMut` can hold a growable vector-backed window.
+`Vector<T, S>` and `VectorMut<T, S>` own small sequences of `Copy` elements
+inline. An immutable `Vector` can also borrow static data or share owned data.
+With `std` or `alloc`, a `VectorMut` can hold a growable vector-backed window.
 For a positive typenum integer `S`, the handle occupies exactly `S` bytes,
-including its cursor. `Slice<T>` and `SliceMut<T>` default to four machine words,
+including its cursor. `Vector<T>` and `VectorMut<T>` default to four machine words,
 the size of `bytes::Bytes`, which is 16 bytes on 32-bit targets and 32 on 64-bit targets.
 `U0` uses the same size and disables inline elements. Wrapping either handle in
 `Option` uses the same number of bytes.
 
-`SliceN<T, N>` and `SliceMutN<T, N>` name the same types using a numeric byte count.
+`VectorN<T, N>` and `VectorMutN<T, N>` name the same types using a numeric byte count.
 The inherent APIs draw on [`bytes::Bytes`](https://docs.rs/bytes/1.12.2/bytes/struct.Bytes.html)
 and [`bytes::BytesMut`](https://docs.rs/bytes/1.12.2/bytes/struct.BytesMut.html),
 while their generic element types and inline storage introduce the limits described below.
 
 ```rust
-use bytora::{SliceMut, SliceMutN, typenum::U24};
+use bytora::{VectorMut, VectorMutN, typenum::U24};
 
-let mut bytes: SliceMut<u8, U24> = SliceMutN::<u8, 24>::try_from_slice(b"key=value").unwrap();
+let mut bytes: VectorMut<u8, U24> = VectorMutN::<u8, 24>::try_from_slice(b"key=value").unwrap();
 bytes.advance(4);
 bytes.as_mut_slice().make_ascii_uppercase();
 assert_eq!(bytes.as_slice(), b"VALUE");
@@ -35,7 +35,7 @@ its elements. The inline constructors and operations are available with only `co
 | 12 (32-bit only) or 16 through 128 | 2 | 10 or 14 through 126 |
 | 132 (32-bit only) or 136 through 8192 | 4 | 128 or 132 through 8188 |
 
-For example, `SliceN<u8, 24>` holds 22 bytes and `SliceN<u32, 24>` holds five
+For example, `VectorN<u8, 24>` holds 22 bytes and `VectorN<u32, 24>` holds five
 elements. `INLINE_CAPACITY` gives the limit for a particular type and budget.
 `try_from_slice` returns `None` if the input exceeds it. All handles have word
 alignment. A nonzero-sized element that needs greater alignment has zero
@@ -47,14 +47,14 @@ The same size and alignment rules apply to downstream types, including
 Use `MAX_HANDLE_BYTES` for the largest supported total handle size.
 
 ```rust
-use bytora::{SliceN, MAX_HANDLE_BYTES};
+use bytora::{VectorN, MAX_HANDLE_BYTES};
 
 #[repr(transparent)]
 struct UserId(u16);
 
 assert_eq!(MAX_HANDLE_BYTES, 8192);
-assert_eq!(SliceN::<u8, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 8188);
-assert_eq!(SliceN::<UserId, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+assert_eq!(VectorN::<u8, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 8188);
+assert_eq!(VectorN::<UserId, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
 ```
 
 The layout is available for non-`Copy` types too. `try_from_slice` needs
@@ -67,11 +67,11 @@ Generic mutable constructors can use `S: WritableSize<T>`: positive sizes requir
 `T: Copy`, while `U0` accepts any element type.
 
 ```rust
-use bytora::{InlineSize, Slice, typenum::U24};
+use bytora::{InlineSize, Vector, typenum::U24};
 
-fn copy_inline<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
-    assert_eq!(size_of::<Slice<T, S>>(), S::HANDLE_BYTES);
-    Slice::try_from_slice(values)
+fn copy_inline<T: Copy, S: InlineSize>(values: &[T]) -> Option<Vector<T, S>> {
+    assert_eq!(size_of::<Vector<T, S>>(), S::HANDLE_BYTES);
+    Vector::try_from_slice(values)
 }
 
 let read = copy_inline::<_, U24>(b"small").unwrap();
@@ -83,13 +83,13 @@ corresponding type-level size. The numeric aliases cover every supported size,
 including values without a named typenum constant.
 
 ```rust
-use bytora::{AssocInlineSize, SliceN};
+use bytora::{AssocInlineSize, VectorN};
 
-fn copy_inline<T: Copy, const N: usize>(values: &[T]) -> Option<SliceN<T, N>>
+fn copy_inline<T: Copy, const N: usize>(values: &[T]) -> Option<VectorN<T, N>>
 where
     [u8; N]: AssocInlineSize,
 {
-    SliceN::<T, N>::try_from_slice(values)
+    VectorN::<T, N>::try_from_slice(values)
 }
 
 assert_eq!(copy_inline::<_, 4104>(b"small").unwrap().as_slice(), b"small");
@@ -105,20 +105,20 @@ supported::<U1>();
 
 ```compile_fail
 use core::mem::size_of;
-use bytora::SliceN;
-let _ = SliceN::<u8, { size_of::<usize>() / 2 }>::try_from_slice(b"a");
+use bytora::VectorN;
+let _ = VectorN::<u8, { size_of::<usize>() / 2 }>::try_from_slice(b"a");
 ```
 
 ```compile_fail
 use core::mem::size_of;
-use bytora::SliceN;
-let _ = SliceN::<u8, { 2 * size_of::<usize>() + size_of::<usize>() / 2 }>::try_from_slice(b"abc");
+use bytora::VectorN;
+let _ = VectorN::<u8, { 2 * size_of::<usize>() + size_of::<usize>() / 2 }>::try_from_slice(b"abc");
 ```
 
 ```compile_fail
 use core::mem::size_of;
-use bytora::SliceMutN;
-let _ = SliceMutN::<u8, { 8192 + size_of::<usize>() }>::try_from_slice(&[]);
+use bytora::VectorMutN;
+let _ = VectorMutN::<u8, { 8192 + size_of::<usize>() }>::try_from_slice(&[]);
 ```
 
 The crate seals `InlineSize` so each supported size has a checked layout.
@@ -131,8 +131,8 @@ impl InlineSize for CustomSize {}
 
 ## Cloning, slicing, and shared storage
 
-Cloning an inline `Slice` copies the entire handle, including its cursor.
-`Slice::slice(range)` returns an independent window relative to the current
+Cloning an inline `Vector` copies the entire handle, including its cursor.
+`Vector::slice(range)` returns an independent window relative to the current
 view. It copies an inline handle once. A static or heap-backed window keeps
 pointing into the original storage, even if the range is short or empty.
 `slice_ref` accepts a borrowed subslice of the current view; any empty slice is
@@ -141,19 +141,19 @@ or reliably distinguish allocations, so a matching pointer and fitting length
 select a prefix. `split_off` and `split_to` partition the view; an empty side
 uses a new empty handle. `truncate(0)` and `clear()` release this handle's
 ownership, even if an earlier empty `slice` retained it.
-`Slice::from_static` borrows a `&'static [T]` directly, even for short inputs.
+`Vector::from_static` borrows a `&'static [T]` directly, even for short inputs.
 Constructing, slicing, cloning, and dropping static handles use no allocations or reference counts.
 Static storage works with just `core` on targets with or without atomics.
 Elements can be any `Sync` type, including types with no `Clone` implementation.
 
 ```rust
-use bytora::{Slice, SliceN};
+use bytora::{Vector, VectorN};
 
-static HEADER: Slice<u8> = Slice::from_static(b"content-type");
+static HEADER: Vector<u8> = Vector::from_static(b"content-type");
 let field = HEADER.slice(8..);
 assert_eq!(field.as_slice(), b"type");
 assert_eq!(field.as_slice().as_ptr(), HEADER.as_slice()[8..].as_ptr());
-assert!(SliceN::<u8, 8>::try_from_static(b"id").is_none());
+assert!(VectorN::<u8, 8>::try_from_static(b"id").is_none());
 ```
 
 Cloning a static or heap-backed value constructs a descriptor without copying
@@ -163,10 +163,10 @@ the elements. For a wide handle, reusing an existing destination with
 The generated code depends on the compiler and the caller.
 
 ```rust
-use bytora::SliceN;
+use bytora::VectorN;
 
-let source = SliceN::<u8, 4096>::try_from_static(b"shared").unwrap();
-let mut destination = SliceN::<u8, 4096>::try_from_slice(&[]).unwrap();
+let source = VectorN::<u8, 4096>::try_from_static(b"shared").unwrap();
+let mut destination = VectorN::<u8, 4096>::try_from_slice(&[]).unwrap();
 destination.clone_from(&source);
 assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
 ```
@@ -181,7 +181,7 @@ For a compile-time length, use the original static slice's length. In core-only
 builds, a constant can also read the length from the static handle itself.
 
 With `std` or `alloc` and shared ownership available,
-`Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. A
+`Vector::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. A
 handle of at least three machine words keeps the vector's allocation, even for
 a short vector or an empty vector with spare capacity. On targets with suitable
 pointer alignment, a two-word handle also keeps an allocated vector of non-zero-sized
@@ -213,25 +213,25 @@ entire original vector allocation, including its spare capacity.
 
 `try_from_shared_vec` always uses external storage, even for short inputs,
 and accepts any `T: Send + Sync` within the handle's vector limits. Boxed
-slices follow the same limits. `Slice::from_owner` and `try_from_owner`
+slices follow the same limits. `Vector::from_owner` and `try_from_owner`
 keep an `AsRef<[T]> + Send + 'static` owner alive without copying its slice;
 their elements must be `Sync`. Shared ownership and its target requirements
 are described under [Features and targets](#features-and-targets).
 
-`Slice::try_from_boxed_slice` and `Slice::try_from_arc` adopt a `Box<[T]>`
+`Vector::try_from_boxed_slice` and `Vector::try_from_arc` adopt a `Box<[T]>`
 or an already shared `Arc<[T]>` without copying the elements. Both accept
 borrowed and non-`Clone` elements with `T: Send + Sync`. A box follows the
 exact-capacity vector path, including allocation recovery through
 `try_into_vec`. An Arc-backed window stays read-only. Adoption and ordinary
 ranges reuse its existing reference count. A range whose hidden ends exceed
 the descriptor's counts allocates a small owner that retains the original Arc.
-`Slice` also implements `TryFrom` for both input types. A failed conversion
+`Vector` also implements `TryFrom` for both input types. A failed conversion
 returns the original owner.
 
-`LocalSlice<T>` adopts an already shared `Rc<[T]>` and stays on the same
+`LocalVector<T>` adopts an already shared `Rc<[T]>` and stays on the same
 thread. It requires only `alloc` or `std`, including on targets without
 pointer-width atomics. Its default handle and its `Option` occupy four machine
-words, the size of `bytes::Bytes`. `LocalSliceN<T, N>` selects a byte budget.
+words, the size of `bytes::Bytes`. `LocalVectorN<T, N>` selects a byte budget.
 Zero also uses four words. Adoption, clones, and normally sized ranges reuse
 the original Rc without allocating. A range
 whose hidden prefix or suffix exceeds `(1 << (usize::BITS / 2 - 1)) - 1`
@@ -244,10 +244,10 @@ elements allocates a small owner for that view and its descendants.
 extern crate alloc;
 use alloc::rc::Rc;
 use core::cell::Cell;
-use bytora::LocalSlice;
+use bytora::LocalVector;
 
 let values: Rc<[Cell<u8>]> = Rc::from([Cell::new(3), Cell::new(9)]);
-let whole = LocalSlice::<_>::from_rc(values.clone());
+let whole = LocalVector::<_>::from_rc(values.clone());
 let tail = whole.slice(1..);
 tail.as_slice()[0].set(12);
 assert_eq!(values[1].get(), 12);
@@ -260,7 +260,7 @@ three machine words and a length of at most `isize::MAX` elements.
 If the elements need shared storage and the
 handle or length cannot accommodate them, the constructor returns the original
 vector in `Err`.
-The default `Slice<u8>` keeps up to 14 bytes inline on 32-bit targets and 30
+The default `Vector<u8>` keeps up to 14 bytes inline on 32-bit targets and 30
 bytes on 64-bit targets.
 `try_copy_from_slice` copies inline when possible and otherwise uses shared
 storage when available, returning `None` if the input cannot fit;
@@ -270,9 +270,9 @@ storage when available, returning `None` if the input cannot fit;
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
 # {
-use bytora::Slice;
+use bytora::Vector;
 
-let whole = Slice::<u8>::try_from_vec((0..32).collect()).unwrap();
+let whole = Vector::<u8>::try_from_vec((0..32).collect()).unwrap();
 let mut tail = whole.clone();
 tail.advance(30);
 assert_eq!(tail.as_slice(), &[30, 31]);
@@ -280,13 +280,13 @@ assert_eq!(whole.len(), 32);
 # }
 ```
 
-`Slice<T, U0>` and `SliceN<T, 0>` have zero inline capacity for every `T`,
-including zero-sized types. `SliceN::<T, 0>::empty()` uses only `core` and
+`Vector<T, U0>` and `VectorN<T, 0>` have zero inline capacity for every `T`,
+including zero-sized types. `VectorN::<T, 0>::empty()` uses only `core` and
 accepts any element type. `try_from_static` borrows a static slice of `Sync`
 elements. With shared ownership available, `TryFrom<Vec<T>>`
 takes ownership of `Send + Sync` elements, including types that implement
 neither `Copy` nor `Clone`. It retains an empty vector's allocation when one
-exists. An empty vector without an allocation yields `Slice::empty()`. Clones
+exists. An empty vector without an allocation yields `Vector::empty()`. Clones
 and ranges keep the original vector's elements alive until the last handle
 drops, even when its window is empty.
 
@@ -294,9 +294,9 @@ drops, even when its window is empty.
 # #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 # {
 use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use bytora::SliceN;
+use bytora::VectorN;
 
-let counters = SliceN::<AtomicUsize, 0>::try_from(vec![AtomicUsize::new(0)]).unwrap();
+let counters = VectorN::<AtomicUsize, 0>::try_from(vec![AtomicUsize::new(0)]).unwrap();
 let peer = counters.clone();
 peer.as_slice()[0].fetch_add(1, Relaxed);
 assert_eq!(counters.as_slice()[0].load(Relaxed), 1);
@@ -307,7 +307,7 @@ assert_eq!(counters.as_slice()[0].load(Relaxed), 1);
 without copying. Concurrent clones can change that answer. `try_into_mut`
 returns the original handle when a vector-backed window is shared or when
 storage is static or supplied by a custom owner. Thawing an empty inline
-slice, including `Slice::new()`, gives the mutable handle zero capacity.
+vector, including `Vector::new()`, gives the mutable handle zero capacity.
 Its first growth needs heap storage. With `alloc` or `std`, `into_mut` clones
 the visible elements when needed. `try_into_vec` transfers movable elements
 without cloning and returns the handle otherwise. `into_vec` can clone when
@@ -316,7 +316,7 @@ inline or disjoint window may need a new vector.
 
 ## Mutable storage
 
-`SliceMut<T, U0>` and `SliceMutN<T, 0>` have zero inline capacity. Their
+`VectorMut<T, U0>` and `VectorMutN<T, 0>` have zero inline capacity. Their
 `empty()` constructor works with only `core`. With `alloc` or `std`,
 `From<Vec<T>>` accepts any element type, including thread-local types and
 atomics, and preserves the vector's allocation and spare capacity. A vector
@@ -329,7 +329,7 @@ unchanged if the handle cannot hold a heap window.
 prefix in constant time. Each window owns its elements, including any skipped
 prefix, until they are reclaimed or that window is dropped.
 
-`SliceMut::new` starts empty with inline capacity for positive budgets and
+`VectorMut::new` starts empty with inline capacity for positive budgets and
 `Copy` elements; `U0` accepts any element type and starts without inline space.
 `reserve` and `with_capacity` may spill a handle of at least two machine words
 to a vector-backed window with `std` or `alloc`. A one-word handle, or any
@@ -346,7 +346,7 @@ allocation.
 elements, or returns the other window on failure. `unsplit` can instead move
 elements and grow storage when an in-place join is unavailable.
 
-`try_freeze` converts a mutable window into a `Slice` without copying elements
+`try_freeze` converts a mutable window into a `Vector` without copying elements
 and returns the original on failure. `freeze` panics on the same failures.
 Both methods take `S: WritableSize<T>`. Positive budgets require `T: Copy`,
 and `U0` accepts any element type. When shared ownership is enabled, both
@@ -361,16 +361,16 @@ allocation if it owns a contiguous initialized prefix from the allocation base
 and the prefix fits the two-word vector limits. Its visible window can start
 anywhere in that prefix and retains its address. Unsupported windows,
 including those with live mutable siblings, are returned intact.
-`SliceMut::into_vec` reuses
+`VectorMut::into_vec` reuses
 a unique heap allocation where possible and otherwise moves its elements to a
 new vector without requiring `Clone`.
 
 ```rust
 # #[cfg(any(feature = "std", feature = "alloc"))]
 # {
-use bytora::SliceMutN;
+use bytora::VectorMutN;
 
-let mut words = SliceMutN::<String, 0>::from(vec!["one".into(), "two".into()]);
+let mut words = VectorMutN::<String, 0>::from(vec!["one".into(), "two".into()]);
 words.advance(1);
 words.as_mut_slice()[0].push('!');
 assert_eq!(words.as_slice(), &["two!"]);
@@ -380,9 +380,9 @@ assert_eq!(words.as_slice(), &["two!"]);
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
 # {
-use bytora::SliceMut;
+use bytora::VectorMut;
 
-let mut first = SliceMut::<u8>::with_capacity(32);
+let mut first = VectorMut::<u8>::with_capacity(32);
 first.extend_from_slice(b"hello");
 let second = first.split_off(3);
 assert!(first.try_unsplit(second).is_ok());
@@ -393,7 +393,7 @@ assert_eq!(writable.into_vec().as_slice(), b"Hello");
 # }
 ```
 
-For a concrete budget, a `SliceMut` containing references can be moved into a
+For a concrete budget, a `VectorMut` containing references can be moved into a
 type with shorter reference lifetimes. When the budget is still a generic
 `S: InlineSize`, Rust can shorten the lifetime of a borrowed view returned by
 `as_slice()`, but cannot prove the same conversion for the whole mutable handle.
@@ -401,16 +401,16 @@ type with shorter reference lifetimes. When the budget is still a generic
 ## Features and targets
 
 The default `std` feature and the optional `alloc` feature support vector-backed
-mutable storage and Rc-backed `LocalSlice`. Without `extra-platforms`, targets
+mutable storage and Rc-backed `LocalVector`. Without `extra-platforms`, targets
 with native pointer-width
-compare-and-swap also enable shared ownership. Vectors use a strong reference
+compare-and-swap also enable shared ownership. Vec-backed storage uses a strong reference
 count, and custom owners and frozen mutable windows use the allocation library's
 `Arc`. With neither feature, inline and static operations use only `core`.
 
 The `extra-platforms` feature enables `alloc` and selects
 `portable-atomic` and [`portable-atomic-util`](https://docs.rs/portable-atomic-util/)
 for internal thread-safe sharing, including on targets with native atomics.
-`Slice::try_from_arc` accepts `alloc::sync::Arc` wherever native pointer-width
+`Vector::try_from_arc` accepts `alloc::sync::Arc` wherever native pointer-width
 atomics are available and `portable_atomic_util::Arc` on portable-only
 targets. On a target without native
 compare-and-swap, the application must configure a working portable-atomic

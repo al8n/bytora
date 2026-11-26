@@ -15,7 +15,7 @@ fn shared_rc_and_local_elements_outlive_the_original_window() {
   let owner: Rc<[_]> = (0..5).map(|_| Item(&value, &dropped)).collect();
   let base = owner.as_ptr();
   let weak = Rc::downgrade(&owner);
-  let whole = LocalSlice::from_rc(owner.clone());
+  let whole = LocalVector::from_rc(owner.clone());
   let mut middle = whole.slice(1..4);
   let mut peer = middle.clone();
   assert_eq!(Rc::strong_count(&owner), 4);
@@ -44,15 +44,15 @@ fn shared_rc_and_local_elements_outlive_the_original_window() {
 #[test]
 fn byte_budgets_preserve_sizes_niches_and_rejected_inputs() {
   const WORD: usize = size_of::<usize>();
-  assert_eq!(size_of::<Option<LocalSliceN<u8, 32>>>(), 32);
+  assert_eq!(size_of::<Option<LocalVectorN<u8, 32>>>(), 32);
   let values: Rc<[u8]> = Rc::from([1, 2, 3]);
-  let default: LocalSlice<u8> = LocalSliceN::<_, { 4 * WORD }>::try_from(values.clone()).unwrap();
-  let _: LocalSliceN<u8, { 4 * WORD }> = default;
-  let rejected = LocalSliceN::<u8, { 2 * WORD }>::try_from(values.clone())
+  let default: LocalVector<u8> = LocalVectorN::<_, { 4 * WORD }>::try_from(values.clone()).unwrap();
+  let _: LocalVectorN<u8, { 4 * WORD }> = default;
+  let rejected = LocalVectorN::<u8, { 2 * WORD }>::try_from(values.clone())
     .err()
     .unwrap();
   assert!(Rc::ptr_eq(&values, &rejected));
-  let wide = LocalSliceN::<u8, 8192>::try_from(rejected).unwrap();
+  let wide = LocalVectorN::<u8, 8192>::try_from(rejected).unwrap();
   let sub = wide.slice(1..);
   assert_eq!(sub.as_slice(), &[2, 3]);
   assert!(Rc::ptr_eq(&values, &sub.into_original_rc()));
@@ -62,7 +62,7 @@ fn byte_budgets_preserve_sizes_niches_and_rejected_inputs() {
 fn large_zst_ranges_recover_the_full_owner_and_survive_shared_metadata() {
   let len = COUNT_MASK + 6;
   let values: Rc<[()]> = Rc::from(vec![(); len]);
-  let original = LocalSlice::from_rc(values.clone());
+  let original = LocalVector::from_rc(values.clone());
   let far = original.slice(COUNT_MASK + 1..);
   let mut near = original.clone();
   near.truncate(1);
@@ -78,7 +78,7 @@ fn large_zst_ranges_recover_the_full_owner_and_survive_shared_metadata() {
   assert_eq!(Rc::strong_count(&values), 1);
 
   let oversized: Rc<[()]> = Rc::from(vec![(); isize::MAX as usize + 1]);
-  let rejected = LocalSlice::<()>::try_from_rc(oversized.clone())
+  let rejected = LocalVector::<()>::try_from_rc(oversized.clone())
     .err()
     .unwrap();
   assert!(Rc::ptr_eq(&oversized, &rejected));
@@ -90,7 +90,7 @@ fn over_aligned_rc_ranges_keep_the_element_pointer_including_empty_ranges() {
   struct Aligned(u8);
   let original: Rc<[Aligned]> = Rc::from([Aligned(1), Aligned(2), Aligned(3)]);
   let base = original.as_ptr();
-  let whole = LocalSlice::from_rc(original);
+  let whole = LocalVector::from_rc(original);
   let mut tail = whole.slice(1..);
   assert_eq!(tail.as_slice().as_ptr(), base.wrapping_add(1));
   assert_eq!(tail.as_slice()[0].0, 2);
@@ -105,7 +105,7 @@ fn over_aligned_rc_ranges_keep_the_element_pointer_including_empty_ranges() {
 #[test]
 fn a_real_overflowing_rc_range_keeps_its_original_byte_allocation() {
   let values: Rc<[u8]> = Rc::from(vec![7; COUNT_MASK + 5]);
-  let whole = LocalSlice::from_rc(values.clone());
+  let whole = LocalVector::from_rc(values.clone());
   let far = whole.slice(COUNT_MASK + 1..);
   assert!(matches!(far.backing(), Backing::Indirect(_)));
   assert_eq!(

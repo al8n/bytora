@@ -1,5 +1,5 @@
 use super::{Layout, owner};
-use crate::{InlineSize, Slice};
+use crate::{InlineSize, Vector};
 use core::ptr;
 #[cfg(not(target_has_atomic = "ptr"))]
 use portable_atomic_util::Arc;
@@ -62,7 +62,7 @@ pub(super) unsafe fn managed_copy<T>(owner: *const (), data: *const (), len: usi
   owner::manage_read_only::<T, _>(copy)
 }
 
-impl<T: Send + Sync, S: InlineSize> Slice<T, S> {
+impl<T: Send + Sync, S: InlineSize> Vector<T, S> {
   /// Adopts an `Arc<[T]>` and keeps its elements at their original addresses.
   /// Adoption and cloning reuse the original reference count. Ranges and
   /// cursor changes store each hidden end of up to
@@ -90,7 +90,7 @@ impl<T: Send + Sync, S: InlineSize> Slice<T, S> {
   }
 }
 
-impl<T: Send + Sync, S: InlineSize> TryFrom<Arc<[T]>> for Slice<T, S> {
+impl<T: Send + Sync, S: InlineSize> TryFrom<Arc<[T]>> for Vector<T, S> {
   type Error = Arc<[T]>;
 
   fn try_from(values: Arc<[T]>) -> Result<Self, Self::Error> {
@@ -101,7 +101,7 @@ impl<T: Send + Sync, S: InlineSize> TryFrom<Arc<[T]>> for Slice<T, S> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::SliceN;
+  use crate::VectorN;
   use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
   use std::{boxed::Box, vec};
 
@@ -120,7 +120,7 @@ mod tests {
     let drops = [const { AtomicUsize::new(0) }; 3];
     let boxed: Box<[_]> = drops.iter().map(Count).collect();
     let base = boxed.as_ptr();
-    let source = Slice::<_>::try_from(boxed).unwrap();
+    let source = Vector::<_>::try_from(boxed).unwrap();
     let peer = source.slice(1..);
     assert_eq!(peer.as_slice().as_ptr(), base.wrapping_add(1));
     drop(source);
@@ -140,7 +140,7 @@ mod tests {
       let drops = [const { AtomicUsize::new(0) }; 4];
       let input: Arc<[_]> = drops.iter().map(Count).collect();
       let base = input.as_ptr();
-      let mut first = Slice::<_, S>::try_from(input.clone()).unwrap();
+      let mut first = Vector::<_, S>::try_from(input.clone()).unwrap();
       assert_eq!(first.as_slice().as_ptr(), base);
       let peer = first.clone();
       let mut middle = first.slice(1..3);
@@ -169,7 +169,7 @@ mod tests {
   fn arc_windows_keep_the_handle_and_copy_into_a_vector_on_demand() {
     fn check<S: InlineSize>() {
       let input = Arc::<[u8]>::from(vec![3u8, 5, 7, 11].into_boxed_slice());
-      let mut adopted = Slice::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
+      let mut adopted = Vector::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
       adopted.advance(1);
       let adopted = adopted.try_into_vec().err().unwrap();
       assert_eq!(adopted.as_slice().as_ptr(), input.as_ptr().wrapping_add(1));
@@ -190,7 +190,7 @@ mod tests {
   fn four_word_arc_clones_copy_the_descriptor_and_hold_one_reference_each() {
     fn check<S: InlineSize>() {
       let input = Arc::<[u8]>::from(vec![3u8, 5, 7, 11].into_boxed_slice());
-      let mut source = Slice::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
+      let mut source = Vector::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
       source.advance(1);
       let peer = source.clone();
       assert_eq!(Arc::strong_count(&input), 3);
@@ -217,8 +217,8 @@ mod tests {
       value
     }
     let input: Arc<[Any]> = Arc::from(vec![identity as Any].into_boxed_slice());
-    let original = Slice::<Any>::try_from_arc(input.clone()).unwrap();
-    let narrowed: Slice<Static> = original;
+    let original = Vector::<Any>::try_from_arc(input.clone()).unwrap();
+    let narrowed: Vector<Static> = original;
     assert_eq!(narrowed.slice(..).as_slice()[0]("slice"), "slice");
     drop(narrowed);
     assert_eq!(Arc::strong_count(&input), 1);
@@ -226,7 +226,7 @@ mod tests {
 
   #[test]
   fn rejected_owners_keep_their_identity_and_empty_owners_keep_their_pointer() {
-    type Tiny<T> = SliceN<T, { size_of::<usize>() }>;
+    type Tiny<T> = VectorN<T, { size_of::<usize>() }>;
     let boxed = vec![3].into_boxed_slice();
     let base = boxed.as_ptr();
     let returned = Tiny::try_from_boxed_slice(boxed).err().unwrap();
@@ -235,18 +235,18 @@ mod tests {
     let returned = Tiny::try_from_arc(arc.clone()).err().unwrap();
     assert!(Arc::ptr_eq(&returned, &arc));
     let huge: Box<[()]> = Box::new([(); isize::MAX as usize + 1]);
-    let returned = Slice::<()>::try_from_boxed_slice(huge).err().unwrap();
+    let returned = Vector::<()>::try_from_boxed_slice(huge).err().unwrap();
     assert_eq!(returned.len(), isize::MAX as usize + 1);
     let huge = Arc::from(returned);
-    let returned = Slice::<()>::try_from_arc(Arc::clone(&huge)).err().unwrap();
+    let returned = Vector::<()>::try_from_arc(Arc::clone(&huge)).err().unwrap();
     assert!(Arc::ptr_eq(&huge, &returned));
     let empty = Arc::<[u32]>::from(vec![].into_boxed_slice());
-    let source = Slice::<u32>::try_from_arc(empty.clone()).unwrap();
+    let source = Vector::<u32>::try_from_arc(empty.clone()).unwrap();
     assert_eq!(source.slice(..).as_slice().as_ptr(), empty.as_ptr());
     assert_eq!(Arc::strong_count(&empty), 2);
     let empty: Box<[u32]> = Box::new([]);
     let base = empty.as_ptr();
-    let source = Slice::<u32>::try_from_boxed_slice(empty).unwrap();
+    let source = Vector::<u32>::try_from_boxed_slice(empty).unwrap();
     let recovered = source.try_into_vec().ok().unwrap();
     assert_eq!(recovered.as_ptr(), base);
   }
@@ -255,7 +255,7 @@ mod tests {
   fn overflowing_arc_ranges_retain_the_original_fat_pointer() {
     let boxed: Box<[()]> = Box::new([(); MASK + 3]);
     let arc = Arc::from(boxed);
-    let mut source = Slice::<()>::try_from_arc(Arc::clone(&arc)).unwrap();
+    let mut source = Vector::<()>::try_from_arc(Arc::clone(&arc)).unwrap();
     let mut tail = source.slice(MASK + 1..);
     let mut head = source.slice(..1);
     assert_eq!(Arc::strong_count(&arc), 4);

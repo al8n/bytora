@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(bytora_atomic)]
 mod ownership {
   use bytes::Bytes;
-  use bytora::{AssocInlineSize, InlineSize, Slice, SliceN};
+  use bytora::{AssocInlineSize, InlineSize, Vector, VectorN};
   use criterion::{
     BatchSize, Bencher, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime,
   };
@@ -35,7 +35,7 @@ mod ownership {
     fn into_vec(self) -> Vec<u8>;
   }
 
-  impl<S: InlineSize> Handle for Slice<u8, S> {
+  impl<S: InlineSize> Handle for Vector<u8, S> {
     fn from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       Self::try_from_vec(values)
     }
@@ -49,7 +49,7 @@ mod ownership {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique slice")
+      self.try_into_vec().ok().expect("unique vector")
     }
   }
 
@@ -235,17 +235,17 @@ mod ownership {
     [u8; N]: AssocInlineSize,
   {
     let expected = if N == 0 { size_of::<Bytes>() } else { N };
-    assert_eq!(size_of::<SliceN<u8, N>>(), expected);
-    assert_eq!(size_of::<Option<SliceN<u8, N>>>(), expected);
+    assert_eq!(size_of::<VectorN<u8, N>>(), expected);
+    assert_eq!(size_of::<Option<VectorN<u8, N>>>(), expected);
   }
 
   fn budget<const N: usize, const PAD: usize>(group: &mut BenchmarkGroup<'_, WallTime>)
   where
     [u8; N]: AssocInlineSize,
   {
-    let label = format!("n_{N}_handle_{}", size_of::<SliceN<u8, N>>());
+    let label = format!("n_{N}_handle_{}", size_of::<VectorN<u8, N>>());
     for (len, capacity) in [(7, 7), (64, 64), (64, 65), (64, 128)] {
-      cases::<SliceN<u8, N>, PAD>(group, &label, len, capacity);
+      cases::<VectorN<u8, N>, PAD>(group, &label, len, capacity);
     }
   }
 

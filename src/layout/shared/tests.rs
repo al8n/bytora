@@ -1,5 +1,5 @@
 use super::*;
-use crate::SliceN;
+use crate::VectorN;
 use std::vec;
 
 // The inline array moves with this !Sync owner. Its projection is valid
@@ -44,7 +44,7 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
     [u8; BYTES]: crate::AssocInlineSize,
   {
     let drops = Arc::new(AtomicUsize::new(0));
-    let original = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&drops))
+    let original = VectorN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&drops))
       .ok()
       .unwrap();
     let base = original.as_slice().as_ptr();
@@ -73,7 +73,7 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
   check::<32>();
   check::<4104>();
 
-  let mut huge = Slice::<()>::from_owner(vec![(); isize::MAX as usize]);
+  let mut huge = Vector::<()>::from_owner(vec![(); isize::MAX as usize]);
   let short = huge.slice(huge.len() - 1..);
   huge.advance(huge.len());
   assert!(!huge.is_unique());
@@ -81,7 +81,7 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
   assert!(short.try_into_mut().is_err());
 
   let drops = Arc::new(AtomicUsize::new(0));
-  let returned = SliceN::<u8, 8>::try_from_owner(ArrayOwner::new(&drops))
+  let returned = VectorN::<u8, 8>::try_from_owner(ArrayOwner::new(&drops))
     .err()
     .unwrap();
   assert!(!returned.projected.get());
@@ -93,7 +93,7 @@ fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization(
 fn one_word_recovery_moves_the_visible_inline_elements() {
   use core::mem::MaybeUninit;
 
-  type Word<T> = SliceN<T, { size_of::<usize>() }>;
+  type Word<T> = VectorN<T, { size_of::<usize>() }>;
   const BYTES: usize = size_of::<usize>() - 1;
   fn take<T: Copy>(input: &[T]) -> Vec<T> {
     Word::try_from_slice(input)
@@ -167,7 +167,7 @@ fn four_word_recovery_preserves_packed_references_and_inline_padding() {
     value: &'a usize,
   }
 
-  type FourWords<T> = SliceN<T, { 4 * size_of::<usize>() }>;
+  type FourWords<T> = VectorN<T, { 4 * size_of::<usize>() }>;
   let first = 17;
   let second = 29;
   let packed = Packed {
@@ -201,7 +201,7 @@ fn four_word_recovery_preserves_packed_references_and_inline_padding() {
 fn a_failed_four_word_take_retains_the_original_window_and_allocation() {
   let values = vec![7u8, 8, 9, 10];
   let (base, capacity) = (values.as_ptr(), values.capacity());
-  let source = SliceN::<_, { 4 * size_of::<usize>() }>::try_from_vec(values).unwrap();
+  let source = VectorN::<_, { 4 * size_of::<usize>() }>::try_from_vec(values).unwrap();
   let peer = source.clone();
   let mut slot = Some(source);
   slot.as_mut().unwrap().advance(1);
@@ -238,9 +238,9 @@ fn unique_vector_owners_return_their_allocation_from_either_conversion() {
         // The spare count selects the owner encoding only at this exact capacity.
         assert_eq!(capacity, INPUT.len() + spare);
         let mut source = if wide {
-          Slice::<usize, S>::try_from_vec(values)
+          Vector::<usize, S>::try_from_vec(values)
         } else {
-          Slice::<usize, S>::try_from_shared_vec(values)
+          Vector::<usize, S>::try_from_shared_vec(values)
         }
         .unwrap();
         let owner = source.layout.owner();
@@ -299,7 +299,7 @@ fn shared_vector_owners_keep_the_handle_and_copy_until_the_last_peer() {
       let (base, capacity) = (values.as_ptr(), values.capacity());
       // The spare count selects the owner encoding only at this exact capacity.
       assert_eq!(capacity, INPUT.len() + spare);
-      let mut source = Slice::<usize, S>::try_from_shared_vec(values).unwrap();
+      let mut source = Vector::<usize, S>::try_from_shared_vec(values).unwrap();
       let (start, visible) = if trim {
         source.advance(1);
         source.truncate(3);
@@ -345,10 +345,12 @@ fn zero_sized_vector_windows_recover_their_slots_and_drop_the_hidden_ones() {
 
   // The data word of a zero-sized window is a slot index, which recovery
   // turns into the hidden prefix. The owner keeps the vector's aligned pointer.
-  fn window<S: InlineSize>() -> (Slice<Count, S>, *const Count) {
+  fn window<S: InlineSize>() -> (Vector<Count, S>, *const Count) {
     let values: Vec<Count> = (0..6).map(|_| Count).collect();
     let base = values.as_ptr();
-    let mut source = Slice::<Count, S>::try_from_shared_vec(values).ok().unwrap();
+    let mut source = Vector::<Count, S>::try_from_shared_vec(values)
+      .ok()
+      .unwrap();
     source.advance(1);
     source.truncate(3);
     assert_eq!((source.as_slice().as_ptr(), source.len()), (base, 3));
@@ -387,7 +389,7 @@ fn frozen_windows_copy_while_shared_and_return_their_allocation_once_unique() {
     let mut values = Vec::with_capacity(8);
     values.extend_from_slice(b"abcdef");
     let (base, capacity) = (values.as_ptr(), values.capacity());
-    let mutable = SliceMut::<u8, S>::try_from_vec(values).ok().unwrap();
+    let mutable = VectorMut::<u8, S>::try_from_vec(values).ok().unwrap();
     let mut frozen = mutable.try_freeze_shared().ok().unwrap();
     assert_eq!(frozen.as_slice().as_ptr(), base);
     frozen.advance(1);
@@ -415,7 +417,7 @@ fn static_and_opaque_owners_keep_the_handle_and_copy_on_demand() {
   static DATA: &[u8] = b"static window";
 
   fn check<S: InlineSize>() {
-    let mut borrowed = Slice::<u8, S>::try_from_static(DATA).unwrap();
+    let mut borrowed = Vector::<u8, S>::try_from_static(DATA).unwrap();
     borrowed.advance(7);
     let borrowed = borrowed.try_into_vec().err().unwrap();
     assert_eq!(borrowed.as_slice().as_ptr(), DATA[7..].as_ptr());
@@ -424,7 +426,7 @@ fn static_and_opaque_owners_keep_the_handle_and_copy_on_demand() {
     assert_ne!(copied.as_ptr(), DATA[7..].as_ptr());
 
     let drops = Arc::new(AtomicUsize::new(0));
-    let mut opaque = Slice::<u8, S>::try_from_owner(ArrayOwner::new(&drops))
+    let mut opaque = Vector::<u8, S>::try_from_owner(ArrayOwner::new(&drops))
       .ok()
       .unwrap();
     let base = opaque.as_slice().as_ptr();
@@ -447,7 +449,7 @@ fn static_and_opaque_owners_keep_the_handle_and_copy_on_demand() {
 fn inline_and_empty_windows_convert_into_a_fresh_vector() {
   fn inline<S: InlineSize>() {
     for fallible in [false, true] {
-      let mut source = Slice::<u8, S>::try_from_slice(b"inline").unwrap();
+      let mut source = Vector::<u8, S>::try_from_slice(b"inline").unwrap();
       assert!(source.layout.is_inline());
       source.advance(1);
       let mut slot = Some(source);
@@ -463,15 +465,15 @@ fn inline_and_empty_windows_convert_into_a_fresh_vector() {
   }
   fn empty<S: InlineSize>() {
     for source in [
-      Slice::<u8, S>::new(),
-      Slice::<u8, S>::try_from_vec(Vec::new()).unwrap(),
+      Vector::<u8, S>::new(),
+      Vector::<u8, S>::try_from_vec(Vec::new()).unwrap(),
     ] {
       assert!(source.layout.is_inline());
       assert!(source.clone().into_vec().is_empty());
       assert!(source.try_into_vec().ok().unwrap().is_empty());
     }
     // An exact vector without an allocation is a raw marker of length zero.
-    let unallocated = Slice::<u8, S>::try_from_shared_vec(Vec::new()).unwrap();
+    let unallocated = Vector::<u8, S>::try_from_shared_vec(Vec::new()).unwrap();
     assert_eq!(
       vector::full_len(unallocated.layout.owner()),
       vector::AVAILABLE.then_some(0)
@@ -490,14 +492,14 @@ fn inline_and_empty_windows_convert_into_a_fresh_vector() {
   empty::<typenum::U40>();
 
   // The zero-budget constant is a static window, so it converts by copying.
-  let unowned = Slice::<u8, typenum::U0>::empty();
+  let unowned = Vector::<u8, typenum::U0>::empty();
   let unowned = unowned.try_into_vec().err().unwrap();
   assert!(unowned.into_vec().is_empty());
 }
 
 #[test]
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
-  type OneWord = SliceN<u8, { size_of::<usize>() }>;
+  type OneWord = VectorN<u8, { size_of::<usize>() }>;
   let short = vec![3u8; OneWord::INLINE_CAPACITY];
   let inline = OneWord::try_from_vec(short).unwrap();
   assert!(inline.layout.is_inline());
@@ -511,20 +513,20 @@ fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
 
 #[test]
 fn zero_budget_vectors_keep_allocations_and_use_static_unallocated_empties() {
-  fn copy<T: Copy + Send + Sync, S: InlineSize>(values: Vec<T>) -> Result<Slice<T, S>, Vec<T>> {
-    Slice::try_from_vec(values)
+  fn copy<T: Copy + Send + Sync, S: InlineSize>(values: Vec<T>) -> Result<Vector<T, S>, Vec<T>> {
+    Vector::try_from_vec(values)
   }
   let short = vec![7u8];
   let ptr = short.as_ptr();
   let shared = copy::<_, typenum::U0>(short).unwrap();
   assert_eq!(shared.as_slice().as_ptr(), ptr);
-  let empty = SliceN::<std::string::String, 0>::try_from(Vec::new()).unwrap();
+  let empty = VectorN::<std::string::String, 0>::try_from(Vec::new()).unwrap();
   assert_eq!(empty.layout.tag, COMPACT_STATIC);
   assert!(!empty.layout.uses_external_owner());
   assert!(empty.try_into_vec().is_err());
   let allocated = Vec::<std::string::String>::with_capacity(1);
   let (base, capacity) = (allocated.as_ptr(), allocated.capacity());
-  let empty = SliceN::<_, 0>::try_from(allocated).unwrap();
+  let empty = VectorN::<_, 0>::try_from(allocated).unwrap();
   assert!(empty.is_empty());
   assert_eq!(empty.as_slice().as_ptr(), base);
   let recovered = empty.try_into_vec().ok().unwrap();
@@ -538,7 +540,7 @@ fn allocated_copy_vectors_keep_their_buffers_at_short_and_empty_lengths() {
       let mut input = Vec::with_capacity(capacity);
       input.extend_from_slice(&b"abc"[..len]);
       let (base, capacity) = (input.as_ptr(), input.capacity());
-      let source = Slice::<u8, S>::try_from_vec(input).unwrap();
+      let source = Vector::<u8, S>::try_from_vec(input).unwrap();
       assert_eq!(source.as_slice(), &b"abc"[..len]);
       assert_eq!(source.as_slice().as_ptr(), base);
       let peer = source.clone();
@@ -547,7 +549,7 @@ fn allocated_copy_vectors_keep_their_buffers_at_short_and_empty_lengths() {
       let recovered = source.try_into_vec().ok().unwrap();
       assert_eq!((recovered.as_ptr(), recovered.capacity()), (base, capacity));
     }
-    let empty = Slice::<u8, S>::try_from_vec(Vec::new()).unwrap();
+    let empty = Vector::<u8, S>::try_from_vec(Vec::new()).unwrap();
     assert!(empty.layout.is_inline());
     assert!(empty.is_empty() && empty.is_unique());
     let cloned = empty.clone();
@@ -563,7 +565,7 @@ fn allocated_copy_vectors_keep_their_buffers_at_short_and_empty_lengths() {
   check::<typenum::U128>();
   check::<typenum::U136>();
   assert!(
-    Slice::<()>::try_from_vec(vec![(); 2])
+    Vector::<()>::try_from_vec(vec![(); 2])
       .unwrap()
       .layout
       .is_inline()
@@ -584,7 +586,7 @@ fn unshared_vec_preserves_all_raw_parts_across_window_edits() {
     let mut values = Vec::with_capacity(dropped.len());
     values.extend(dropped.iter().map(Count));
     let (base, cap) = (values.as_ptr(), values.capacity());
-    let mut source = SliceN::<_, 0>::try_from_shared_vec(values).ok().unwrap();
+    let mut source = VectorN::<_, 0>::try_from_shared_vec(values).ok().unwrap();
     source.advance(1);
     source.truncate(3);
     source.advance(1);
@@ -616,7 +618,7 @@ fn exact_vectors_recover_their_allocation_before_and_after_trimming_or_promotion
       let values = Vec::from(*b"abcdef");
       let (base, capacity) = (values.as_ptr(), values.capacity());
       assert_eq!(capacity, values.len());
-      let mut source = Slice::<_, S>::try_from_shared_vec(values).unwrap();
+      let mut source = Vector::<_, S>::try_from_shared_vec(values).unwrap();
       let owner = source.layout.owner();
       assert_eq!(
         vector::full_len(owner),
@@ -656,7 +658,7 @@ fn whole_vec_round_trip_preserves_even_an_empty_allocation() {
     let mut original = Vec::with_capacity(capacity);
     original.extend(0u32..len);
     let (base, capacity) = (original.as_ptr(), original.capacity());
-    let source = Slice::<u32>::try_from_shared_vec(original).unwrap();
+    let source = Vector::<u32>::try_from_shared_vec(original).unwrap();
     assert_eq!(
       vector::raw(source.layout.owner()),
       vector::AVAILABLE && capacity == len as usize
@@ -691,7 +693,7 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
       Owner::Boxed
     }
   }
-  fn placed<T, S: InlineSize>(source: &Slice<T, S>, base: *const T, capacity: usize) -> Owner {
+  fn placed<T, S: InlineSize>(source: &Vector<T, S>, base: *const T, capacity: usize) -> Owner {
     let owner = source.layout.owner();
     if vector::raw(owner) {
       return Owner::Marker;
@@ -717,9 +719,9 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
           // The spare count selects the owner only at this exact capacity.
           assert_eq!(capacity, len + spare);
           let source = if shared {
-            Slice::<T, S>::try_from_shared_vec(values)
+            Vector::<T, S>::try_from_shared_vec(values)
           } else {
-            Slice::<T, S>::try_from_vec(values)
+            Vector::<T, S>::try_from_vec(values)
           }
           .unwrap();
           if capacity == 0 && !shared {
@@ -759,14 +761,14 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
   fn zero_sized<S: InlineSize>() {
     // Past the inline capacity both constructors box a header: a zero-sized
     // vector has no bytes to spare, whatever its capacity.
-    let count = Slice::<(), S>::INLINE_CAPACITY + 3;
+    let count = Vector::<(), S>::INLINE_CAPACITY + 3;
     for shared in [false, true] {
       let values = vec![(); count];
       let (base, capacity) = (values.as_ptr(), values.capacity());
       let source = if shared {
-        Slice::<(), S>::try_from_shared_vec(values)
+        Vector::<(), S>::try_from_shared_vec(values)
       } else {
-        Slice::<(), S>::try_from_vec(values)
+        Vector::<(), S>::try_from_vec(values)
       }
       .unwrap();
       assert_eq!(placed(&source, base, capacity), Owner::Boxed);
@@ -811,7 +813,7 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
     values.resize(len, 7usize);
     let (base, capacity) = (values.as_ptr(), values.capacity());
     assert_eq!(capacity, len + spare);
-    let source = SliceN::<usize, 0>::try_from(values).unwrap();
+    let source = VectorN::<usize, 0>::try_from(values).unwrap();
     assert_eq!(placed(&source, base, capacity), expected::<usize>(spare));
     assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
     let recovered = source.try_into_vec().ok().unwrap();
@@ -840,7 +842,7 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
 
   fn exercise<S: InlineSize>(spare: usize, trim: bool)
   where
-    for<'a> Slice<Count<'a>, S>: Send + Sync,
+    for<'a> Vector<Count<'a>, S>: Send + Sync,
   {
     let drops = [const { AtomicUsize::new(0) }; 10];
     let mut input = Vec::with_capacity(10 + spare);
@@ -849,7 +851,7 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
       value: value as u8,
     }));
     let (base, capacity) = (input.as_ptr(), input.capacity());
-    let mut source = Slice::<_, S>::try_from_shared_vec(input).ok().unwrap();
+    let mut source = Vector::<_, S>::try_from_shared_vec(input).ok().unwrap();
     if trim {
       source.advance(1);
       source.truncate(8);
@@ -875,7 +877,7 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
               0 => source.clone(),
               1 => source.slice(2..5),
               2 => {
-                let mut dest = Slice::new();
+                let mut dest = Vector::new();
                 dest.clone_from(source);
                 dest
               }
@@ -937,7 +939,7 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
       self.1.fetch_add(1, Relaxed);
     }
   }
-  fn refs<S: InlineSize>(source: &Slice<Item<'_>, S>) -> usize {
+  fn refs<S: InlineSize>(source: &Vector<Item<'_>, S>) -> usize {
     let owner = source.layout.owner();
     assert!(!vector::raw(owner));
     // SAFETY: This test only passes a live, directly owned Vec handle.
@@ -951,7 +953,9 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
     let len = 32;
     let input: Vec<_> = (0..len).map(|n| Item(n, &drops)).collect();
     let base = input.as_ptr();
-    let mut original = SliceN::<_, BYTES>::try_from_shared_vec(input).ok().unwrap();
+    let mut original = VectorN::<_, BYTES>::try_from_shared_vec(input)
+      .ok()
+      .unwrap();
     assert_eq!(original.as_slice().as_ptr(), base);
     assert_eq!(vector::raw(original.layout.owner()), vector::AVAILABLE);
     assert!(original.is_unique());
@@ -998,7 +1002,7 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
 
 // An external handle of four words, or of a wider size up to 32 bytes, keeps
 // its tag in the last byte of its last word and nothing else in that word.
-fn final_word<T, S: InlineSize>(handle: &Slice<T, S>) -> [u8; size_of::<usize>()] {
+fn final_word<T, S: InlineSize>(handle: &Vector<T, S>) -> [u8; size_of::<usize>()] {
   assert!(!handle.layout.is_inline());
   assert!(Layout::<T, S>::COMPACT_EXTERNAL && !Layout::<T, S>::PACKED_LEN);
   let last = S::HANDLE_BYTES / size_of::<usize>() - 1;
@@ -1019,7 +1023,7 @@ fn tag_word(tag: u8) -> [u8; size_of::<usize>()] {
 }
 
 // Counts the references of the vector header that this handle keeps alive.
-fn header_refs<T, S: InlineSize>(handle: &Slice<T, S>) -> usize {
+fn header_refs<T, S: InlineSize>(handle: &Vector<T, S>) -> usize {
   let owner = handle.layout.owner();
   assert!(owner.addr() & 1 == 0 && !vector::raw(owner));
   // SAFETY: An even owner without a raw marker is this handle's live header.
@@ -1049,9 +1053,9 @@ fn four_word_clones_reproduce_each_word_and_share_one_vector_header() {
         // The spare count selects the owner encoding only at this exact capacity.
         assert_eq!(capacity, INPUT.len() + spare);
         let mut source = if wide {
-          Slice::<usize, S>::try_from_vec(values)
+          Vector::<usize, S>::try_from_vec(values)
         } else {
-          Slice::<usize, S>::try_from_shared_vec(values)
+          Vector::<usize, S>::try_from_shared_vec(values)
         }
         .unwrap();
         let (start, visible) = if trim {
@@ -1104,7 +1108,7 @@ fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
 
   // The data word, the owner word, the length and the bytes of the final word.
   fn words<T, S: InlineSize>(
-    handle: &Slice<T, S>,
+    handle: &Vector<T, S>,
   ) -> (*const (), *const (), usize, [u8; size_of::<usize>()]) {
     assert_eq!(S::HANDLE_BYTES, 4 * size_of::<usize>());
     assert!(!handle.layout.is_inline());
@@ -1121,7 +1125,7 @@ fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
   }
   // Each target's clone uses one of the two constructions. Both run here, on
   // a source that holds the vector header they serve.
-  fn compare<T, S: InlineSize>(source: &Slice<T, S>) {
+  fn compare<T, S: InlineSize>(source: &Vector<T, S>) {
     let held = header_refs(source);
     let owner = source.layout.owner();
     // SAFETY: A clone retains the header once for the handle it builds. Each
@@ -1156,9 +1160,9 @@ fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
         // The spare count selects the owner encoding only at this exact capacity.
         assert_eq!(values.capacity(), INPUT.len() + spare);
         let mut source = if wide {
-          Slice::<usize, S>::try_from_vec(values)
+          Vector::<usize, S>::try_from_vec(values)
         } else {
-          Slice::<usize, S>::try_from_shared_vec(values)
+          Vector::<usize, S>::try_from_shared_vec(values)
         }
         .unwrap();
         if trim {
@@ -1176,7 +1180,7 @@ fn the_rebuilt_and_the_copied_four_word_clone_are_the_same_four_words() {
       }
     }
     // The data word of a zero-sized vector window is null, then a slot index.
-    let mut slots = Slice::<(), S>::try_from_shared_vec(vec![(); 6]).unwrap();
+    let mut slots = Vector::<(), S>::try_from_shared_vec(vec![(); 6]).unwrap();
     compare(&slots);
     slots.advance(1);
     slots.truncate(3);
@@ -1210,7 +1214,7 @@ fn the_last_four_word_clone_of_a_vector_releases_each_element_once() {
       let base = values.as_ptr();
       // The spare count selects the owner encoding only at this exact capacity.
       assert_eq!(values.capacity(), drops.len() + spare);
-      let mut source = Slice::<_, S>::try_from_shared_vec(values).ok().unwrap();
+      let mut source = Vector::<_, S>::try_from_shared_vec(values).ok().unwrap();
       if trim {
         source.advance(1);
         source.truncate(3);
@@ -1250,7 +1254,7 @@ fn a_four_word_clone_that_loses_the_first_promotion_retains_the_published_header
     for trim in [false, true] {
       let values = Vec::from(*b"abcdef");
       let (base, capacity) = (values.as_ptr(), values.capacity());
-      let mut source = Slice::<u8, S>::try_from_shared_vec(values).unwrap();
+      let mut source = Vector::<u8, S>::try_from_shared_vec(values).unwrap();
       let (start, visible) = if trim {
         source.advance(1);
         source.truncate(3);
@@ -1300,11 +1304,11 @@ fn concurrent_first_clones_of_a_four_word_vector_share_one_published_header() {
 
   fn exercise<S: InlineSize>(trim: bool)
   where
-    Slice<usize, S>: Send + Sync,
+    Vector<usize, S>: Send + Sync,
   {
     let values = Vec::from(INPUT);
     let (base, capacity) = (values.as_ptr(), values.capacity());
-    let mut source = Slice::<usize, S>::try_from_shared_vec(values).unwrap();
+    let mut source = Vector::<usize, S>::try_from_shared_vec(values).unwrap();
     let (start, visible) = if trim {
       source.advance(1);
       source.truncate(3);
@@ -1363,7 +1367,7 @@ fn four_word_clones_of_other_owners_copy_the_descriptor_and_hold_one_reference()
     let mut values = Vec::with_capacity(8);
     values.extend_from_slice(b"abcdef");
     let (base, capacity) = (values.as_ptr(), values.capacity());
-    let mutable = SliceMut::<u8, S>::try_from_vec(values).ok().unwrap();
+    let mutable = VectorMut::<u8, S>::try_from_vec(values).ok().unwrap();
     let mut frozen = mutable.try_freeze_shared().ok().unwrap();
     frozen.advance(1);
     assert!(frozen.is_unique());
@@ -1380,7 +1384,7 @@ fn four_word_clones_of_other_owners_copy_the_descriptor_and_hold_one_reference()
 
     // An opaque owner is dropped with its last clone.
     let drops = Arc::new(AtomicUsize::new(0));
-    let mut opaque = Slice::<u8, S>::try_from_owner(ArrayOwner::new(&drops))
+    let mut opaque = Vector::<u8, S>::try_from_owner(ArrayOwner::new(&drops))
       .ok()
       .unwrap();
     let base = opaque.as_slice().as_ptr();
@@ -1396,7 +1400,7 @@ fn four_word_clones_of_other_owners_copy_the_descriptor_and_hold_one_reference()
     assert_eq!(drops.load(Relaxed), 1);
 
     // A static window has no owner to retain.
-    let mut borrowed = Slice::<u8, S>::try_from_static(DATA).unwrap();
+    let mut borrowed = Vector::<u8, S>::try_from_static(DATA).unwrap();
     borrowed.advance(7);
     let peer = borrowed.clone();
     assert_eq!(peer.layout.owner(), STATIC_OWNER);
@@ -1405,7 +1409,7 @@ fn four_word_clones_of_other_owners_copy_the_descriptor_and_hold_one_reference()
     assert_eq!(peer.as_slice(), b"window");
 
     // The data word of a zero-sized vector window is a slot index.
-    let mut slots = Slice::<(), S>::try_from_shared_vec(vec![(); 6]).unwrap();
+    let mut slots = Vector::<(), S>::try_from_shared_vec(vec![(); 6]).unwrap();
     slots.advance(1);
     slots.truncate(3);
     let peer = slots.clone();
@@ -1429,9 +1433,9 @@ fn clone_from_preserves_windows_across_storage_kinds() {
   where
     [u8; BYTES]: crate::AssocInlineSize,
   {
-    let mut inline = SliceN::<u8, BYTES>::try_from_slice(b"inline").unwrap();
+    let mut inline = VectorN::<u8, BYTES>::try_from_slice(b"inline").unwrap();
     inline.advance(1);
-    let mut borrowed = SliceN::<u8, BYTES>::try_from_static(DATA).unwrap();
+    let mut borrowed = VectorN::<u8, BYTES>::try_from_static(DATA).unwrap();
     borrowed.advance(2);
 
     let mut destination = inline.clone();
@@ -1445,13 +1449,13 @@ fn clone_from_preserves_windows_across_storage_kinds() {
     destination.advance(1);
     assert_eq!(inline.as_slice(), b"nline");
 
-    let len = SliceN::<u8, BYTES>::INLINE_CAPACITY + 4;
+    let len = VectorN::<u8, BYTES>::INLINE_CAPACITY + 4;
     let values = vec![7; len];
     let base = values.as_ptr();
-    let mut shared = SliceN::<u8, BYTES>::try_from_vec(values).unwrap();
+    let mut shared = VectorN::<u8, BYTES>::try_from_vec(values).unwrap();
     shared.advance(2);
     let old_values = vec![9; len];
-    let mut destination = SliceN::<u8, BYTES>::try_from_vec(old_values).unwrap();
+    let mut destination = VectorN::<u8, BYTES>::try_from_vec(old_values).unwrap();
     destination.clone_from(&shared);
     assert_eq!(destination.len(), len - 2);
     assert!(destination.as_slice().iter().all(|&value| value == 7));
@@ -1471,8 +1475,8 @@ fn clone_from_preserves_windows_across_storage_kinds() {
     assert_eq!(destination.as_slice().as_ptr(), DATA[2..].as_ptr());
   }
 
-  let mut tiny = SliceN::<u8, 8>::try_from_slice(b"old").unwrap();
-  let tiny_source = SliceN::<u8, 8>::try_from_slice(b"new").unwrap();
+  let mut tiny = VectorN::<u8, 8>::try_from_slice(b"old").unwrap();
+  let tiny_source = VectorN::<u8, 8>::try_from_slice(b"new").unwrap();
   tiny.clone_from(&tiny_source);
   assert_eq!(tiny.as_slice(), b"new");
 
@@ -1492,10 +1496,10 @@ fn clone_from_releases_the_old_owner_and_keeps_the_new_owner_live() {
   {
     let old = Arc::new(AtomicUsize::new(0));
     let new = Arc::new(AtomicUsize::new(0));
-    let mut destination = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&old))
+    let mut destination = VectorN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&old))
       .ok()
       .unwrap();
-    let mut source = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&new))
+    let mut source = VectorN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&new))
       .ok()
       .unwrap();
     source.advance(2);
@@ -1536,12 +1540,12 @@ fn wide_clone_from_keeps_the_new_owner_when_the_old_owner_panics() {
     }
   }
 
-  let mut destination = SliceN::<u8, 128>::try_from_owner(PanicsOnDrop)
+  let mut destination = VectorN::<u8, 128>::try_from_owner(PanicsOnDrop)
     .ok()
     .unwrap();
   let values = vec![1, 2, 3];
   let base = values.as_ptr();
-  let source = SliceN::<u8, 128>::try_from_vec(values).unwrap();
+  let source = VectorN::<u8, 128>::try_from_vec(values).unwrap();
   assert!(
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       destination.clone_from(&source);
@@ -1559,12 +1563,12 @@ fn shared_storage_supports_overaligned_elements_and_zero_sized_windows() {
   #[repr(align(64))]
   #[derive(Clone, Copy, Debug)]
   struct Aligned(u8);
-  let aligned = Slice::<Aligned>::try_from_vec(vec![Aligned(17)]).unwrap();
+  let aligned = Vector::<Aligned>::try_from_vec(vec![Aligned(17)]).unwrap();
   assert!(aligned.as_slice().as_ptr().is_aligned());
   assert_eq!(aligned.clone().as_slice()[0].0, 17);
 
   let max = isize::MAX as usize;
-  let mut zsts = Slice::<()>::try_from_vec(vec![(); max]).ok().unwrap();
+  let mut zsts = Vector::<()>::try_from_vec(vec![(); max]).ok().unwrap();
   assert_eq!(zsts.as_slice().len(), max);
   let short = zsts.slice(max - 2..);
   assert_ne!(short.layout.tag, COMPACT_STATIC);
@@ -1576,13 +1580,13 @@ fn shared_storage_supports_overaligned_elements_and_zero_sized_windows() {
   assert!(zsts.as_slice().is_empty());
   drop(zsts);
   assert_eq!(short.as_slice(), &[(), ()]);
-  let too_long = Slice::<()>::try_from_vec(vec![(); max + 1]).err().unwrap();
+  let too_long = Vector::<()>::try_from_vec(vec![(); max + 1]).err().unwrap();
   assert_eq!(too_long.len(), max + 1);
 }
 
 #[test]
 fn zero_sized_frozen_windows_recover_logical_slots_and_rejoin() {
-  let mut head = crate::SliceMutN::<_, 0>::from(vec![(); 6]);
+  let mut head = crate::VectorMutN::<_, 0>::from(vec![(); 6]);
   let tail = head.split_off(4);
   let mut frozen = head.freeze();
   frozen.advance(2);
@@ -1602,7 +1606,7 @@ fn zero_sized_frozen_windows_recover_logical_slots_and_rejoin() {
   }
   let values: Vec<Count> = (0..6).map(|_| Count).collect();
   let base = values.as_ptr();
-  let mut head = crate::SliceMutN::<_, 0>::from(values);
+  let mut head = crate::VectorMutN::<_, 0>::from(values);
   let tail = head.split_off(4);
   let whole = head.freeze();
   let mut nested = whole.slice(1..).slice(..3);
@@ -1623,7 +1627,7 @@ fn zero_sized_frozen_windows_recover_logical_slots_and_rejoin() {
 #[test]
 fn zero_sized_vector_recovers_large_offsets_and_read_only_owners_keep_their_pointer() {
   let max = isize::MAX as usize;
-  let original = SliceN::<(), 0>::try_from_shared_vec(vec![(); max]).unwrap();
+  let original = VectorN::<(), 0>::try_from_shared_vec(vec![(); max]).unwrap();
   let base = original.as_slice().as_ptr();
   let mut last = original.slice(max - 4..).slice(1..);
   last.advance(1);
@@ -1648,9 +1652,9 @@ fn zero_sized_vector_recovers_large_offsets_and_read_only_owners_keep_their_poin
     slots: [const { Aligned }; 5],
     byte: 7,
   };
-  let borrowed = Slice::from_static(&STATIC.slots);
+  let borrowed = Vector::from_static(&STATIC.slots);
   assert_eq!(borrowed.as_slice().as_ptr(), STATIC.slots.as_ptr());
-  let opaque = Slice::from_owner(Holder {
+  let opaque = Vector::from_owner(Holder {
     slots: [const { Aligned }; 5],
     byte: 3,
   });
@@ -1682,7 +1686,7 @@ fn unique_vector_extraction_preserves_allocation_and_drops_only_hidden_elements(
     let mut values = Vec::with_capacity(12);
     values.extend(drops.iter().map(Count));
     let (base, capacity) = (values.as_ptr(), values.capacity());
-    let original = SliceN::<_, BYTES>::try_from_shared_vec(values)
+    let original = VectorN::<_, BYTES>::try_from_shared_vec(values)
       .ok()
       .unwrap();
     let middle = original.slice(1..4);
@@ -1707,7 +1711,7 @@ fn unique_vector_extraction_preserves_allocation_and_drops_only_hidden_elements(
 
 #[test]
 fn static_and_shared_copy_fallbacks_and_unique_mutable_window() {
-  let borrowed = Slice::<u8>::from_static(b"static");
+  let borrowed = Vector::<u8>::from_static(b"static");
   assert!(!borrowed.is_unique());
   assert!(borrowed.clone().try_into_mut().is_err());
   assert!(borrowed.clone().try_into_vec().is_err());
@@ -1716,7 +1720,7 @@ fn static_and_shared_copy_fallbacks_and_unique_mutable_window() {
 
   let input: Vec<u8> = (0..64).collect();
   let base = input.as_ptr();
-  let mut original = SliceN::<_, 0>::try_from(input).unwrap();
+  let mut original = VectorN::<_, 0>::try_from(input).unwrap();
   original.advance(4);
   let mut window = original.slice(2..6);
   assert_eq!(window.clone().into_vec(), [6, 7, 8, 9]);
@@ -1738,7 +1742,7 @@ fn a_frozen_window_thaws_without_copying_while_its_mutable_sibling_is_live() {
   let mut input = Vec::with_capacity(8);
   input.extend([Item("prefix"), Item(&local), Item("right")]);
   let base = input.as_ptr();
-  let mut left = crate::SliceMutN::<_, 0>::from(input);
+  let mut left = crate::VectorMutN::<_, 0>::from(input);
   let mut right = left.split_off(2);
   let frozen = left.freeze();
   let mut tail = frozen.slice(1..);
@@ -1767,10 +1771,10 @@ fn frozen_windows_can_shorten_element_lifetimes_before_recovering_ownership() {
   }
   static ORIGINAL_DROPS: AtomicUsize = AtomicUsize::new(0);
 
-  fn freeze_static() -> SliceN<Count<'static>, 0> {
-    crate::SliceMutN::<_, 0>::from(vec![Count(&ORIGINAL_DROPS)]).freeze()
+  fn freeze_static() -> VectorN<Count<'static>, 0> {
+    crate::VectorMutN::<_, 0>::from(vec![Count(&ORIGINAL_DROPS)]).freeze()
   }
-  fn shorten<'a>(frozen: SliceN<Count<'static>, 0>, _: &'a AtomicUsize) -> SliceN<Count<'a>, 0> {
+  fn shorten<'a>(frozen: VectorN<Count<'static>, 0>, _: &'a AtomicUsize) -> VectorN<Count<'a>, 0> {
     frozen
   }
 
@@ -1808,12 +1812,12 @@ fn opaque_owner_cleans_up_a_panicking_projection_and_cross_thread_final_drop() {
   let drops = Arc::new(AtomicUsize::new(0));
   let owner = Panics(ArrayOwner::new(&drops));
   assert!(
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Slice::from_owner(owner))).is_err()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Vector::from_owner(owner))).is_err()
   );
   assert_eq!(drops.load(Relaxed), 1);
-  let slice = Slice::from_owner(ArrayOwner::new(&drops));
-  let tail = slice.slice(7..);
-  drop(slice);
+  let vector = Vector::from_owner(ArrayOwner::new(&drops));
+  let tail = vector.slice(7..);
+  drop(vector);
   std::thread::spawn(move || {
     assert_eq!(tail.clone().as_slice(), b"owner");
     assert!(tail.try_into_mut().is_err());
@@ -1853,7 +1857,7 @@ fn panic_during_extraction_releases_each_element_once() {
       drops,
       panic: i == panic_at,
     }));
-    let mut original = SliceN::<_, 0>::try_from(values).ok().unwrap();
+    let mut original = VectorN::<_, 0>::try_from(values).ok().unwrap();
     let middle = if share {
       let middle = original.slice(1..3);
       drop(original);
@@ -1873,7 +1877,7 @@ fn panic_during_extraction_releases_each_element_once() {
 #[test]
 fn shared_windows_can_cross_threads_and_reject_invalid_advances() {
   let number = 42;
-  let original = Slice::<&i32>::try_from_vec(vec![&number; 64]).unwrap();
+  let original = Vector::<&i32>::try_from_vec(vec![&number; 64]).unwrap();
   let mut peer = original.clone();
   std::thread::scope(|scope| {
     let borrowed = &original;

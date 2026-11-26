@@ -40,7 +40,7 @@
 #[cfg(bytora_atomic)]
 mod driver {
   use bytes::Bytes;
-  use bytora::{InlineSize, Slice, SliceN, typenum};
+  use bytora::{InlineSize, Vector, VectorN, typenum};
   use std::{
     hint::black_box,
     ops::Range,
@@ -76,7 +76,7 @@ mod driver {
     fn into_vec(self) -> Vec<u8>;
   }
 
-  impl<S: InlineSize> Handle for Slice<u8, S> {
+  impl<S: InlineSize> Handle for Vector<u8, S> {
     fn from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       Self::try_from_vec(values)
     }
@@ -84,7 +84,7 @@ mod driver {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique slice")
+      self.try_into_vec().ok().expect("unique vector")
     }
   }
 
@@ -105,7 +105,7 @@ mod driver {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
   }
 
-  impl Adopt for Slice<u8, typenum::U0> {
+  impl Adopt for Vector<u8, typenum::U0> {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       <Self as TryFrom<Vec<u8>>>::try_from(values)
     }
@@ -325,16 +325,16 @@ mod driver {
     if case.op == "try_from_vec" {
       return match case.label {
         "bytes" => with_forget!(adopt, Bytes),
-        "n_0" => with_forget!(adopt, SliceN<u8, 0>),
+        "n_0" => with_forget!(adopt, VectorN<u8, 0>),
         other => panic!("no try_from_vec case for {other}"),
       };
     }
     match case.label {
       "bytes" => with_forget!(run, Bytes),
-      "n_0" => with_forget!(run, SliceN<u8, 0>),
-      "n_16" => with_forget!(run, SliceN<u8, 16>),
-      "n_24" => with_forget!(run, SliceN<u8, 24>),
-      "n_32" => with_forget!(run, SliceN<u8, 32>),
+      "n_0" => with_forget!(run, VectorN<u8, 0>),
+      "n_16" => with_forget!(run, VectorN<u8, 16>),
+      "n_24" => with_forget!(run, VectorN<u8, 24>),
+      "n_32" => with_forget!(run, VectorN<u8, 32>),
       other => panic!("unknown label {other}"),
     }
   }

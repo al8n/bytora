@@ -27,12 +27,12 @@ unsafe trait Repr {
   const ZERO_CURSOR: Self::Cursor;
 }
 
-/// A type-level byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
+/// A type-level byte size for a [`Vector`](crate::Vector) or [`VectorMut`](crate::VectorMut).
 ///
 /// A positive size is a multiple of the target's word size through [`MAX_HANDLE_BYTES`]
 /// and counts all handle bytes, including the cursor. [`typenum::U0`] disables
 /// inline elements and uses a four-word handle. The trait is sealed.
-/// [`INLINE_CAPACITY`](crate::Slice::INLINE_CAPACITY) also depends on the element type.
+/// [`INLINE_CAPACITY`](crate::Vector::INLINE_CAPACITY) also depends on the element type.
 #[allow(
   private_bounds,
   reason = "the backing arrays are private to the layout"
@@ -54,7 +54,7 @@ const fn handle_bytes(budget: usize) -> usize {
 }
 
 /// Maps an array of `N` bytes to the type-level handle size used by
-/// [`SliceN`](crate::SliceN) and [`SliceMutN`](crate::SliceMutN).
+/// [`VectorN`](crate::VectorN) and [`VectorMutN`](crate::VectorMutN).
 ///
 /// Use `where [u8; N]: AssocInlineSize` in code generic over `const N: usize`.
 pub trait AssocInlineSize {
@@ -99,7 +99,7 @@ include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
   reason = "Rust 1.85 does not count calls from anonymous constants as use"
 )]
 const fn verify_size<S: InlineSize>(budget: usize) {
-  use crate::{Slice, SliceMut};
+  use crate::{Vector, VectorMut};
 
   let bytes = S::HANDLE_BYTES;
   let payload = size_of::<S::Payload>();
@@ -138,14 +138,14 @@ const fn verify_size<S: InlineSize>(budget: usize) {
   assert!(core::mem::offset_of!(Layout<u8, S>, payload) == 0);
   assert!(core::mem::offset_of!(Layout<u8, S>, cursor) == payload);
   assert!(core::mem::offset_of!(Layout<u8, S>, tag) == bytes - 1);
-  assert!(align_of::<Slice<u8, S>>() == align_of::<usize>());
-  assert!(align_of::<SliceMut<u8, S>>() == align_of::<usize>());
-  assert!(size_of::<Slice<u8, S>>() == bytes);
-  assert!(size_of::<Option<Slice<u8, S>>>() == bytes);
-  assert!(size_of::<SliceMut<u8, S>>() == bytes);
-  assert!(size_of::<Option<SliceMut<u8, S>>>() == bytes);
+  assert!(align_of::<Vector<u8, S>>() == align_of::<usize>());
+  assert!(align_of::<VectorMut<u8, S>>() == align_of::<usize>());
+  assert!(size_of::<Vector<u8, S>>() == bytes);
+  assert!(size_of::<Option<Vector<u8, S>>>() == bytes);
+  assert!(size_of::<VectorMut<u8, S>>() == bytes);
+  assert!(size_of::<Option<VectorMut<u8, S>>>() == bytes);
   if !cfg!(any(feature = "std", feature = "alloc")) || budget == size_of::<usize>() {
-    assert!(!core::mem::needs_drop::<SliceMut<u8, S>>());
+    assert!(!core::mem::needs_drop::<VectorMut<u8, S>>());
   }
 }
 
@@ -492,7 +492,7 @@ unsafe fn copy_tiny(src: *const u8, dst: *mut u8, bytes: usize) {
   }
 }
 
-// A bare Layout describes a window. Its enclosing Slice manages the external owner.
+// A bare Layout describes a window. Its enclosing Vector manages the external owner.
 impl<T, S: InlineSize> Layout<T, S> {
   const fn set_external_len(&mut self, len: usize, kind: NonZeroU8) {
     assert!(Self::FITS_EXTERNAL);

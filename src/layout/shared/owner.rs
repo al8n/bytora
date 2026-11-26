@@ -1,6 +1,6 @@
 use super::vector::{self, VecHeader};
 use super::{Arc, STATIC_OWNER, arc};
-use crate::{InlineSize, Slice, layout::mutable::Window};
+use crate::{InlineSize, Vector, layout::mutable::Window};
 use core::{mem::ManuallyDrop, ops::Range};
 use std::vec::Vec;
 
@@ -8,7 +8,7 @@ use std::vec::Vec;
 // select this table. A take callback consumes the reference on success or panic.
 // On failure it leaves that same strong reference in the caller's ownership.
 // The window pointer retains its provenance but carries no input type: the
-// stored table must be covariant in T, just like the Slice exposing its window.
+// stored table must be covariant in T, just like the Vector exposing its window.
 pub(super) type Take<R> = unsafe fn(*const (), *const (), usize) -> Option<R>;
 pub(super) type ZstBase = unsafe fn(*const ()) -> *const ();
 
@@ -282,7 +282,7 @@ unsafe fn window_into_vec<T>(owner: *const (), data: *const (), len: usize) -> O
   unsafe { take_window(owner, data, len) }.map(Window::into_vec)
 }
 
-impl<T, S: InlineSize> Slice<T, S> {
+impl<T, S: InlineSize> Vector<T, S> {
   pub(crate) fn try_from_window(window: Window<T>) -> Result<Self, Window<T>>
   where
     T: Send + Sync,

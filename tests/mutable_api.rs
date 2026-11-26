@@ -1,8 +1,8 @@
-use bytora::SliceMutN;
+use bytora::VectorMutN;
 
 #[test]
 fn bounded_growth_split_and_reclaim_cover_inline_capacity() {
-  type Tiny = SliceMutN<u8, { size_of::<usize>() }>;
+  type Tiny = VectorMutN<u8, { size_of::<usize>() }>;
   let capacity = Tiny::INLINE_CAPACITY;
   for len in 0..=capacity {
     for at in 0..=capacity {
@@ -44,7 +44,7 @@ fn bounded_growth_split_and_reclaim_cover_inline_capacity() {
 #[test]
 fn write_helpers_use_relative_ranges_and_reject_overflow_before_modification() {
   use core::ops::Bound::{Excluded, Included, Unbounded};
-  let mut values = SliceMutN::<u16, 64>::new();
+  let mut values = VectorMutN::<u16, 64>::new();
   values.extend_from_slice(&[1, 2, 3]);
   values.advance(1);
   values.extend_from_within(..=1);
@@ -68,13 +68,13 @@ fn write_helpers_use_relative_ranges_and_reject_overflow_before_modification() {
   assert_eq!(values.capacity(), capacity - 5);
   assert_eq!(data.capacity(), 5);
   assert_eq!(data.freeze().as_slice(), &[2, 3, 2, 3, 3]);
-  assert_eq!(SliceMutN::<u8, 16>::zeroed(5).as_slice(), &[0; 5]);
+  assert_eq!(VectorMutN::<u8, 16>::zeroed(5).as_slice(), &[0; 5]);
 }
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
 fn promotions_and_vector_recovery_preserve_allocations_and_spare_capacity() {
-  type TwoWords = SliceMutN<u8, { 2 * size_of::<usize>() }>;
+  type TwoWords = VectorMutN<u8, { 2 * size_of::<usize>() }>;
   let mut compact = TwoWords::new();
   compact.resize(TwoWords::INLINE_CAPACITY, 9);
   compact.extend_from_within(..);
@@ -82,7 +82,7 @@ fn promotions_and_vector_recovery_preserve_allocations_and_spare_capacity() {
   let mut allocated = Vec::<u8>::with_capacity(29);
   let base = allocated.as_ptr();
   let capacity = allocated.capacity();
-  let mut handle = SliceMutN::<u8, 0>::from(allocated);
+  let mut handle = VectorMutN::<u8, 0>::from(allocated);
   assert_eq!(handle.capacity(), capacity);
   handle.extend_from_slice(b"abcdef");
   handle.advance(3);
@@ -101,7 +101,7 @@ fn heap_splits_partition_unused_space_and_rejoin_without_moving_elements() {
   data.extend_from_slice(b"abc");
   let base = data.as_ptr();
   let capacity = data.capacity();
-  let mut a = SliceMutN::<_, 0>::from(data);
+  let mut a = VectorMutN::<_, 0>::from(data);
   let mut b = a.split_off(8);
   let mut c = b.split_off(5);
   assert_eq!(b.as_slice().as_ptr(), base.wrapping_add(8));
@@ -130,7 +130,7 @@ fn freeze_and_thaw_keep_disjoint_siblings_isolated_across_threads() {
   let mut raw = Vec::with_capacity(16);
   raw.extend(["one".to_owned(), "two".into(), "three".into()]);
   let base = raw.as_ptr();
-  let mut input = SliceMutN::<_, 0>::from(raw);
+  let mut input = VectorMutN::<_, 0>::from(raw);
   let mut tail = input.split_off(2);
   let frozen = input.freeze();
   let clone = frozen.slice(1..);
@@ -162,7 +162,7 @@ fn shared_reclaim_cannot_overwrite_a_live_sibling() {
   use core::cell::Cell;
   let data: Vec<_> = (0..8).map(Cell::new).collect();
   let base = data.as_ptr();
-  let mut head = SliceMutN::<_, 0>::from(data);
+  let mut head = VectorMutN::<_, 0>::from(data);
   let mut tail = head.split_off(4);
   head.advance(2);
   assert!(head.try_reclaim(2));
@@ -222,7 +222,7 @@ fn resize_and_reclaim_are_panic_safe_for_arbitrary_elements() {
     drops: drops.clone(),
     panic_on_drop,
   };
-  let mut handle = SliceMutN::<_, 0>::with_capacity(4);
+  let mut handle = VectorMutN::<_, 0>::with_capacity(4);
   assert!(catch_unwind(AssertUnwindSafe(|| handle.resize(3, item(false)))).is_err());
   assert_eq!(handle.len(), 1);
   assert_eq!(drops.get(), 1);
@@ -251,8 +251,8 @@ fn resize_and_reclaim_are_panic_safe_for_arbitrary_elements() {
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
 fn thawing_a_generic_empty_cannot_create_noncopy_inline_elements() {
-  use bytora::Slice;
-  let mut buffer = Slice::<String>::new().try_into_mut().ok().unwrap();
+  use bytora::Vector;
+  let mut buffer = Vector::<String>::new().try_into_mut().ok().unwrap();
   assert_eq!(buffer.capacity(), 0);
   buffer.resize(1, "owned".to_string());
   #[cfg(bytora_atomic)]
@@ -269,7 +269,7 @@ fn thawing_a_generic_empty_cannot_create_noncopy_inline_elements() {
 #[cfg(bytora_atomic)]
 #[test]
 fn widening_immutable_then_thawing_moves_replacements_into_shared_storage() {
-  use bytora::{Slice, SliceMut};
+  use bytora::{Vector, VectorMut};
   use core::marker::PhantomData;
 
   struct Element<F>(u8, PhantomData<F>);
@@ -281,8 +281,8 @@ fn widening_immutable_then_thawing_moves_replacements_into_shared_storage() {
   }
 
   let inputs = [Element::<fn(&())>(1, PhantomData), Element(2, PhantomData)];
-  let original = Slice::<_>::try_from_slice(&inputs).unwrap();
-  let wider: Slice<Element<fn(&'static ())>> = original;
+  let original = Vector::<_>::try_from_slice(&inputs).unwrap();
+  let wider: Vector<Element<fn(&'static ())>> = original;
   let mut mutable = wider.try_into_mut().ok().unwrap();
   mutable.as_mut_slice()[0] = Element(9, PhantomData);
   let mut suffix = mutable.split_off(1);
@@ -311,7 +311,7 @@ fn widening_immutable_then_thawing_moves_replacements_into_shared_storage() {
   let drops = Arc::new(AtomicUsize::new(0));
   let v = vec![Count(Arc::clone(&drops)), Count(Arc::clone(&drops))];
   let base = v.as_ptr();
-  let owned = SliceMut::<_>::try_from_vec(v).ok().unwrap();
+  let owned = VectorMut::<_>::try_from_vec(v).ok().unwrap();
   let frozen = owned.try_freeze_shared().ok().unwrap();
   assert_eq!(frozen.as_slice().as_ptr(), base);
   let peer = frozen.clone();
@@ -329,7 +329,7 @@ fn automatic_reserve_amortizes_sliding_full_windows() {
   // grow the original allocation. Both paths must avoid copying every step.
   for keep_suffix in [false, true] {
     let whole = vec![0u8; if keep_suffix { 2 * WIDTH } else { WIDTH }];
-    let mut buffer = SliceMutN::<_, 0>::from(whole);
+    let mut buffer = VectorMutN::<_, 0>::from(whole);
     let sibling = keep_suffix.then(|| buffer.split_off(WIDTH));
     let mut moves = 0;
     for i in 0..2 * WIDTH {
@@ -350,7 +350,7 @@ fn automatic_reserve_amortizes_sliding_full_windows() {
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
 fn reserve_reclaims_near_maximum_zst_offsets_and_preserves_length_on_overflow() {
-  let mut all = SliceMutN::<_, 0>::from(vec![(); usize::MAX]);
+  let mut all = VectorMutN::<_, 0>::from(vec![(); usize::MAX]);
   all.advance(1);
   all.reserve(1);
   assert_eq!(all.len(), usize::MAX - 1);
@@ -364,7 +364,7 @@ fn reserve_reclaims_near_maximum_zst_offsets_and_preserves_length_on_overflow() 
 #[cfg(bytora_atomic)]
 #[test]
 fn zero_sized_windows_use_indices_for_adjacency() {
-  let mut head = SliceMutN::<_, 0>::from(vec![(); usize::MAX]);
+  let mut head = VectorMutN::<_, 0>::from(vec![(); usize::MAX]);
   let mut mid = head.split_off(2);
   let tail = mid.split_off(3);
   let tail = head.try_unsplit(tail).err().unwrap();
@@ -380,7 +380,7 @@ fn zero_sized_windows_use_indices_for_adjacency() {
 fn two_word_spill_keeps_its_buffer_through_freeze() {
   let data = vec![9u8; 35];
   let base = data.as_ptr();
-  let handle = SliceMutN::<_, { 2 * size_of::<usize>() }>::try_from_vec(data).unwrap();
+  let handle = VectorMutN::<_, { 2 * size_of::<usize>() }>::try_from_vec(data).unwrap();
   let original = match handle.try_freeze() {
     Ok(frozen) => {
       assert_eq!(frozen.as_slice().as_ptr(), base);
@@ -419,10 +419,10 @@ fn independently_coerced_siblings_drop_new_values_through_each_windows_current_t
     events: Arc::clone(&events),
     form: PhantomData::<AnyBorrow>,
   };
-  let mut original = SliceMutN::<_, 0>::from(vec![make(0), make(1)]);
+  let mut original = VectorMutN::<_, 0>::from(vec![make(0), make(1)]);
   // Higher-ranked function pointers are subtypes of the single-lifetime
   // function pointer. Both are 'static types but have distinct TypeIds.
-  let mut shorter: SliceMutN<Record<StaticBorrow>, 0> = original.split_off(1);
+  let mut shorter: VectorMutN<Record<StaticBorrow>, 0> = original.split_off(1);
   shorter.as_mut_slice()[0] = Record {
     id: 2,
     events: Arc::clone(&events),

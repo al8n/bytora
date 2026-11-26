@@ -1,13 +1,13 @@
-use super::{AssocInlineSize, MAX_HANDLE_BYTES, Slice, SliceMutN, SliceN};
+use super::{AssocInlineSize, MAX_HANDLE_BYTES, Vector, VectorMutN, VectorN};
 use core::{hint::black_box, ptr};
 
 #[test]
 fn only_heap_capable_mutable_handles_need_drop_glue() {
   assert!(!core::mem::needs_drop::<
-    SliceMutN<u8, { size_of::<usize>() }>,
+    VectorMutN<u8, { size_of::<usize>() }>,
   >());
   assert_eq!(
-    core::mem::needs_drop::<SliceMutN<u8, 24>>(),
+    core::mem::needs_drop::<VectorMutN<u8, 24>>(),
     cfg!(any(feature = "std", feature = "alloc"))
   );
 }
@@ -15,8 +15,8 @@ fn only_heap_capable_mutable_handles_need_drop_glue() {
 #[test]
 fn static_windows_keep_the_original_pointer_for_every_handle_width() {
   static DATA: [u8; 513] = [17; 513];
-  static DEFAULT: Slice<u8> = Slice::from_static(&DATA);
-  const TINY: Option<SliceN<u8, 8>> = SliceN::<u8, 8>::try_from_static(b"x");
+  static DEFAULT: Vector<u8> = Vector::from_static(&DATA);
+  const TINY: Option<VectorN<u8, 8>> = VectorN::<u8, 8>::try_from_static(b"x");
   assert!(TINY.is_none());
 
   fn check<const BYTES: usize>()
@@ -24,7 +24,7 @@ fn static_windows_keep_the_original_pointer_for_every_handle_width() {
     [u8; BYTES]: AssocInlineSize,
   {
     for data in [&DATA[..0], &DATA[1..2], &DATA[1..]] {
-      let mut first = SliceN::<u8, BYTES>::try_from_static(data).unwrap();
+      let mut first = VectorN::<u8, BYTES>::try_from_static(data).unwrap();
       assert_eq!(first.as_slice().as_ptr(), data.as_ptr());
       first.advance(data.len() / 2);
       let mut other = black_box(Some(first.clone())).unwrap();
@@ -55,7 +55,7 @@ fn short_and_empty_static_ranges_keep_their_pointers_after_slicing() {
   where
     [u8; BYTES]: AssocInlineSize,
   {
-    let mut header = SliceN::<Field, BYTES>::try_from_static(&FIELDS).unwrap();
+    let mut header = VectorN::<Field, BYTES>::try_from_static(&FIELDS).unwrap();
     header.advance(1);
     let pair = header.slice(1..=2);
     assert_eq!(pair.as_slice().as_ptr(), FIELDS[2..].as_ptr());
@@ -84,7 +84,7 @@ fn static_storage_supports_noncopy_and_overaligned_elements() {
     }
   }
   static DATA: [Aligned; 2] = [Aligned(3), Aligned(5)];
-  static HANDLE: Slice<Aligned> = Slice::from_static(&DATA);
+  static HANDLE: Vector<Aligned> = Vector::from_static(&DATA);
   let mut peer = HANDLE.clone();
   peer.advance(1);
   let last = peer.clone();
@@ -92,7 +92,7 @@ fn static_storage_supports_noncopy_and_overaligned_elements() {
   assert!(ptr::eq(&last.as_slice()[0], &DATA[1]));
   assert_eq!(HANDLE.len(), 2);
 
-  let source = SliceN::<Aligned, 64>::try_from_static(&DATA).unwrap();
+  let source = VectorN::<Aligned, 64>::try_from_static(&DATA).unwrap();
   let mut replacement = source.slice(1..);
   replacement.clone_from(&source);
   assert_eq!(replacement.len(), 2);
@@ -108,8 +108,8 @@ fn static_zero_sized_windows_cover_the_external_length_limit() {
   struct Aligned;
   const MAX: usize = isize::MAX as usize;
   static VALUES: [Aligned; MAX + 1] = [Aligned; MAX + 1];
-  assert!(Slice::<Aligned>::try_from_static(&VALUES).is_none());
-  let mut values = Slice::from_static(&VALUES[..MAX]);
+  assert!(Vector::<Aligned>::try_from_static(&VALUES).is_none());
+  let mut values = Vector::from_static(&VALUES[..MAX]);
   assert_eq!(values.len(), MAX);
   let tail = values.slice(MAX - 2..=MAX - 1);
   assert_eq!(tail.len(), 2);
@@ -126,7 +126,7 @@ fn static_zero_sized_windows_cover_the_external_length_limit() {
 #[test]
 #[should_panic(expected = "static slice length exceeds isize::MAX")]
 fn default_static_rejects_oversized_zero_sized_slices() {
-  let _ = Slice::from_static(&[(); usize::MAX]);
+  let _ = Vector::from_static(&[(); usize::MAX]);
 }
 
 #[cfg(feature = "std")]
@@ -135,7 +135,7 @@ fn static_noncopy_elements_can_be_shared_across_threads() {
   use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
   static VALUES: [AtomicUsize; 1] = [AtomicUsize::new(0)];
-  let handle = Slice::from_static(&VALUES);
+  let handle = Vector::from_static(&VALUES);
   let worker = handle.clone();
   std::thread::spawn(move || worker.as_slice()[0].store(7, Relaxed))
     .join()
@@ -143,7 +143,7 @@ fn static_noncopy_elements_can_be_shared_across_threads() {
   assert_eq!(handle.as_slice()[0].load(Relaxed), 7);
 
   // MutexGuard is Sync but cannot be sent to its non-owning thread for release.
-  let borrowed = Slice::<std::sync::MutexGuard<'static, ()>>::from_static(&[]);
+  let borrowed = Vector::<std::sync::MutexGuard<'static, ()>>::from_static(&[]);
   assert!(borrowed.clone().is_empty());
 }
 
@@ -154,9 +154,9 @@ fn full_byte_windows_move_and_advance() {
     [u8; BYTES]: AssocInlineSize,
   {
     let source = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
-    assert_eq!(SliceN::<u8, BYTES>::INLINE_CAPACITY, capacity);
-    assert!(SliceN::<u8, BYTES>::try_from_slice(&source[..=capacity]).is_none());
-    let mut bytes = SliceN::<u8, BYTES>::try_from_slice(&source[..capacity]).unwrap();
+    assert_eq!(VectorN::<u8, BYTES>::INLINE_CAPACITY, capacity);
+    assert!(VectorN::<u8, BYTES>::try_from_slice(&source[..=capacity]).is_none());
+    let mut bytes = VectorN::<u8, BYTES>::try_from_slice(&source[..capacity]).unwrap();
     let base = bytes.as_slice().as_ptr();
     let start = capacity / 2;
     bytes.advance(start);
@@ -205,8 +205,8 @@ fn inline_clones_preserve_the_window_and_advance_independently() {
     [u8; BYTES]: AssocInlineSize,
   {
     let input = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
-    let end = SliceN::<u8, BYTES>::INLINE_CAPACITY;
-    let mut original = SliceN::<u8, BYTES>::try_from_slice(&input[..end]).unwrap();
+    let end = VectorN::<u8, BYTES>::INLINE_CAPACITY;
+    let mut original = VectorN::<u8, BYTES>::try_from_slice(&input[..end]).unwrap();
     let start = end / 2;
     original.advance(start);
     let mut cloned = black_box(original.clone());
@@ -235,8 +235,8 @@ fn inline_ranges_preserve_absolute_cursors_and_own_their_elements() {
     [u8; BYTES]: AssocInlineSize,
   {
     let data = core::array::from_fn::<_, BYTES, _>(|i| i as u8);
-    let capacity = SliceN::<u8, BYTES>::INLINE_CAPACITY;
-    let mut source = SliceN::<u8, BYTES>::try_from_slice(&data[..capacity]).unwrap();
+    let capacity = VectorN::<u8, BYTES>::INLINE_CAPACITY;
+    let mut source = VectorN::<u8, BYTES>::try_from_slice(&data[..capacity]).unwrap();
     source.advance(start);
     let mut window = black_box(source.slice((Excluded(0), Included(end - start - 1))));
     assert_eq!(window.as_slice(), &data[start + 1..end]);
@@ -259,7 +259,7 @@ fn inline_ranges_preserve_absolute_cursors_and_own_their_elements() {
 #[test]
 fn large_payloads_are_inline_within_the_handle_budget() {
   let source = core::array::from_fn::<_, 8189, _>(|i| i as u8);
-  let mut four_kib = SliceMutN::<u8, 4104>::try_from_slice(&source[..4096]).unwrap();
+  let mut four_kib = VectorMutN::<u8, 4104>::try_from_slice(&source[..4096]).unwrap();
   assert_eq!(
     four_kib.as_slice().as_ptr(),
     ptr::from_ref(&four_kib).cast::<u8>()
@@ -267,7 +267,7 @@ fn large_payloads_are_inline_within_the_handle_budget() {
   four_kib.advance(4095);
   assert_eq!(four_kib.as_mut_slice(), &source[4095..4096]);
 
-  let mut eight_kib = SliceMutN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source[..8188]).unwrap();
+  let mut eight_kib = VectorMutN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source[..8188]).unwrap();
   assert_eq!(
     eight_kib.as_slice().as_ptr(),
     ptr::from_ref(&eight_kib).cast::<u8>()
@@ -284,12 +284,12 @@ fn large_payloads_are_inline_within_the_handle_budget() {
   moved.advance(4092);
   assert!(moved.is_empty());
 
-  assert!(SliceN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  assert!(SliceMutN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  assert_eq!(SliceN::<u32, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 2047);
-  assert_eq!(SliceN::<(), MAX_HANDLE_BYTES>::INLINE_CAPACITY, 8188);
-  assert!(SliceN::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8189]).is_none());
-  let mut zsts = SliceMutN::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8188]).unwrap();
+  assert!(VectorN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert!(VectorMutN::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert_eq!(VectorN::<u32, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 2047);
+  assert_eq!(VectorN::<(), MAX_HANDLE_BYTES>::INLINE_CAPACITY, 8188);
+  assert!(VectorN::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8189]).is_none());
+  let mut zsts = VectorMutN::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8188]).unwrap();
   zsts.advance(8188);
   assert!(zsts.is_empty());
 }
@@ -301,9 +301,9 @@ fn tiny_cursors_represent_every_window() {
     [u8; BYTES]: AssocInlineSize,
   {
     let source = *b"abcdefg";
-    for end in 0..=SliceMutN::<u8, BYTES>::INLINE_CAPACITY {
+    for end in 0..=VectorMutN::<u8, BYTES>::INLINE_CAPACITY {
       for start in 0..=end {
-        let mut values = SliceMutN::<u8, BYTES>::try_from_slice(&source[..end]).unwrap();
+        let mut values = VectorMutN::<u8, BYTES>::try_from_slice(&source[..end]).unwrap();
         values.advance(start);
         assert_eq!(values.as_mut_slice(), &source[start..end]);
         assert_eq!(values.len(), end - start);
@@ -318,13 +318,13 @@ fn tiny_cursors_represent_every_window() {
 #[test]
 fn u32_capacity_and_alignment_follow_the_byte_budget() {
   #[cfg(target_pointer_width = "32")]
-  assert_eq!(SliceN::<u32, 4>::INLINE_CAPACITY, 0);
-  assert_eq!(SliceN::<u32, 8>::INLINE_CAPACITY, 1);
-  assert_eq!(SliceN::<u32, 24>::INLINE_CAPACITY, 5);
-  assert_eq!(SliceMutN::<u32, 32>::INLINE_CAPACITY, 7);
-  assert_eq!(SliceMutN::<u32, 64>::INLINE_CAPACITY, 15);
-  assert!(SliceN::<u32, 24>::try_from_slice(&[0; 6]).is_none());
-  let mut values = SliceMutN::<u32, 24>::try_from_slice(&[2, 3, 5, 7, 11]).unwrap();
+  assert_eq!(VectorN::<u32, 4>::INLINE_CAPACITY, 0);
+  assert_eq!(VectorN::<u32, 8>::INLINE_CAPACITY, 1);
+  assert_eq!(VectorN::<u32, 24>::INLINE_CAPACITY, 5);
+  assert_eq!(VectorMutN::<u32, 32>::INLINE_CAPACITY, 7);
+  assert_eq!(VectorMutN::<u32, 64>::INLINE_CAPACITY, 15);
+  assert!(VectorN::<u32, 24>::try_from_slice(&[0; 6]).is_none());
+  let mut values = VectorMutN::<u32, 24>::try_from_slice(&[2, 3, 5, 7, 11]).unwrap();
   values.advance(2);
   values.as_mut_slice()[1] = 13;
   let moved = black_box(values);
@@ -340,12 +340,12 @@ fn over_aligned_elements_support_aligned_empty_windows() {
     _byte: u8,
   }
 
-  assert_eq!(size_of::<Option<SliceMutN<Aligned, 8>>>(), 8);
-  assert_eq!(size_of::<Option<SliceN<Aligned, 256>>>(), 256);
-  assert_eq!(SliceN::<Aligned, 256>::INLINE_CAPACITY, 0);
+  assert_eq!(size_of::<Option<VectorMutN<Aligned, 8>>>(), 8);
+  assert_eq!(size_of::<Option<VectorN<Aligned, 256>>>(), 256);
+  assert_eq!(VectorN::<Aligned, 256>::INLINE_CAPACITY, 0);
   let value = Aligned { _byte: 3 };
-  assert!(SliceN::<Aligned, 256>::try_from_slice(&[value]).is_none());
-  let mut empty = SliceMutN::<Aligned, 8>::try_from_slice(&[]).unwrap();
+  assert!(VectorN::<Aligned, 256>::try_from_slice(&[value]).is_none());
+  let mut empty = VectorMutN::<Aligned, 8>::try_from_slice(&[]).unwrap();
   empty.advance(0);
   assert!(empty.is_empty());
   assert!(empty.as_slice().as_ptr().is_aligned());
@@ -358,9 +358,9 @@ fn aligned_zero_sized_elements_use_the_payload_byte_count() {
   #[derive(Clone, Copy)]
   struct AlignedZst;
 
-  assert_eq!(SliceN::<AlignedZst, 8>::INLINE_CAPACITY, 7);
-  assert!(SliceN::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 8]).is_none());
-  let mut zsts = SliceMutN::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 7]).unwrap();
+  assert_eq!(VectorN::<AlignedZst, 8>::INLINE_CAPACITY, 7);
+  assert!(VectorN::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 8]).is_none());
+  let mut zsts = VectorMutN::<AlignedZst, 8>::try_from_slice(&[AlignedZst; 7]).unwrap();
   assert!(zsts.as_slice().as_ptr().is_aligned());
   zsts.advance(2);
   assert_eq!(zsts.as_mut_slice().len(), 5);
@@ -372,7 +372,7 @@ fn aligned_zero_sized_elements_use_the_payload_byte_count() {
 #[test]
 fn pointer_elements_survive_moves_advances_and_writes() {
   let numbers = [2, 3];
-  let mut refs = SliceMutN::<&i32, 24>::try_from_slice(&[&numbers[0], &numbers[1]]).unwrap();
+  let mut refs = VectorMutN::<&i32, 24>::try_from_slice(&[&numbers[0], &numbers[1]]).unwrap();
   refs.advance(1);
   assert_eq!(*refs.as_slice()[0], 3);
   refs.as_mut_slice()[0] = &numbers[0];
@@ -399,12 +399,12 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
     byte: 5,
     number: &numbers[1],
   };
-  let compact = SliceN::<Padded<'_>, 32>::try_from_slice(&[second]).unwrap();
+  let compact = VectorN::<Padded<'_>, 32>::try_from_slice(&[second]).unwrap();
   let copy = black_box(compact.clone());
   assert_eq!(copy.as_slice()[0].byte, 5);
   assert!(ptr::eq(copy.as_slice()[0].number, &numbers[1]));
 
-  let mut values = SliceMutN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
+  let mut values = VectorMutN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
   values.advance(1);
   let mut moved = black_box(Some(values)).unwrap();
   assert_eq!(moved.as_slice()[0].byte, 5);
@@ -414,7 +414,7 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
   assert!(ptr::eq(again.as_slice()[0].number, &numbers[0]));
   assert_eq!(*again.as_slice()[0].number, 13);
 
-  let mut original = SliceN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
+  let mut original = VectorN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
   original.advance(1);
   let cloned = black_box(original.clone());
   let ranged = black_box(cloned.slice(..=0));
