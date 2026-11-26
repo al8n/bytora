@@ -1426,6 +1426,36 @@ fn four_word_clones_of_other_owners_copy_the_descriptor_and_hold_one_reference()
 }
 
 #[test]
+fn a_packed_clone_of_a_long_owned_window_retains_its_header() {
+  // A three-word handle shares its tag byte with the top of its length. An
+  // owned window this long has a tag above EXTERNAL, and its clone must still
+  // retain the header: a zero-sized window reads its pointer from it.
+  type Packed = VectorN<(), { 3 * size_of::<usize>() }>;
+  let len = 1usize << super::super::TAG_SHIFT;
+  for keep_clone in [false, true] {
+    let source = Packed::try_from_shared_vec(vec![(); len]).unwrap();
+    assert_eq!(source.layout.tag.get(), EXTERNAL | 1);
+    assert_eq!(header_refs(&source), 1);
+    let base = source.as_slice().as_ptr();
+    let peer = source.clone();
+    assert_eq!(peer.layout.tag.get(), EXTERNAL | 1);
+    assert_eq!(peer.layout.owner(), source.layout.owner());
+    assert_eq!(header_refs(&source), 2);
+    let kept = if keep_clone {
+      drop(source);
+      peer
+    } else {
+      drop(peer);
+      source
+    };
+    assert_eq!(header_refs(&kept), 1);
+    assert!(kept.is_unique());
+    assert_eq!((kept.as_slice().as_ptr(), kept.len()), (base, len));
+    assert_eq!(kept.try_into_vec().ok().unwrap().len(), len);
+  }
+}
+
+#[test]
 fn clone_from_preserves_windows_across_storage_kinds() {
   static DATA: &[u8] = b"static window";
 

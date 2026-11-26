@@ -1002,6 +1002,26 @@ impl<T, S: InlineSize> Vector<T, S> {
     }
   }
 
+  // At the compact sizes the owner test and the plain copy stay with the
+  // caller. Only a handle that holds an owner reference pays the call that
+  // AArch64 forces on clone_descriptor.
+  #[inline(always)]
+  pub(crate) fn clone_compact(&self) -> Self {
+    assert!(Layout::<T, S>::COMPACT_EXTERNAL);
+    #[cfg(bytora_atomic)]
+    if self.layout.uses_external_owner() {
+      return self.clone_descriptor();
+    }
+    // SAFETY: This compact handle holds no owner reference. With shared
+    // ownership the test above excluded every owned window, whose tag is
+    // external at these sizes. Without it only inline and static windows
+    // exist. An immutable inline window admits elements under a Copy proof
+    // and never overwrites them, and a static window can be duplicated
+    // freely. Reading Self preserves the window, pointer provenance and
+    // uninitialized bytes.
+    unsafe { ptr::read(self) }
+  }
+
   // A call boundary keeps the inline payload copy separate from construction
   // of a sparse external descriptor in the caller's return slot on AArch64.
   #[cfg_attr(all(target_arch = "aarch64", bytora_atomic), inline(never))]
