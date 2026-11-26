@@ -71,9 +71,9 @@ fn counts(owner: *const ()) -> (usize, usize) {
 const IN_TAIL: usize = 1 << (usize::BITS - 1);
 
 // Every vector that is not adopted as a raw marker takes its header here.
-// A header that fits the vector's own spare capacity is placed in the
-// constructor: that is arithmetic and four stores. Only a header that needs
-// an allocation leaves it, and through a single call.
+// A header that fits the vector's own spare capacity is arithmetic and four
+// stores. Any other header is boxed from this one site, so a constructor
+// holds a single allocator call.
 #[inline(always)]
 pub(super) fn place_header<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   let base = values.as_mut_ptr();
@@ -100,8 +100,7 @@ fn single_spare_needs_box<T>(values: &Vec<T>) -> bool {
   size_of::<T>() < size_of::<VecHeader<T>>() && values.capacity() - values.len() == 1
 }
 
-// The allocation and its call stay out of the constructors.
-#[inline(never)]
+#[inline(always)]
 fn box_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   // Keep the input live until allocation succeeds, including on unwind.
   let header = Box::<VecHeader<T>>::new_uninit();
