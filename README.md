@@ -1,8 +1,8 @@
 # smol-slice
 
 `Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
-inline. An immutable `Slice` can also borrow static data or share a vector's allocation.
-With a zero byte budget, `SliceMut` can take exclusive ownership of a vector.
+inline. An immutable `Slice` can also borrow static data or share owned data.
+With `std` or `alloc`, a `SliceMut` can hold a growable vector-backed window.
 For a positive typenum integer `S`, the handle occupies exactly `S` bytes,
 including its cursor. `U0` disables inline elements and uses three machine words.
 Wrapping either handle in `Option` uses the same number
@@ -10,6 +10,9 @@ of bytes. `Slice<T>` and `SliceMut<T>` default to the three-word size of a
 `Vec<T>`, or 12 bytes on 32-bit targets and 24 bytes on 64-bit targets.
 
 `SliceN<T, N>` and `SliceMutN<T, N>` name the same types using a numeric byte count.
+The inherent APIs draw on [`bytes::Bytes`](https://docs.rs/bytes/1.12.2/bytes/struct.Bytes.html)
+and [`bytes::BytesMut`](https://docs.rs/bytes/1.12.2/bytes/struct.BytesMut.html),
+while their generic element types and inline storage introduce the limits described below.
 
 ```rust
 use smol_slice::{SliceMut, SliceMutN, typenum::U24};
@@ -60,6 +63,8 @@ The layout is available for non-`Copy` types too. `try_from_slice` needs
 Generic code can use `S: InlineSize` for either handle. `S::USIZE` gives
 the requested budget. `S::HANDLE_BYTES` gives the actual handle size,
 including for `U0`. `INLINE_CAPACITY` counts the elements that fit.
+Generic mutable constructors can use `S: WritableSize<T>`: positive sizes require
+`T: Copy`, while `U0` accepts any element type.
 
 ```rust
 use smol_slice::{InlineSize, Slice, typenum::U24};
@@ -130,6 +135,12 @@ Cloning an inline `Slice` copies the entire handle, including its cursor.
 `Slice::slice(range)` returns an independent window relative to the current
 view. It copies an inline handle once. A static or heap-backed window keeps
 pointing into the original storage, even if the range is short or empty.
+`slice_ref` accepts a borrowed subslice of the current view; any empty slice is
+accepted. For zero-sized elements, addresses cannot encode the element offset
+or reliably distinguish allocations, so a matching pointer and fitting length
+select a prefix. `split_off` and `split_to` partition the view; an empty side
+uses a new empty handle. `truncate(0)` and `clear()` release this handle's
+ownership, even if an earlier empty `slice` retained it.
 `Slice::from_static` borrows a `&'static [T]` directly, even for short inputs.
 Constructing, slicing, cloning, and dropping static handles use no allocations or reference counts.
 Static storage works with just `core` on targets with or without atomics.
@@ -164,21 +175,30 @@ assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
 words or the slice contains more than `isize::MAX` elements. The default
 `from_static` constructor panics on an oversized slice of zero-sized elements.
 
-With the `std` or `alloc` feature on targets with pointer-width atomics,
+With `std` or `alloc` and shared ownership available,
 `Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. It
 copies short inputs inline. For larger inputs it retains the vector's buffer
 and allocates a shared owner. Each clone or range increments the owner's atomic
 reference count and keeps its own cursor. Dropping the last handle frees the
 owner and the vector.
+`try_from_shared_vec` always shares the supplied vector, even for short inputs,
+and accepts any `T: Send + Sync`. `Slice::from_owner` and `try_from_owner`
+keep an `AsRef<[T]> + Send + 'static` owner alive without copying its slice;
+their elements must be `Sync`. Shared ownership and its target requirements
+are described under [Features and targets](#features-and-targets).
 
 Shared storage requires a handle of at least three machine words and a length
 of at most `isize::MAX` elements. If the elements need shared storage and the
 handle or length cannot accommodate them, the constructor returns the original
 vector in `Err`.
 The default `Slice<u8>` on a 64-bit target keeps up to 22 bytes inline.
+`try_copy_from_slice` copies inline when possible and otherwise uses shared
+storage when available, returning `None` if the input cannot fit;
+`copy_from_slice` panics in that case. The sharing-enabled form requires
+`T: Copy + Send + Sync`; without shared ownership it requires `T: Copy`.
 
 ```rust
-# #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+# #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
 # {
 use smol_slice::Slice;
 
@@ -193,7 +213,7 @@ assert_eq!(whole.len(), 32);
 `Slice<T, U0>` and `SliceN<T, 0>` have zero inline capacity for every `T`,
 including zero-sized types. `SliceN::<T, 0>::empty()` uses only `core` and
 accepts any element type. `try_from_static` borrows a static slice of `Sync`
-elements. With `std` or `alloc` and pointer-width atomics, `TryFrom<Vec<T>>`
+elements. With shared ownership available, `TryFrom<Vec<T>>`
 takes ownership of `Send + Sync` elements, including types that implement
 neither `Copy` nor `Clone`. Clones and ranges keep the original vector's
 elements alive until the last handle drops, even when its window is empty.
@@ -211,18 +231,64 @@ assert_eq!(counters.as_slice()[0].load(Relaxed), 1);
 # }
 ```
 
-## Exclusive vector storage
+`is_unique` reports whether the current immutable window can become mutable
+without copying. Concurrent clones can change that answer. `try_into_mut`
+returns the original handle when a vector-backed window is shared or when
+storage is static or supplied by a custom owner. Thawing an empty inline
+slice, including `Slice::new()`, gives the mutable handle zero capacity.
+Its first growth needs heap storage. With `alloc` or `std`, `into_mut` clones
+the visible elements when needed. `try_into_vec` transfers movable elements
+without cloning and returns the handle otherwise. `into_vec` can clone when
+`T: Clone`. A uniquely owned vector allocation can be reused, while an
+inline or disjoint window may need a new vector.
+
+## Mutable storage
 
 `SliceMut<T, U0>` and `SliceMutN<T, 0>` have zero inline capacity. Their
 `empty()` constructor works with only `core`. With `alloc` or `std`,
 `From<Vec<T>>` accepts any element type, including thread-local types and
-atomics. A nonempty vector keeps its buffer and gets one boxed owner. An empty
-vector yields the allocation-free empty handle. This storage works on targets
-without pointer-width atomics.
+atomics, and preserves the vector's allocation and spare capacity. A vector
+with no capacity needs no heap window; an empty vector with spare capacity keeps
+that capacity. This storage also works on targets without pointer-width atomics.
+For other sizes, `try_from_vec` can take any element type and returns the vector
+unchanged if the handle cannot hold a heap window.
 
 `as_mut_slice()` borrows the current window exclusively. `advance` skips a
-prefix in constant time. Dropping the handle drops the entire vector,
-including its skipped elements.
+prefix in constant time. Each window owns its elements, including any skipped
+prefix, until they are reclaimed or that window is dropped.
+
+`SliceMut::new` starts empty with inline capacity for positive budgets and
+`Copy` elements; `U0` accepts any element type and starts without inline space.
+`reserve` and `with_capacity` may spill a handle of at least two machine words
+to a vector-backed window with `std` or `alloc`. A one-word handle, or any
+handle built without an allocator, remains bounded by its inline capacity.
+`try_from_slice` only attempts inline storage; it does not spill.
+
+Mutable `split_off(at)` divides both the current elements and capacity, and
+accepts `at <= capacity`, including an index in spare capacity. `split_to(at)`
+accepts `at <= len`, while `split()` takes the initialized part. Inline splits
+move the suffix into a separate inline handle. Heap splits use disjoint shared
+windows when shared ownership is available; otherwise the suffix moves to a new
+allocation.
+`try_unsplit` joins eligible adjacent shared heap windows without moving
+elements, or returns the other window on failure. `unsplit` can instead move
+elements and grow storage when an in-place join is unavailable.
+
+`try_freeze` converts a mutable window into a `Slice` without copying elements
+and returns the original on failure. `freeze` panics on the same failures.
+Both methods take `S: WritableSize<T>`. Positive budgets require `T: Copy`,
+and `U0` accepts any element type. When shared ownership is enabled, both
+also require `T: Send + Sync`. Without shared ownership, only inline windows
+can freeze.
+
+With shared ownership, `try_freeze_shared` accepts any `Send + Sync` element
+type for any budget. It preserves the allocation of a heap window and moves
+the elements of a nonempty inline window into shared storage. A shared
+descriptor needs three machine words and a length of at most `isize::MAX`.
+A two-word mutable handle can spill, but a request to freeze that spill returns
+the original handle through either fallible method. `SliceMut::into_vec` reuses
+a unique heap allocation where possible and otherwise moves its elements to a
+new vector without requiring `Clone`.
 
 ```rust
 # #[cfg(any(feature = "std", feature = "alloc"))]
@@ -236,10 +302,57 @@ assert_eq!(words.as_slice(), &["two!"]);
 # }
 ```
 
+```rust
+# #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]
+# {
+use smol_slice::SliceMut;
+
+let mut first = SliceMut::<u8>::with_capacity(32);
+first.extend_from_slice(b"hello");
+let second = first.split_off(3);
+assert!(first.try_unsplit(second).is_ok());
+let frozen = first.freeze();
+let mut writable = frozen.try_into_mut().ok().unwrap();
+writable.as_mut_slice()[0] = b'H';
+assert_eq!(writable.into_vec().as_slice(), b"Hello");
+# }
+```
+
 For a concrete budget, a `SliceMut` containing references can be moved into a
 type with shorter reference lifetimes. When the budget is still a generic
 `S: InlineSize`, Rust can shorten the lifetime of a borrowed view returned by
 `as_slice()`, but cannot prove the same conversion for the whole mutable handle.
+
+## Features and targets
+
+The default `std` feature and the optional `alloc` feature support vector-backed
+mutable storage. Without `extra-platforms`, targets with native pointer-width
+compare-and-swap also enable shared ownership using the standard allocation
+library's `Arc`. With neither feature, inline and static operations use only `core`.
+
+The `extra-platforms` feature enables `alloc` and selects
+[`portable-atomic-util`](https://docs.rs/portable-atomic-util/) for shared
+ownership, including on targets with native atomics. On a target without native
+compare-and-swap, the application must configure a working portable-atomic
+backend. For example, a single-core Cortex-M application can provide a real
+critical section with these downstream dependencies:
+
+```toml
+[dependencies]
+smol-slice = { path = "../smol-slice", default-features = false, features = ["extra-platforms"] }
+portable-atomic = { version = "1", default-features = false, features = ["critical-section"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+```
+
+This particular provider is suitable only when the application's target and
+execution model satisfy its single-core requirements. Other applications should
+choose a [critical-section implementation](https://docs.rs/critical-section/)
+and [portable-atomic configuration](https://docs.rs/portable-atomic/#optional-featurescfgs)
+appropriate to their platform. An allocator is also required for heap storage.
+
+Host checks can exercise the feature combinations with `cargo test`,
+`cargo test --no-default-features`, `cargo test --no-default-features --features alloc`,
+and `cargo test --no-default-features --features extra-platforms`.
 
 Licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
 

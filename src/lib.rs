@@ -11,8 +11,10 @@ extern crate alloc as std;
 extern crate std;
 
 mod layout;
-use core::ops::{Bound, RangeBounds};
+mod slice;
+use core::ops::{Bound, Range, RangeBounds};
 use layout::Layout;
+pub use layout::mutable::WritableSize;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
 pub use typenum;
 #[cfg(target_pointer_width = "32")]
@@ -35,6 +37,22 @@ pub struct Slice<T, S: InlineSize = DefaultSize> {
 
 /// A [`Slice`] with byte budget `N`. Zero disables inline elements.
 pub type SliceN<T, const N: usize> = Slice<T, <[u8; N] as AssocInlineSize>::Size>;
+
+#[track_caller]
+pub(crate) fn checked_range(range: impl RangeBounds<usize>, len: usize) -> Range<usize> {
+  let start = match range.start_bound() {
+    Bound::Included(&start) => start,
+    Bound::Excluded(&start) => start.checked_add(1).expect("slice start overflow"),
+    Bound::Unbounded => 0,
+  };
+  let end = match range.end_bound() {
+    Bound::Included(&end) => end.checked_add(1).expect("slice end overflow"),
+    Bound::Excluded(&end) => end,
+    Bound::Unbounded => len,
+  };
+  assert!(start <= end && end <= len, "slice range out of bounds");
+  start..end
+}
 
 impl<T, S: InlineSize> Slice<T, S> {
   /// The maximum number of inline elements. Each zero-sized element counts as
@@ -69,31 +87,22 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// cannot be represented as a half-open range.
   #[track_caller]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
-    let start = match range.start_bound() {
-      Bound::Included(&start) => start,
-      Bound::Excluded(&start) => start.checked_add(1).expect("slice start overflow"),
-      Bound::Unbounded => 0,
-    };
-    let end = match range.end_bound() {
-      Bound::Included(&end) => end.checked_add(1).expect("slice end overflow"),
-      Bound::Excluded(&end) => end,
-      Bound::Unbounded => self.len(),
-    };
+    let range = checked_range(range, self.len());
     if !self.layout.is_inline() {
-      return self.slice_shared(start..end);
+      return self.slice_shared(range);
     }
     Self {
-      layout: self.layout.slice_inline(start..end),
+      layout: self.layout.slice_inline(range),
     }
   }
 
   /// Returns the number of remaining elements.
-  pub fn len(&self) -> usize {
+  pub const fn len(&self) -> usize {
     self.layout.len()
   }
 
   /// Returns whether the remaining slice is empty.
-  pub fn is_empty(&self) -> bool {
+  pub const fn is_empty(&self) -> bool {
     self.len() == 0
   }
 
