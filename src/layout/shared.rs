@@ -1002,56 +1002,56 @@ impl<T, S: InlineSize> Vector<T, S> {
     }
   }
 
-  // At the compact sizes the owner test and the plain copy stay with the
-  // caller. Only a handle that holds an owner reference pays the call that
-  // AArch64 forces on clone_descriptor.
-  #[inline(always)]
-  pub(crate) fn clone_compact(&self) -> Self {
-    assert!(Layout::<T, S>::COMPACT_EXTERNAL);
-    #[cfg(bytora_atomic)]
-    if self.layout.uses_external_owner() {
-      return self.clone_descriptor();
-    }
-    // SAFETY: This compact handle holds no owner reference. With shared
-    // ownership the test above excluded every owned window, whose tag is
-    // external at these sizes. Without it only inline and static windows
-    // exist. An immutable inline window admits elements under a Copy proof
-    // and never overwrites them, and a static window can be duplicated
-    // freely. Reading Self preserves the window, pointer provenance and
-    // uninitialized bytes.
-    unsafe { ptr::read(self) }
-  }
-
   // A call boundary keeps the inline payload copy separate from construction
   // of a sparse external descriptor in the caller's return slot on AArch64.
+  // The owned arm is a call of its own there, so the plain path is a leaf: it
+  // saves no register before its tag test.
   #[cfg_attr(all(target_arch = "aarch64", bytora_atomic), inline(never))]
   pub(crate) fn clone_descriptor(&self) -> Self {
     #[cfg(bytora_atomic)]
     if self.layout.uses_external_owner() {
-      let owner = if vector::AVAILABLE {
-        self
-          .layout
-          .owner_slot()
-          .load(core::sync::atomic::Ordering::Acquire)
-          .cast_const()
-      } else {
-        self.layout.owner()
-      };
-      // SAFETY: After excluding tagged owners and raw markers, only actual
-      // vector headers remain. Acquire observes any published promotion.
-      unsafe {
-        if owner.addr() & 1 != 0 || vector::raw(owner) {
-          return self.clone_tagged_owner(owner);
-        }
-        vector::VecHeader::<T>::retain(owner);
-        return self.copy_retained_descriptor(owner);
-      }
+      // SAFETY: The test above found an external owner reference.
+      return unsafe { self.clone_owned() };
     }
     // SAFETY: An immutable inline window admits elements under a Copy proof
     // and never overwrites them. A static window can be duplicated freely,
     // and every managed owner has been retained.
     // Reading Self preserves the window, pointer provenance and uninitialized bytes.
     unsafe { ptr::read(self) }
+  }
+
+  /// Clones a handle that holds an external owner reference.
+  ///
+  /// Out of line on AArch64, where its outline-atomic call would otherwise
+  /// make clone_descriptor save registers ahead of the tag test on every
+  /// clone. Inlined everywhere else, as the arm was before.
+  ///
+  /// # Safety
+  ///
+  /// `self.layout.uses_external_owner()` must hold.
+  #[cfg(bytora_atomic)]
+  #[cfg_attr(target_arch = "aarch64", inline(never))]
+  #[cfg_attr(not(target_arch = "aarch64"), inline(always))]
+  unsafe fn clone_owned(&self) -> Self {
+    let owner = if vector::AVAILABLE {
+      self
+        .layout
+        .owner_slot()
+        .load(core::sync::atomic::Ordering::Acquire)
+        .cast_const()
+    } else {
+      self.layout.owner()
+    };
+    // SAFETY: The caller found an external owner reference. After excluding
+    // tagged owners and raw markers, only actual vector headers remain.
+    // Acquire observes any published promotion.
+    unsafe {
+      if owner.addr() & 1 != 0 || vector::raw(owner) {
+        return self.clone_tagged_owner(owner);
+      }
+      vector::VecHeader::<T>::retain(owner);
+      self.copy_retained_descriptor(owner)
+    }
   }
 
   #[cfg(bytora_atomic)]
