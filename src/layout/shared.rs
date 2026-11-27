@@ -837,12 +837,21 @@ impl<T, S: InlineSize> Vector<T, S> {
           .owner_slot()
           .load(core::sync::atomic::Ordering::Acquire);
         if owner.addr() & 0b11 != 0 {
-          // SAFETY: The acquire observes this window's raw or tagged owner.
-          return unsafe { self.slice_tagged_owner(owner, range, len) };
+          // SAFETY: The acquire observes this window's raw or tagged owner,
+          // and the range is an ordered subrange of the visible length.
+          let owner = unsafe { self.retain_tagged_owner(owner, range.start, len - range.end, len) };
+          let kind = if Layout::<T, S>::PACKED_LEN {
+            // A long static window may now be short enough for its own tag.
+            Layout::<T, S>::external_kind(owner)
+          } else {
+            NonZeroU8::new(EXTERNAL).unwrap()
+          };
+          (owner, kind)
+        } else {
+          // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
+          unsafe { vector::VecHeader::<T>::retain(owner) };
+          (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
         }
-        // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
-        unsafe { vector::VecHeader::<T>::retain(owner) };
-        (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
       } else {
         // A short static window has this tag in either descriptor size.
         (STATIC_OWNER, COMPACT_STATIC)
@@ -869,35 +878,33 @@ impl<T, S: InlineSize> Vector<T, S> {
     Self { layout }
   }
 
+  /// Retains a raw or tagged owner for a subwindow and returns the owner word
+  /// of the new handle, which the caller builds as words, as it builds every
+  /// other arm. A call that returned the handle would put the result in
+  /// memory on every path.
+  ///
   /// # Safety
   ///
   /// The source must be a three- or four-word external descriptor for non-ZSTs.
   /// Its promotable slot must have yielded `owner` with an acquire load and
   /// at least one of the two low bits set. `len` is the source's visible
-  /// length and `range` must be an ordered subrange of it.
+  /// length, and the subwindow omits `front` elements before it and `back`
+  /// after it.
   #[cfg(bytora_atomic)]
   #[inline(never)]
-  unsafe fn slice_tagged_owner(&self, owner: *const (), range: Range<usize>, len: usize) -> Self {
-    let data = self.layout.data();
+  unsafe fn retain_tagged_owner(
+    &self,
+    owner: *const (),
+    front: usize,
+    back: usize,
+    len: usize,
+  ) -> *const () {
     // SAFETY: The caller acquired this owner from the source's external
     // descriptor and checked both endpoints. Its elements have nonzero size.
-    let owner = unsafe {
+    unsafe {
       self
         .layout
-        .retain_loaded_owner(owner, data, len, range.start, len - range.end)
-    };
-    Self {
-      layout: Layout::external(
-        data.cast::<T>().wrapping_add(range.start),
-        owner,
-        range.end - range.start,
-        if Layout::<T, S>::PACKED_LEN {
-          // A long static window may now be short enough for its own tag.
-          Layout::<T, S>::external_kind(owner)
-        } else {
-          NonZeroU8::new(EXTERNAL).unwrap()
-        },
-      ),
+        .retain_loaded_owner(owner, self.layout.data(), len, front, back)
     }
   }
 
