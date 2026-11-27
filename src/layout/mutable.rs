@@ -496,8 +496,28 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// Panics on capacity overflow, or when a bounded buffer cannot fit the request.
   /// [`Self::try_reserve`] returns an error instead, allocation failure included.
+  #[inline]
   #[track_caller]
   pub fn reserve(&mut self, additional: usize) {
+    if self.has_room(additional) {
+      return;
+    }
+    self.reserve_slow(additional);
+  }
+
+  // The room test of reserve and try_reserve: their own postcondition. Spare
+  // capacity is capacity minus length on every storage, and both reclaim
+  // paths return at once when this holds, so a call that passes it would
+  // have changed nothing.
+  #[inline(always)]
+  fn has_room(&self, additional: usize) -> bool {
+    additional <= self.capacity() - self.len()
+  }
+
+  #[cold]
+  #[inline(never)]
+  #[track_caller]
+  fn reserve_slow(&mut self, additional: usize) {
     #[cfg(any(feature = "std", feature = "alloc"))]
     if let Some(window) = self.window_mut() {
       return window.reserve(additional);
@@ -519,7 +539,17 @@ impl<T, S: InlineSize> VectorMut<T, S> {
 
   /// Ensures space for `additional` elements after the current length, or
   /// returns an error where [`Self::reserve`] panics or the allocation fails.
+  #[inline]
   pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+    if self.has_room(additional) {
+      return Ok(());
+    }
+    self.try_reserve_slow(additional)
+  }
+
+  #[cold]
+  #[inline(never)]
+  fn try_reserve_slow(&mut self, additional: usize) -> Result<(), TryReserveError> {
     #[cfg(any(feature = "std", feature = "alloc"))]
     if let Some(window) = self.window_mut() {
       return window.try_reserve(additional);
@@ -574,17 +604,8 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     T: Copy,
   {
     self.reserve(elements.len());
-    let len = self.len();
-    // SAFETY: reserve provided room; the source is borrowed independently of
-    // this exclusive handle, and the destination is outside its active elements.
-    unsafe {
-      ptr::copy_nonoverlapping(
-        elements.as_ptr(),
-        self.spare_capacity_mut().as_mut_ptr().cast(),
-        elements.len(),
-      );
-      self.set_len(len + elements.len());
-    }
+    // SAFETY: reserve returned, so there is room for every element.
+    unsafe { self.append_within(elements) }
   }
 
   /// Copies `elements` onto the end of the buffer, or returns an error where
@@ -594,11 +615,34 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   where
     T: Copy,
   {
-    // Once the room is reserved, extend_from_slice's own reserve finds it and
-    // neither allocates nor panics.
     self.try_reserve(elements.len())?;
-    self.extend_from_slice(elements);
+    // SAFETY: try_reserve returned Ok, so there is room for every element.
+    unsafe { self.append_within(elements) };
     Ok(())
+  }
+
+  // The tail both forms of extend_from_slice share, after their own reserve.
+  // Calling the panicking form from the twin kept its reserve as a second room
+  // check that the compiler does not fold.
+  //
+  // SAFETY: The spare capacity must hold at least `elements.len()` elements.
+  #[inline]
+  unsafe fn append_within(&mut self, elements: &[T])
+  where
+    T: Copy,
+  {
+    let len = self.len();
+    // SAFETY: The caller provides the room. The source is borrowed apart from
+    // this exclusive handle, and the destination is past its active elements.
+    // The pointer is taken here, after the reserve that may have moved them.
+    unsafe {
+      ptr::copy_nonoverlapping(
+        elements.as_ptr(),
+        self.spare_capacity_mut().as_mut_ptr().cast(),
+        elements.len(),
+      );
+      self.set_len(len + elements.len());
+    }
   }
 
   /// Copies the elements in `range` onto the end of the buffer.
@@ -615,13 +659,9 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     let len = self.len();
     let range = crate::checked_range(range, len);
     self.reserve(range.len());
-    let (base, _, _) = self.writable_parts();
-    // SAFETY: Both pointers derive from one base covering the entire writable
-    // window. The initialized source and reserved destination are disjoint.
-    unsafe {
-      ptr::copy_nonoverlapping(base.add(range.start), base.add(len), range.len());
-      self.set_len(len + range.len());
-    }
+    // SAFETY: The range was checked against `len`, the current length, and
+    // reserve returned, so there is room for it; reserve keeps the length.
+    unsafe { self.append_range_within(range, len) }
   }
 
   /// Copies the elements in `range` onto the end of the buffer, or returns an
@@ -634,21 +674,50 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   where
     T: Copy,
   {
-    let range = try_checked_range(range, self.len())?;
-    // With the range checked and the room reserved, extend_from_within's own
-    // check and reserve can no longer fail.
+    let len = self.len();
+    let range = try_checked_range(range, len)?;
     self.try_reserve(range.len())?;
-    self.extend_from_within(range);
+    // SAFETY: The range was checked against `len`, the current length, and
+    // try_reserve returned Ok, so there is room for it; it keeps the length.
+    unsafe { self.append_range_within(range, len) };
     Ok(())
+  }
+
+  // The tail both forms of extend_from_within share, after their own check
+  // and reserve.
+  //
+  // SAFETY: `len` must be the current length, `range` must lie within
+  // `0..len`, and the spare capacity must hold at least `range.len()` elements.
+  #[inline]
+  unsafe fn append_range_within(&mut self, range: Range<usize>, len: usize)
+  where
+    T: Copy,
+  {
+    // The base is read here, after the reserve that may have moved the elements.
+    let (base, _, _) = self.writable_parts();
+    // SAFETY: Both pointers derive from one base covering the entire writable
+    // window. The initialized source and reserved destination are disjoint.
+    unsafe {
+      ptr::copy_nonoverlapping(base.add(range.start), base.add(len), range.len());
+      self.set_len(len + range.len());
+    }
   }
 
   // Appends one element, growing the storage as `reserve` does.
   #[track_caller]
   fn push(&mut self, value: T) {
     self.reserve(1);
+    self.push_within(value);
+  }
+
+  // The tail of push and of try_extend's appends, after their own reserve. Its
+  // write is bounds-checked, so it needs no precondition: the indexing finds
+  // the spare slot that makes the length change sound.
+  #[inline]
+  fn push_within(&mut self, value: T) {
     let len = self.len();
     self.spare_capacity_mut()[0].write(value);
-    // SAFETY: `reserve` left at least one spare slot, and the write above initialized the first.
+    // SAFETY: The indexing above found a spare slot, and the write initialized it.
     unsafe { self.set_len(len + 1) };
   }
 
@@ -715,10 +784,8 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   fn try_append(&mut self, iter: impl Iterator<Item = T>) -> Result<(), TryReserveError> {
     self.try_reserve(iter.size_hint().0)?;
     for value in iter {
-      // Once the slot is reserved, push's own reserve finds it and neither
-      // allocates nor panics.
       self.try_reserve(1)?;
-      self.push(value);
+      self.push_within(value);
     }
     Ok(())
   }
