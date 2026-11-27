@@ -127,6 +127,21 @@ fn slice_heap(group: &mut BenchmarkGroup<'_, WallTime>) {
   black_box(&owner);
 }
 
+fn slice_static(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Slice<u8>>();
+  for len in [SHORT, Slice::<u8>::INLINE_CAPACITY, MEDIUM, LARGE_PAYLOAD] {
+    let contents = &PAYLOAD[..len];
+    let source = Slice::<u8>::from_static(contents);
+    assert_eq!(source.as_slice(), contents);
+    assert_eq!(source.as_slice().as_ptr(), contents.as_ptr());
+    let cloned = source.clone();
+    assert_eq!(cloned.as_slice(), contents);
+    assert_eq!(cloned.as_slice().as_ptr(), contents.as_ptr());
+    let id = format!("slice_static/handle_{handle_size}/len_{len}");
+    group.bench_function(id, |b| bench_clone(b, &source));
+  }
+}
+
 fn bytes_baselines(group: &mut BenchmarkGroup<'_, WallTime>, len: usize) {
   let contents = &PAYLOAD[..len];
   let owner = Bytes::copy_from_slice(contents);
@@ -173,6 +188,7 @@ fn clone_benches(c: &mut Criterion) {
   inline_advanced(&mut group);
   #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
   slice_heap(&mut group);
+  slice_static(&mut group);
 
   for len in [
     SHORT,
