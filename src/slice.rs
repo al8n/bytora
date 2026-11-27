@@ -133,7 +133,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Panics when the input does not fit inline and shared storage is
   /// unavailable, the handle is too small, or the length exceeds
   /// `isize::MAX`. Use [`Self::try_copy_from_slice`] to check these limits.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   #[track_caller]
   pub fn copy_from_slice(values: &[T]) -> Self
   where
@@ -148,7 +148,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   ///
   /// Panics when the input does not fit inline. Use
   /// [`Self::try_copy_from_slice`] to check this limit.
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(bytora_atomic))]
   #[track_caller]
   pub fn copy_from_slice(values: &[T]) -> Self
   where
@@ -161,7 +161,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   ///
   /// Shared copies use the vector limits of [`Self::try_from_vec`]. Returns
   /// `None` if neither the inline payload nor a vector can represent the input.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub fn try_copy_from_slice(values: &[T]) -> Option<Self>
   where
     T: Copy + Send + Sync,
@@ -179,7 +179,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   /// Copies elements inline, or returns `None` if they do not fit.
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(bytora_atomic))]
   pub fn try_copy_from_slice(values: &[T]) -> Option<Self>
   where
     T: Copy,

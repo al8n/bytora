@@ -99,7 +99,7 @@ mod writable {
 /// that calls `SliceMut::new`, `SliceMut::with_capacity`, or `SliceMut::freeze`.
 ///
 /// ```compile_fail
-/// use smol_slice::{WritableSize, typenum::U24};
+/// use bytora::{WritableSize, typenum::U24};
 /// struct Element(String);
 /// impl WritableSize<Element> for U24 {}
 /// ```
@@ -110,7 +110,7 @@ mod writable {
 ///
 /// ```compile_fail
 /// use core::marker::PhantomData;
-/// use smol_slice::SliceMut;
+/// use bytora::SliceMut;
 /// struct Element<F>(u8, PhantomData<F>);
 /// impl Copy for Element<fn(&())> {}
 /// impl Clone for Element<fn(&())> { fn clone(&self) -> Self { *self } }
@@ -597,7 +597,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
     if other.capacity() == 0 {
       return Ok(());
     }
-    #[cfg(smol_slice_atomic)]
+    #[cfg(bytora_atomic)]
     {
       let mut other = other;
       if let (Some(left), Some(right)) = (self.window_mut(), other.window_mut()) {
@@ -607,7 +607,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
       }
       Err(other)
     }
-    #[cfg(not(smol_slice_atomic))]
+    #[cfg(not(bytora_atomic))]
     {
       Err(other)
     }
@@ -692,7 +692,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// that already relinquished its prefix is returned intact, as is any
   /// window outside the immutable descriptor's limits. Positive budgets
   /// require the current element type to be `Copy`.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub fn try_freeze(self) -> Result<Slice<T, S>, Self>
   where
     S: WritableSize<T>,
@@ -711,7 +711,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// A two-word handle can freeze a unique heap allocation when its initialized
   /// elements begin at the allocation base and their count fits the two-word
   /// vector descriptor. The visible window can start within that prefix.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub fn try_freeze_shared(mut self) -> Result<Slice<T, S>, Self>
   where
     T: Send + Sync,
@@ -740,7 +740,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
 
   /// Freezes an inline view. Without a shared allocation owner, heap windows
   /// are returned intact.
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(bytora_atomic))]
   pub fn try_freeze(self) -> Result<Slice<T, S>, Self>
   where
     S: WritableSize<T>,
@@ -758,7 +758,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   ///
   /// Panics when [`Self::try_freeze`] cannot represent the view. This includes
   /// a two-word heap window with live mutable siblings or a relinquished prefix.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   #[track_caller]
   pub fn freeze(self) -> Slice<T, S>
   where
@@ -776,7 +776,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// # Panics
   ///
   /// Panics if the view uses a heap allocation on a target without shared ownership.
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(bytora_atomic))]
   #[track_caller]
   pub fn freeze(self) -> Slice<T, S>
   where
@@ -814,7 +814,7 @@ impl<T> SliceMut<T, typenum::U0> {
 /// Takes a vector of any element type with its original allocation.
 ///
 /// ```compile_fail
-/// use smol_slice::SliceMutN;
+/// use bytora::SliceMutN;
 /// use std::rc::Rc;
 /// fn send<T: Send>(_: T) {}
 /// send(SliceMutN::<_, 0>::from(vec![Rc::new(1)]));
@@ -822,14 +822,14 @@ impl<T> SliceMut<T, typenum::U0> {
 ///
 /// ```compile_fail
 /// use core::cell::Cell;
-/// use smol_slice::SliceMutN;
+/// use bytora::SliceMutN;
 /// fn sync<T: Sync>() {}
 /// sync::<SliceMutN<Cell<u8>, 0>>();
 /// ```
 ///
 /// ```compile_fail
 /// use core::cell::Cell;
-/// use smol_slice::SliceMutN;
+/// use bytora::SliceMutN;
 /// struct OnDrop<'a>(&'a Cell<bool>);
 /// impl Drop for OnDrop<'_> {
 ///     fn drop(&mut self) { self.0.set(true); }

@@ -1,9 +1,9 @@
 use bytes::{Buf, Bytes};
+use bytora::{InlineSize, Slice, SliceN};
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
 use smol_bytes::{Bytes as SmolBytes, compact::Bytes as CompactSmolBytes};
-use smol_slice::{InlineSize, Slice, SliceN};
 use std::{
   hint::black_box,
   mem::size_of,

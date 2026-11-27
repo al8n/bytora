@@ -1,4 +1,4 @@
-use smol_slice::SliceMutN;
+use bytora::SliceMutN;
 
 fn main() {
   let mut bytes = SliceMutN::<u8, 24>::try_from_slice(b"head:body").unwrap();
