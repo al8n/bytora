@@ -70,14 +70,26 @@ fn counts(owner: *const ()) -> (usize, usize) {
 // Its spare high bit distinguishes an embedded header at final release.
 const IN_TAIL: usize = 1 << (usize::BITS - 1);
 
+// Every vector that is not adopted as a raw marker takes its header here.
+// One call holds the allocation and the tail placement, so a constructor's
+// exact-capacity path carries neither.
+#[inline(never)]
+pub(super) fn place_header<T>(values: Vec<T>) -> (*mut T, *const ()) {
+  if single_spare_needs_box(&values) {
+    box_vec(values)
+  } else {
+    from_vec(values)
+  }
+}
+
 // One spare element cannot hold a header when the element itself is smaller.
 #[inline]
-pub(super) fn single_spare_needs_box<T>(values: &Vec<T>) -> bool {
+fn single_spare_needs_box<T>(values: &Vec<T>) -> bool {
   size_of::<T>() < size_of::<Vector<T>>() && values.capacity() - values.len() == 1
 }
 
 #[inline(always)]
-pub(super) fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
+fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   let base = values.as_mut_ptr();
   let len = values.len();
   let capacity = values.capacity();
@@ -92,7 +104,7 @@ pub(super) fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
 }
 
 #[inline(always)]
-pub(super) fn box_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
+fn box_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   // Keep the input live until allocation succeeds, including on unwind.
   let header = Box::<Vector<T>>::new_uninit();
   let base = values.as_mut_ptr();
@@ -351,6 +363,79 @@ mod tests {
         assert!(original[len..].iter().all(|&x| x == 0xaa));
       }
     }
+  }
+
+  #[test]
+  fn a_placed_header_records_the_vector_in_its_spare_capacity_or_in_a_box() {
+    // Word-aligned elements leave the tail aligned, so the spare capacity holds
+    // a header exactly when its bytes span one. A single spare element does so
+    // only when the element is at least as large as the header.
+    fn check<T: Copy>(element: T) {
+      assert!(align_of::<T>() >= align_of::<Vector<T>>());
+      for len in [0, 1, 6] {
+        for spare in [0, 1, 3, 4, 9] {
+          let mut values = Vec::with_capacity(len + spare);
+          values.resize(len, element);
+          let (base, capacity) = (values.as_mut_ptr(), values.capacity());
+          // The spare count selects the placement only at this exact capacity.
+          assert_eq!(capacity, len + spare);
+          let (data, owner) = place_header(values);
+          assert_eq!(data, base);
+          assert!(!raw(owner));
+          let header = owner.cast::<Vector<T>>();
+          // SAFETY: The new header is live, and this test holds its only reference.
+          let (recorded, parts, strong) = unsafe {
+            (
+              (*header).len,
+              ((*header).base, (*header).capacity),
+              Vector::<T>::strong_count(owner),
+            )
+          };
+          assert_eq!((parts, strong), ((base.cast_const(), capacity), 1));
+          let embedded = spare * size_of::<T>() >= size_of::<Vector<T>>();
+          assert_eq!(recorded, if embedded { len | IN_TAIL } else { len });
+          let offset = owner.addr().wrapping_sub(base.addr());
+          if embedded {
+            assert_eq!(offset, len * size_of::<T>());
+          } else {
+            // A separate box lies outside every byte of the original allocation.
+            assert!(offset >= capacity * size_of::<T>());
+          }
+          // SAFETY: The only reference moves into the returned vector.
+          let mut original = unsafe { Vector::<T>::try_take(owner) }.unwrap();
+          assert_eq!(
+            (original.as_mut_ptr(), original.len(), original.capacity()),
+            (base, len, capacity)
+          );
+          // The bytes that held an embedded header are spare capacity again.
+          original.resize(capacity, element);
+          assert_eq!(original.as_mut_ptr(), base);
+        }
+      }
+    }
+    const { assert!(size_of::<[usize; 4]>() == size_of::<Vector<[usize; 4]>>()) };
+    check(usize::MAX / 3);
+    check([usize::MAX / 3; 4]);
+    check([usize::MAX / 3; 5]);
+
+    // A zero-sized vector has no bytes to spare, whatever its capacity.
+    let slots = std::vec![(); 5];
+    let base = slots.as_ptr();
+    let (data, owner) = place_header(slots);
+    assert_eq!(data.cast_const(), base);
+    assert!(!raw(owner));
+    let header = owner.cast::<Vector<()>>();
+    // SAFETY: The boxed header is live, and its only reference moves into the
+    // returned vector.
+    let recovered = unsafe {
+      assert_eq!(
+        ((*header).base, (*header).len, (*header).capacity),
+        (base, 5, usize::MAX)
+      );
+      Vector::<()>::try_take(owner)
+    }
+    .unwrap();
+    assert_eq!((recovered.as_ptr(), recovered.len()), (base, 5));
   }
 
   #[test]

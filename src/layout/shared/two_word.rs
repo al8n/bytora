@@ -43,12 +43,6 @@ fn raw_base<T>(state: *mut (), meta: usize) -> *mut T {
     .cast()
 }
 
-// Keep tail placement and header allocation out of the exact-capacity constructor.
-#[inline(never)]
-fn spare_vec_owner<T>(values: Vec<T>) -> *mut () {
-  vector::from_vec(values).1.cast_mut()
-}
-
 impl<T, S: InlineSize> Layout<T, S> {
   pub(crate) fn fits_two_word_vec(len: usize) -> bool {
     Self::TWO_WORD_VEC && vector::AVAILABLE && size_of::<T>() != 0 && len <= MAX_LEN
@@ -106,11 +100,8 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   pub(super) fn two_word_vec<const INLINE_EMPTY: bool>(mut values: Vec<T>) -> Self {
     let len = values.len();
-    if vector::single_spare_needs_box(&values) {
-      return Self::two_words(vector::box_vec(values).1.cast_mut(), window(0, len));
-    }
     if values.capacity() != len {
-      return Self::two_words(spare_vec_owner(values), window(0, len));
+      return Self::two_words(vector::place_header(values).1.cast_mut(), window(0, len));
     }
     let base = values.as_mut_ptr().cast::<()>();
     let adjustment = usize::from(base.addr() & 1 == 0);
@@ -346,6 +337,107 @@ mod tests {
       assert!(slot.is_none());
       assert_eq!((returned.as_ptr(), returned.capacity()), (base, capacity));
       assert!(returned.into_iter().eq(0..len));
+    }
+  }
+
+  #[test]
+  fn two_word_vectors_stay_raw_at_exact_capacity_and_take_one_placed_header_otherwise() {
+    if !vector::AVAILABLE {
+      return;
+    }
+    fn check<T>(element: T, shared: bool)
+    where
+      T: Copy + core::fmt::Debug + PartialEq + Send + Sync,
+    {
+      for len in [0, 1, 64, 65] {
+        for spare in [0, 1, 3, 4, 9] {
+          for recover in [false, true] {
+            let mut values = Vec::with_capacity(len + spare);
+            values.resize(len, element);
+            let (base, capacity) = (values.as_ptr(), values.capacity());
+            // The spare count selects the owner only at this exact capacity.
+            assert_eq!(capacity, len + spare);
+            let mut source = if shared {
+              TwoWord::<T>::try_from_shared_vec(values)
+            } else {
+              TwoWord::<T>::try_from_vec(values)
+            }
+            .unwrap();
+            if capacity == 0 && !shared {
+              // The copying constructor has no allocation to keep.
+              assert!(source.layout.is_inline() && source.is_empty());
+              assert!(source.try_into_vec().ok().unwrap().is_empty());
+              continue;
+            }
+            assert!(source.is_unique());
+            assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
+            assert!(source.as_slice().iter().all(|value| *value == element));
+            let meta = source.layout.two_word_meta();
+            let state = source.layout.exclusive_state();
+            if spare == 0 {
+              // An exact vector is its own owner. The odd state is its pointer,
+              // and the tag holds a short length or the pointer's parity.
+              let tag = if base.addr() & 1 != 0 {
+                ODD_FULL
+              } else if (1..=64).contains(&len) {
+                SHORT + (len - 1) as u8
+              } else {
+                EVEN_FULL
+              };
+              assert_eq!((state.addr() & 1, source.layout.tag.get()), (1, tag));
+              assert_eq!(
+                (raw_base::<T>(state, meta).cast_const(), meta & MAX_LEN),
+                (base, len)
+              );
+            } else {
+              // Any spare capacity takes a header, and the window spans the vector.
+              assert_eq!(state.addr() & 1, 0);
+              assert_eq!(
+                (meta & WINDOW, start(meta), meta & MAX_LEN),
+                (WINDOW, 0, len)
+              );
+              // SAFETY: An even state is the live header this handle owns.
+              let (held, strong) = unsafe {
+                (
+                  (*state.cast::<Vector<T>>()).base,
+                  Vector::<T>::strong_count(state),
+                )
+              };
+              assert_eq!((held, strong), (base, 1));
+              let offset = state.addr().wrapping_sub(base.addr());
+              if spare * size_of::<T>() >= size_of::<Vector<T>>() {
+                // Nothing pads a word-aligned tail.
+                assert!(align_of::<T>() >= align_of::<Vector<T>>());
+                assert_eq!(offset, len * size_of::<T>());
+              } else {
+                // A box lies outside every byte of the vector's allocation.
+                assert!(offset >= capacity * size_of::<T>());
+              }
+            }
+            if !recover {
+              continue;
+            }
+            let mut recovered = source.try_into_vec().ok().unwrap();
+            assert_eq!(
+              (recovered.as_ptr(), recovered.len(), recovered.capacity()),
+              (base, len, capacity)
+            );
+            // The capacity that held a header is the vector's to fill again.
+            recovered.resize(capacity, element);
+            assert_eq!(recovered.as_ptr(), base);
+            assert!(recovered.iter().all(|value| *value == element));
+          }
+        }
+      }
+    }
+    const { assert!(size_of::<[usize; 4]>() == size_of::<Vector<[usize; 4]>>()) };
+    for shared in [false, true] {
+      check(usize::MAX / 3, shared);
+      // One spare element of this size holds the header itself.
+      check([usize::MAX / 3; 4], shared);
+      // A byte vector's pointer can be odd, and none of these spare counts
+      // gives it room for a header.
+      check(0x55u8, shared);
     }
   }
 
