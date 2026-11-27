@@ -640,6 +640,11 @@ impl<T, S: InlineSize> VectorMut<T, S> {
 
   /// Changes the length, cloning `value` into newly initialized slots.
   /// Shrinking drops the removed elements.
+  ///
+  /// # Panics
+  ///
+  /// Panics on capacity overflow, or when a bounded buffer cannot fit the new length.
+  /// [`Self::try_resize`] returns an error instead, allocation failure included.
   #[track_caller]
   pub fn resize(&mut self, new_len: usize, value: T)
   where
@@ -658,6 +663,50 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     self.spare_capacity_mut()[0].write(value);
     // SAFETY: The final slot now contains the original value.
     unsafe { self.set_len(new_len) };
+  }
+
+  /// Changes the length as [`Self::resize`] does, or returns an error where it
+  /// panics or the allocation fails. On an error the elements are unchanged.
+  pub fn try_resize(&mut self, new_len: usize, value: T) -> Result<(), TryReserveError>
+  where
+    T: Clone,
+  {
+    let len = self.len();
+    if new_len > len {
+      // Once the room is reserved, resize's own reserve finds it and neither
+      // allocates nor panics.
+      self.try_reserve(new_len - len)?;
+    }
+    self.resize(new_len, value);
+    Ok(())
+  }
+
+  /// Appends the elements as the `Extend<T>` implementation does, or returns an
+  /// error where it panics or the allocation fails.
+  ///
+  /// It reserves room for the iterator's lower size hint first, and then for
+  /// each further element as it comes. At the first element that does not fit,
+  /// it drops the rest of the iterator and the elements it appended, so on an
+  /// error the elements are unchanged.
+  pub fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), TryReserveError> {
+    let len = self.len();
+    let result = self.try_append(iter.into_iter());
+    if result.is_err() {
+      self.truncate(len);
+    }
+    result
+  }
+
+  // try_extend's appends, up to the first element that does not fit.
+  fn try_append(&mut self, iter: impl Iterator<Item = T>) -> Result<(), TryReserveError> {
+    self.try_reserve(iter.size_hint().0)?;
+    for value in iter {
+      // Once the slot is reserved, push's own reserve finds it and neither
+      // allocates nor panics.
+      self.try_reserve(1)?;
+      self.push(value);
+    }
+    Ok(())
   }
 
   /// Splits at an index relative to the current start, including in spare capacity.
@@ -1021,7 +1070,8 @@ impl<T: Clone, S: InlineSize> Clone for VectorMut<T, S> {
 /// # Panics
 ///
 /// Panics where `reserve` panics: when the elements exceed the room of a buffer that cannot grow.
-/// The elements appended before the panic stay in the buffer.
+/// The elements appended before the panic stay in the buffer. `try_extend` returns an error
+/// instead, and leaves the elements unchanged.
 impl<T, S: InlineSize> Extend<T> for VectorMut<T, S> {
   #[track_caller]
   fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
@@ -1056,6 +1106,7 @@ impl<T: Copy, S: InlineSize, R: InlineSize> Extend<Vector<T, R>> for VectorMut<T
 /// # Panics
 ///
 /// Panics where `extend` panics: when the elements exceed the room of a buffer that cannot grow.
+/// `try_extend` on a new buffer returns an error instead.
 impl<T, S: WritableSize<T>> FromIterator<T> for VectorMut<T, S> {
   fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
     let mut buffer = Self::new();
