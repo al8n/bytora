@@ -12,6 +12,7 @@ extern crate std;
 
 pub mod error;
 mod layout;
+mod traits;
 mod vector;
 use core::ops::{Bound, Range, RangeBounds};
 pub use error::{ByteEditError, OutOfBounds, RangeOutOfBounds, TryPutError, TryReserveError};
