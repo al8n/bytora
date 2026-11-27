@@ -2,8 +2,9 @@
 
 `Slice<T, S>` and `SliceMut<T, S>` own small sequences of `Copy` elements
 inline. An immutable `Slice` can also borrow static data or share a vector's allocation.
-The typenum integer `S` gives the exact size in bytes of the handle,
-including its cursor. Wrapping either handle in `Option` uses the same number
+For a positive typenum integer `S`, the handle occupies exactly `S` bytes,
+including its cursor. `U0` disables inline elements and uses three machine words.
+Wrapping either handle in `Option` uses the same number
 of bytes. `Slice<T>` and `SliceMut<T>` default to the three-word size of a
 `Vec<T>`, or 12 bytes on 32-bit targets and 24 bytes on 64-bit targets.
 
@@ -18,13 +19,14 @@ bytes.as_mut_slice().make_ascii_uppercase();
 assert_eq!(bytes.as_slice(), b"VALUE");
 ```
 
-On 32-bit targets, supported sizes are multiples of 4 from 4 through 8192 bytes.
-On 64-bit targets, supported sizes are multiples of 8 from 8 through 8192 bytes.
+Positive budgets are multiples of 4 through 8192 on 32-bit targets,
+and multiples of 8 through 8192 on 64-bit targets.
 Advancing changes the cursor in constant time. Moving an inline handle moves
 its elements. The inline constructors and operations are available with only `core`.
 
-| Handle size | Cursor bytes | Inline capacity for `u8` |
+| Requested budget | Inline cursor bytes | Inline capacity for `u8` |
 | --- | --- | --- |
+| 0 (three-word handle) | — | 0 |
 | 4 (32-bit only), 8 | 1 | 3, 7 |
 | 12 (32-bit only) or 16 through 128 | 2 | 10 or 14 through 126 |
 | 132 (32-bit only) or 136 through 8192 | 4 | 128 or 132 through 8188 |
@@ -55,13 +57,14 @@ The layout is available for non-`Copy` types too. `try_from_slice` needs
 `T: Copy` to copy elements from the borrowed slice.
 
 Generic code can use `S: InlineSize` for either handle. `S::USIZE` gives
-the total byte budget. `INLINE_CAPACITY` counts the elements that fit.
+the requested budget. `S::HANDLE_BYTES` gives the actual handle size,
+including for `U0`. `INLINE_CAPACITY` counts the elements that fit.
 
 ```rust
 use smol_slice::{InlineSize, Slice, typenum::U24};
 
 fn copy_inline<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
-    assert_eq!(size_of::<Slice<T, S>>(), S::USIZE);
+    assert_eq!(size_of::<Slice<T, S>>(), S::HANDLE_BYTES);
     Slice::try_from_slice(values)
 }
 
@@ -89,9 +92,9 @@ assert_eq!(copy_inline::<_, 4104>(b"small").unwrap().as_slice(), b"small");
 An unsupported size is a compile-time error.
 
 ```compile_fail
-use smol_slice::{InlineSize, typenum::U0};
+use smol_slice::{InlineSize, typenum::U1};
 fn supported<S: InlineSize>() {}
-supported::<U0>();
+supported::<U1>();
 ```
 
 ```compile_fail
@@ -156,8 +159,8 @@ destination.clone_from(&source);
 assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
 ```
 
-For an explicit handle size, `try_from_static` returns `None` if its budget is
-below three words or its length exceeds `isize::MAX` elements. The default
+`try_from_static` returns `None` when the handle occupies fewer than three
+words or the slice contains more than `isize::MAX` elements. The default
 `from_static` constructor panics on an oversized slice of zero-sized elements.
 
 With the `std` or `alloc` feature on targets with pointer-width atomics,
@@ -183,6 +186,27 @@ let mut tail = whole.clone();
 tail.advance(30);
 assert_eq!(tail.as_slice(), &[30, 31]);
 assert_eq!(whole.len(), 32);
+# }
+```
+
+`Slice<T, U0>` and `SliceN<T, 0>` have zero inline capacity for every `T`,
+including zero-sized types. `SliceN::<T, 0>::empty()` uses only `core` and
+accepts any element type. `try_from_static` borrows a static slice of `Sync`
+elements. With `std` or `alloc` and pointer-width atomics, `TryFrom<Vec<T>>`
+takes ownership of `Send + Sync` elements, including types that implement
+neither `Copy` nor `Clone`. Clones and ranges keep the original vector's
+elements alive until the last handle drops, even when its window is empty.
+
+```rust
+# #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+# {
+use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use smol_slice::SliceN;
+
+let counters = SliceN::<AtomicUsize, 0>::try_from(vec![AtomicUsize::new(0)]).unwrap();
+let peer = counters.clone();
+peer.as_slice()[0].fetch_add(1, Relaxed);
+assert_eq!(counters.as_slice()[0].load(Relaxed), 1);
 # }
 ```
 

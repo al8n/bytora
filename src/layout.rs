@@ -15,7 +15,7 @@ mod shared;
 /// # Safety
 ///
 /// Both types must be arrays of `u8`. Together with the one-byte tag they
-/// must fill exactly the size's byte budget. The cursor must have the width
+/// must fill the physical handle. The cursor must have the width
 /// required to encode every index in the payload.
 #[doc(hidden)]
 unsafe trait Repr {
@@ -26,23 +26,34 @@ unsafe trait Repr {
 
 /// A type-level byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
 ///
-/// Implemented for the [`typenum`] unsigned integers that are positive multiples
-/// of the target's word size through [`MAX_HANDLE_BYTES`]. The trait is sealed.
-/// [`S::USIZE`](Unsigned::USIZE) counts all bytes, including the cursor. The
+/// A positive size is a multiple of the target's word size through [`MAX_HANDLE_BYTES`]
+/// and counts all handle bytes, including the cursor. [`typenum::U0`] disables
+/// inline elements and uses a three-word handle. The trait is sealed.
 /// [`INLINE_CAPACITY`](crate::Slice::INLINE_CAPACITY) also depends on the element type.
 #[allow(
   private_bounds,
   reason = "the backing arrays are private to the layout"
 )]
-pub trait InlineSize: Unsigned + Debug + Repr {}
+pub trait InlineSize: Unsigned + Debug + Repr {
+  /// The size in bytes of the handle and its `Option`.
+  const HANDLE_BYTES: usize = handle_bytes(Self::USIZE);
+}
 impl<S: Unsigned + Debug + Repr> InlineSize for S {}
+
+const fn handle_bytes(budget: usize) -> usize {
+  if budget == 0 {
+    3 * size_of::<usize>()
+  } else {
+    budget
+  }
+}
 
 /// Maps an array of `N` bytes to the type-level handle size used by
 /// [`SliceN`](crate::SliceN) and [`SliceMutN`](crate::SliceMutN).
 ///
 /// Use `where [u8; N]: AssocInlineSize` in code generic over `const N: usize`.
 pub trait AssocInlineSize {
-  /// The [`InlineSize`] for this total byte count.
+  /// The [`InlineSize`] for this byte budget.
   type Size: InlineSize;
 }
 
@@ -53,7 +64,7 @@ macro_rules! size {
     // SAFETY: Both fields are byte arrays. verify_size checks their lengths
     // against the cursor encoding and the typenum value for every mapping.
     unsafe impl Repr for $size {
-      type Payload = [u8; $bytes - $cursor - 1];
+      type Payload = [u8; handle_bytes($bytes) - $cursor - 1];
       type Cursor = [u8; $cursor];
       const ZERO_CURSOR: Self::Cursor = [0; $cursor];
     }
@@ -63,15 +74,17 @@ macro_rules! size {
     const _: () = verify_size::<<[u8; $bytes] as AssocInlineSize>::Size>($bytes);
   };
 }
+size!(0, typenum::U0, 1);
 include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
 
 #[allow(
   dead_code,
   reason = "Rust 1.85 does not count calls from anonymous constants as use"
 )]
-const fn verify_size<S: InlineSize>(bytes: usize) {
+const fn verify_size<S: InlineSize>(budget: usize) {
   use crate::{Slice, SliceMut};
 
+  let bytes = S::HANDLE_BYTES;
   let payload = size_of::<S::Payload>();
   let cursor = size_of::<S::Cursor>();
   let expected_cursor = if bytes <= 8 {
@@ -88,14 +101,14 @@ const fn verify_size<S: InlineSize>(bytes: usize) {
     _ => 0,
   };
   assert!(bytes > 0 && bytes % size_of::<usize>() == 0 && bytes <= MAX_HANDLE_BYTES);
-  assert!(S::USIZE == bytes);
+  assert!(S::USIZE == budget);
   assert!(cursor == expected_cursor);
   assert!(payload + cursor + 1 == bytes);
   assert!(payload <= cursor_limit);
   if Layout::<u8, S>::COMPACT_EXTERNAL {
     assert!(cursor == 1 && payload + 1 < COMPACT_STATIC.get() as usize);
   }
-  assert!(Layout::<u8, S>::INLINE_CAPACITY == payload);
+  assert!(Layout::<u8, S>::INLINE_CAPACITY == if budget == 0 { 0 } else { payload });
   assert!(core::mem::offset_of!(Layout<u8, S>, payload) == 0);
   assert!(core::mem::offset_of!(Layout<u8, S>, cursor) == payload);
   assert!(core::mem::offset_of!(Layout<u8, S>, tag) == bytes - 1);
@@ -142,8 +155,10 @@ pub(super) struct Layout<T, S: InlineSize> {
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
   const FITS_EXTERNAL: bool = Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>();
-  pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::USIZE <= 32;
-  pub(super) const INLINE_CAPACITY: usize = if size_of::<T>() == 0 {
+  pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::HANDLE_BYTES <= 32;
+  pub(super) const INLINE_CAPACITY: usize = if S::USIZE == 0 {
+    0
+  } else if size_of::<T>() == 0 {
     Self::PAYLOAD_BYTES
   } else if align_of::<T>() > align_of::<Self>() {
     0
@@ -313,13 +328,6 @@ impl<T, S: InlineSize> Layout<T, S> {
 
 // A bare Layout describes a window. Its enclosing Slice manages the external owner.
 impl<T, S: InlineSize> Layout<T, S> {
-  // Only call this for an external descriptor with the immortal static owner.
-  const fn mark_static(&mut self) {
-    if Self::COMPACT_EXTERNAL && self.tag.get() == EXTERNAL {
-      self.tag = COMPACT_STATIC;
-    }
-  }
-
   const fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
     let bytes = len.to_le_bytes();
     let mut low = [0; LEN_LOW_BYTES];

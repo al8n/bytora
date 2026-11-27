@@ -1,6 +1,6 @@
 use smol_slice::{
   AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Slice, SliceMut, SliceMutN, SliceN,
-  typenum::{Sum, U8, U24, U4096, Unsigned},
+  typenum::{Sum, U0, U8, U24, U4096, Unsigned},
 };
 
 #[test]
@@ -9,14 +9,18 @@ fn generic_sizes_work_with_both_handles() {
     S::USIZE
   }
   fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
-    assert_eq!(size_of::<Slice<T, S>>(), size::<S>());
+    assert_eq!(size_of::<Slice<T, S>>(), S::HANDLE_BYTES);
     Slice::try_from_slice(values)
   }
   fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceMut<T, S>> {
-    assert_eq!(size_of::<SliceMut<T, S>>(), S::USIZE);
+    assert_eq!(size_of::<SliceMut<T, S>>(), S::HANDLE_BYTES);
     SliceMut::try_from_slice(values)
   }
 
+  assert_eq!(size::<U0>(), 0);
+  assert_eq!(size::<U24>(), 24);
+  assert!(read::<u8, U0>(&[]).unwrap().is_empty());
+  assert!(write::<u8, U0>(&[]).unwrap().is_empty());
   let mut read: SliceN<u8, 24> = read::<_, U24>(b"abc").unwrap();
   read.advance(1);
   let read: Slice<u8, U24> = read;
@@ -27,6 +31,89 @@ fn generic_sizes_work_with_both_handles() {
   write.as_mut_slice().make_ascii_uppercase();
   let write: SliceMut<u8, U24> = write;
   assert_eq!(write.as_slice(), b"BC");
+}
+
+#[test]
+fn zero_budget_has_no_inline_elements_and_an_aligned_const_empty_window() {
+  #[repr(align(128))]
+  struct Aligned(core::marker::PhantomData<core::cell::Cell<u8>>);
+  const EMPTY: Slice<Aligned, U0> = SliceN::<Aligned, 0>::empty();
+  assert_eq!(SliceN::<Aligned, 0>::INLINE_CAPACITY, 0);
+  assert_eq!(SliceN::<u8, 0>::INLINE_CAPACITY, 0);
+  assert_eq!(SliceN::<(), 0>::INLINE_CAPACITY, 0);
+  assert!(SliceN::<(), 0>::try_from_slice(&[()]).is_none());
+  assert_eq!(size_of::<Slice<Aligned, U0>>(), 3 * size_of::<usize>());
+  assert_eq!(size_of::<Option<SliceN<Aligned, 0>>>(), U0::HANDLE_BYTES);
+  assert!(EMPTY.clone().slice(..).is_empty());
+  assert!(EMPTY.as_slice().as_ptr().is_aligned());
+}
+
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+#[test]
+fn zero_budget_shares_the_original_atomics_across_threads() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+  let counters = vec![AtomicUsize::new(3), AtomicUsize::new(7)];
+  let ptr = counters.as_ptr();
+  let values: Slice<AtomicUsize, U0> = SliceN::<AtomicUsize, 0>::try_from(counters).unwrap();
+  assert_eq!(values.as_slice().as_ptr(), ptr);
+  let mut tail = values.clone();
+  tail.advance(1);
+  std::thread::spawn(move || {
+    assert_eq!(tail.slice(..1).as_slice()[0].fetch_add(5, Relaxed), 7);
+  })
+  .join()
+  .unwrap();
+  assert_eq!(values.as_slice()[0].load(Relaxed), 3);
+  assert_eq!(values.as_slice()[1].load(Relaxed), 12);
+}
+
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+#[test]
+fn zero_budget_keeps_all_owned_elements_until_the_last_empty_window_drops() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+  #[repr(align(64))]
+  struct CountDrop<'a>(&'a AtomicUsize);
+  impl Drop for CountDrop<'_> {
+    fn drop(&mut self) {
+      self.0.fetch_add(1, Relaxed);
+    }
+  }
+  let drops = [const { AtomicUsize::new(0) }; 3];
+  let owned: Vec<_> = drops.iter().map(CountDrop).collect();
+  let ptr = owned.as_ptr();
+  let whole = SliceN::<_, 0>::try_from(owned).ok().unwrap();
+  assert_eq!(whole.as_slice().as_ptr(), ptr);
+  let mut tail = whole.slice(1..);
+  assert_eq!(tail.as_slice().as_ptr(), ptr.wrapping_add(1));
+  tail.advance(2);
+  let mut last = SliceN::<_, 0>::empty();
+  last.clone_from(&tail);
+  drop(whole);
+  drop(tail);
+  assert!(last.is_empty());
+  assert_eq!(last.as_slice().as_ptr(), ptr.wrapping_add(3));
+  assert!(drops.iter().all(|count| count.load(Relaxed) == 0));
+  std::thread::scope(|scope| scope.spawn(move || drop(last)).join().unwrap());
+  assert!(drops.iter().all(|count| count.load(Relaxed) == 1));
+}
+
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+#[test]
+fn zero_budget_owned_vectors_respect_the_external_length_limit() {
+  let max = isize::MAX as usize;
+  let mut largest = SliceN::<(), 0>::try_from(vec![(); max]).unwrap();
+  assert_eq!(largest.len(), max);
+  largest.advance(max - 1);
+  assert_eq!(largest.clone().as_slice(), &[()]);
+  let oversized = vec![(); max + 1];
+  let original = (oversized.as_ptr(), oversized.len(), oversized.capacity());
+  let returned = SliceN::<(), 0>::try_from(oversized).err().unwrap();
+  assert_eq!(
+    (returned.as_ptr(), returned.len(), returned.capacity()),
+    original
+  );
 }
 
 #[test]

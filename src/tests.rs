@@ -34,6 +34,7 @@ fn static_windows_keep_the_original_pointer_for_every_handle_width() {
       assert_eq!(first.len(), tail.len());
     }
   }
+  check::<0>();
   check::<{ 3 * size_of::<usize>() }>();
   check::<4104>();
   assert_eq!(DEFAULT.clone().as_slice().as_ptr(), DATA.as_ptr());
