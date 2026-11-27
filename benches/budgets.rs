@@ -9,6 +9,12 @@ mod ownership {
   };
   use std::{hint::black_box, mem::size_of, ops::Range};
 
+  // A timed result is written to a stack temporary or an output slot whose alignment would
+  // otherwise be only the ABI's; on some cores its address modulo 32 selects the speed of the
+  // timed loop. Wrapping each result pins it to a 32-byte boundary, for every handle alike.
+  #[repr(C, align(32))]
+  struct Aligned<T>(T);
+
   // Padded control uses the same input Option and handle-output stride.
   const STRIDE: usize = 128;
   const BATCH: BatchSize = BatchSize::NumIterations(64);
@@ -158,10 +164,10 @@ mod ownership {
       b.iter_batched(
         || input(len),
         |values| {
-          black_box((
+          black_box(Aligned((
             T::from_vec(black_box(values)).expect("representable input"),
             [0u8; PAD],
-          ))
+          )))
         },
         BATCH,
       );
@@ -169,7 +175,7 @@ mod ownership {
     bench(group, "warmed_clone", label, len, |b| {
       b.iter_batched_ref(
         || &source,
-        |source| black_box((T::clone(black_box(*source)), [0u8; PAD])),
+        |source| black_box(Aligned((T::clone(black_box(*source)), [0u8; PAD]))),
         BATCH,
       );
     });
@@ -177,13 +183,13 @@ mod ownership {
       b.iter_batched_ref(
         || &source,
         |source| {
-          black_box((
+          black_box(Aligned((
             T::range(
               black_box(*source),
               black_box(bounds.start)..black_box(bounds.end),
             ),
             [0u8; PAD],
-          ))
+          )))
         },
         BATCH,
       );
@@ -196,7 +202,11 @@ mod ownership {
             [0u8; PAD],
           )
         },
-        |slot| black_box(T::into_vec(black_box(slot.0.take().expect("unique input")))),
+        |slot| {
+          black_box(Aligned(T::into_vec(black_box(
+            slot.0.take().expect("unique input"),
+          ))))
+        },
         BATCH,
       );
     });
@@ -229,10 +239,10 @@ mod ownership {
       b.iter_batched(
         || input(len),
         |values| {
-          black_box((
+          black_box(Aligned((
             T::try_from_vec(black_box(values)).expect("representable input"),
             [0u8; PAD],
-          ))
+          )))
         },
         BATCH,
       );

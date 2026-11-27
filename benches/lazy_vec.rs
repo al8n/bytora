@@ -15,6 +15,12 @@ mod ownership {
     time::{Duration, Instant},
   };
 
+  // A timed result is written to a stack temporary or an output slot whose alignment would
+  // otherwise be only the ABI's; on some cores its address modulo 32 selects the speed of the
+  // timed loop. Wrapping each result pins it to a 32-byte boundary, for every handle alike.
+  #[repr(C, align(32))]
+  struct Aligned<T>(T);
+
   const LEN: usize = 64;
   const CONTENTS: [u8; LEN] = [0x5a; LEN];
   const SHORT_LEN: usize = 7;
@@ -201,7 +207,7 @@ mod ownership {
       |b| {
         b.iter_batched(
           || input(kind),
-          |values| black_box((from_vec(black_box(values)), [0u8; PAD])),
+          |values| black_box(Aligned((from_vec(black_box(values)), [0u8; PAD]))),
           BATCH,
         );
       },
@@ -211,7 +217,7 @@ mod ownership {
       |b| {
         b.iter_batched(
           || input(kind),
-          |values| black_box(into_vec(from_vec(black_box(values)))),
+          |values| black_box(Aligned(into_vec(from_vec(black_box(values))))),
           BATCH,
         );
       },
@@ -224,7 +230,11 @@ mod ownership {
       |b| {
         b.iter_batched_ref(
           || (Some(from_vec(input(kind))), [0u8; PAD]),
-          |slot| black_box(into_vec(black_box(slot.0.take().expect("unique input")))),
+          |slot| {
+            black_box(Aligned(into_vec(black_box(
+              slot.0.take().expect("unique input"),
+            ))))
+          },
           BATCH,
         );
       },
@@ -237,8 +247,8 @@ mod ownership {
         b.iter_custom(|iterations| {
           let mut elapsed = Duration::ZERO;
           let mut inputs = Vec::with_capacity(DIRECT_BATCH);
-          let mut outputs: Vec<Vec<u8>> = Vec::with_capacity(DIRECT_BATCH);
-          outputs.resize_with(DIRECT_BATCH, Vec::new);
+          let mut outputs: Vec<Aligned<Vec<u8>>> = Vec::with_capacity(DIRECT_BATCH);
+          outputs.resize_with(DIRECT_BATCH, || Aligned(Vec::new()));
           black_box(&outputs);
           outputs.clear();
           let mut remaining = iterations;
@@ -248,7 +258,7 @@ mod ownership {
             let mut pending = inputs.drain(..);
             let start = Instant::now();
             for (source, _) in pending.by_ref() {
-              outputs.push(black_box(into_vec(black_box(source))));
+              outputs.push(Aligned(black_box(into_vec(black_box(source)))));
             }
             black_box(&outputs);
             elapsed += start.elapsed();
@@ -265,7 +275,7 @@ mod ownership {
       |b| {
         b.iter_batched_ref(
           || from_vec(input(kind)),
-          |source| black_box((black_box(&*source).clone(), [0u8; PAD])),
+          |source| black_box(Aligned((black_box(&*source).clone(), [0u8; PAD]))),
           BATCH,
         );
       },
@@ -280,7 +290,7 @@ mod ownership {
       |b| {
         b.iter_batched_ref(
           || &original,
-          |source| black_box((black_box(*source).clone(), [0u8; PAD])),
+          |source| black_box(Aligned((black_box(*source).clone(), [0u8; PAD]))),
           BATCH,
         );
       },
@@ -303,7 +313,7 @@ mod ownership {
     group.bench_function(id, |b| {
       b.iter_batched(
         short_input,
-        |values| black_box((from_vec(black_box(values)), [0u8; PAD])),
+        |values| black_box(Aligned((from_vec(black_box(values)), [0u8; PAD]))),
         BATCH,
       );
     });
