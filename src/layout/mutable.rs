@@ -242,25 +242,43 @@ impl<T, S: InlineSize> VectorMut<T, S> {
 
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn from_window_with(make_window: impl FnOnce() -> Window<T>) -> Self {
+    Self::from_window_ptr(boxed(make_window))
+  }
+
+  // The heap handle, written as whole words. Word 0 is the box pointer and the
+  // last word holds only the tag. On a handle of at most 32 bytes every word
+  // between is zero, so each sixteen-byte half that a move of the handle
+  // reloads is covered by these stores. A tag written as a byte would leave
+  // the last word in pieces. Nothing reads the cursor of a heap handle.
+  //
+  // `window` is a leaked box that the new handle owns.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(always)]
+  fn from_window_ptr(window: NonNull<Window<T>>) -> Self {
     assert!(Layout::<T, S>::FITS_WINDOW);
-    let mut layout = Layout::<T, S>::empty_inline();
-    // Allocate the descriptor before the closure partitions a borrowed source
-    // or transfers its live elements. An allocation failure leaves it intact.
-    let mut owner = Box::<Window<T>>::new_uninit();
-    owner.write(make_window());
-    // SAFETY: write initialized the entire window. The Box owns it until its
-    // pointer is transferred into the descriptor below.
-    let owner = NonNull::from(Box::leak(unsafe { owner.assume_init() }));
-    // SAFETY: The complete, word-aligned owner pointer fits in the payload.
+    let last = S::HANDLE_BYTES / size_of::<usize>() - 1;
+    let mut layout = MaybeUninit::<Layout<T, S>>::uninit();
+    let words = layout.as_mut_ptr().cast::<usize>();
+    // SAFETY: verify_size checks that the handle is usize-aligned and a whole
+    // number of words. FITS_WINDOW puts the typed pointer in the payload's
+    // first word, and a handle with room for it has at least two words, so
+    // the last word is another one. The last word, little-endian as in
+    // set_external_len, ends in the tag byte.
     unsafe {
-      layout
-        .payload
-        .as_mut_ptr()
-        .cast::<NonNull<Window<T>>>()
-        .write(owner)
-    };
-    layout.tag = HEAP;
-    Self::wrap(layout)
+      words.cast::<NonNull<Window<T>>>().write(window);
+      if S::HANDLE_BYTES <= 32 {
+        for index in 1..last {
+          words.add(index).write(0);
+        }
+      }
+      words
+        .add(last)
+        .write(((HEAP.get() as usize) << super::TAG_SHIFT).to_le());
+    }
+    // SAFETY: The last word initialized the cursor, which precedes the tag
+    // within that word (verify_size), and a nonzero tag. Any other byte is
+    // payload, which may stay uninitialized.
+    Self::wrap(unsafe { layout.assume_init() })
   }
 
   #[cfg(any(feature = "std", feature = "alloc"))]
@@ -805,8 +823,45 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     assert!(at <= self.capacity(), "split_off past capacity");
     #[cfg(any(feature = "std", feature = "alloc"))]
     if let Some(window) = self.window_mut() {
-      return Self::from_window_with(|| window.split_off(at));
+      return Self::from_window_ptr(split_window(window, at));
     }
+    self.split_off_inline(at)
+  }
+
+  /// Splits at an index relative to the current start, as [`Self::split_off`]
+  /// does, or returns an error where it panics.
+  pub fn try_split_off(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let capacity = self.capacity();
+    if at > capacity {
+      return Err(OutOfBounds::new(at, capacity));
+    }
+    // Each arm returns the result itself: the heap arm from words in
+    // registers, the inline arms through one call that returns it. A wrap
+    // around a call that returns the handle would take the handle apart.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if let Some(window) = self.window_mut() {
+      return Ok(Self::from_window_ptr(split_window(window, at)));
+    }
+    self.try_split_off_inline(at)
+  }
+
+  // The inline arms of split_off, out of line, one wrapper per form, so that
+  // each form reaches them in one call. Left in the public methods, they
+  // share a handle temporary with the heap arm and take its words apart.
+  #[inline(never)]
+  fn split_off_inline(&mut self, at: usize) -> Self {
+    self.split_inline(at)
+  }
+
+  #[inline(never)]
+  fn try_split_off_inline(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    Ok(self.split_inline(at))
+  }
+
+  // The inline arms of split_off. `at` is at most the capacity, and the
+  // buffer has no heap window.
+  #[inline(always)]
+  fn split_inline(&mut self, at: usize) -> Self {
     let layout = self.storage.layout_mut();
     if layout.tag == EMPTY_WITHOUT_COPY {
       return Self::unproven_empty();
@@ -831,16 +886,6 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     Self::wrap(right)
   }
 
-  /// Splits at an index relative to the current start, as [`Self::split_off`]
-  /// does, or returns an error where it panics.
-  pub fn try_split_off(&mut self, at: usize) -> Result<Self, OutOfBounds> {
-    let capacity = self.capacity();
-    if at > capacity {
-      return Err(OutOfBounds::new(at, capacity));
-    }
-    Ok(self.split_off(at))
-  }
-
   /// Removes and returns the first `at` initialized elements.
   ///
   /// # Panics
@@ -853,7 +898,12 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     if at > self.len() {
       split_to_past_end();
     }
-    self.split_to_within(at)
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if let Some(window) = self.storage.layout().window_ptr() {
+      // SAFETY: The window is this handle's, and `at` is within its length.
+      return unsafe { self.split_to_heap(window, at) };
+    }
+    self.split_to_inline(at)
   }
 
   /// Removes and returns the first `at` initialized elements, as
@@ -868,14 +918,45 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     if at > len {
       return Err(OutOfBounds::new(at, len));
     }
-    Ok(self.split_to_within(at))
+    // Each arm returns the result itself, as in try_split_off.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if let Some(window) = self.storage.layout().window_ptr() {
+      // SAFETY: The window is this handle's, and `at` is within its length.
+      return Ok(unsafe { self.split_to_heap(window, at) });
+    }
+    self.try_split_to_inline(at)
   }
 
-  // `at` is at most the current length, so it is within the capacity too.
-  #[inline]
-  fn split_to_within(&mut self, at: usize) -> Self {
-    let right = self.split_off(at);
+  // split_to's heap arm. The window keeps the prefix in its box, which moves
+  // to the result, and this handle takes the new box with the rest: the
+  // partition that split_off and mem::replace make, with both handles
+  // written as words.
+  //
+  // SAFETY: `left` must be this handle's own window, and `at` at most its length.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(always)]
+  unsafe fn split_to_heap(&mut self, mut left: NonNull<Window<T>>, at: usize) -> Self {
+    // SAFETY: This handle exclusively owns its boxed window.
+    let right = split_window(unsafe { left.as_mut() }, at);
+    // SAFETY: self is valid for writes. Its box now holds the prefix and
+    // belongs to the result, so the old handle is overwritten, not dropped:
+    // an assignment would drop it and free the prefix. Nothing between the
+    // split and this write can panic.
+    unsafe { ptr::write(self, Self::from_window_ptr(right)) };
+    Self::from_window_ptr(left)
+  }
+
+  // The inline arms of split_to, one wrapper per form, as for split_off.
+  #[inline(never)]
+  fn split_to_inline(&mut self, at: usize) -> Self {
+    let right = self.split_inline(at);
     mem::replace(self, right)
+  }
+
+  #[inline(never)]
+  fn try_split_to_inline(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let right = self.split_inline(at);
+    Ok(mem::replace(self, right))
   }
 
   /// Removes and returns the initialized elements, leaving the spare capacity here.
@@ -1246,4 +1327,26 @@ impl<T> From<Vec<T>> for VectorMut<T, typenum::U0> {
 #[track_caller]
 fn split_to_past_end() -> ! {
   panic!("split_to past end")
+}
+
+// Boxes the window that `make_window` returns, and leaks the box to the handle
+// that will own it. The box is allocated first, so `make_window` may
+// partition a borrowed source or move its live elements: an allocation
+// failure leaves the source intact.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(always)]
+fn boxed<T>(make_window: impl FnOnce() -> Window<T>) -> NonNull<Window<T>> {
+  let mut owner = Box::<Window<T>>::new_uninit();
+  owner.write(make_window());
+  // SAFETY: write initialized the entire window.
+  NonNull::from(Box::leak(unsafe { owner.assume_init() }))
+}
+
+// The heap arm of both splits, out of line: it partitions `window` at `at` and
+// returns the box of the part past `at`. Its caller writes the handles, as
+// whole words in registers.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(never)]
+fn split_window<T>(window: &mut Window<T>, at: usize) -> NonNull<Window<T>> {
+  boxed(|| window.split_off(at))
 }
