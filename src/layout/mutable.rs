@@ -1399,12 +1399,10 @@ fn try_window_with_capacity<T>(capacity: usize) -> Option<NonNull<Window<T>>> {
 }
 
 // with_capacity's window after try_window_with_capacity refused: allocated as
-// reserve allocates, so a refusal panics or aborts as reserve's does, with the
-// caller's location.
+// reserve allocates, so a refusal panics or aborts as reserve's does.
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cold]
 #[inline(never)]
-#[track_caller]
 fn window_with_capacity<T>(capacity: usize) -> NonNull<Window<T>> {
   let values = Vec::with_capacity(capacity);
   boxed(|| Window::from_vec(values))
@@ -1426,7 +1424,6 @@ fn try_zeroed_window(len: usize) -> Option<NonNull<Window<u8>>> {
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cold]
 #[inline(never)]
-#[track_caller]
 fn zeroed_window(len: usize) -> NonNull<Window<u8>> {
   let values: Vec<u8> = std::vec![0; len];
   boxed(|| Window::from_vec(values))
