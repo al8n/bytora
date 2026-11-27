@@ -331,6 +331,12 @@ impl<'a, T, S: InlineSize> IntoIterator for &'a mut VectorMut<T, S> {
 }
 
 /// Borrows the static slice without copying, as [`Vector::from_static`] does.
+///
+/// # Panics
+///
+/// Panics where `from_static` panics: for a slice of zero-sized elements longer than
+/// `isize::MAX`, which the handle cannot describe, as the conversions of the standard library
+/// panic on a capacity overflow. [`Vector::try_from_static`] returns the slice instead.
 impl<T: Sync> From<&'static [T]> for Vector<T> {
   #[inline]
   #[track_caller]
