@@ -138,6 +138,10 @@ fn bytes_bytes(source: &Bytes) -> &[u8] {
   source.as_ref()
 }
 
+#[allow(
+  clippy::too_many_arguments,
+  reason = "one registration per case, and every argument is a distinct fact about it"
+)]
 fn register_case<T: Clone>(
   group: &mut BenchmarkGroup<'_, WallTime>,
   backing: &str,

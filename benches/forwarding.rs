@@ -44,14 +44,14 @@ mod wide {
 
   /// A 16-byte volatile vector store of `lo` then `hi` to `p`, which is 16-byte aligned.
   #[inline(always)]
-  pub unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
+  pub(super) unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe { write_volatile(p.cast::<__m128i>(), _mm_set_epi64x(hi as i64, lo as i64)) }
   }
 
   /// A 16-byte volatile vector load from `p`, which is 16-byte aligned. Returns its low half.
   #[inline(always)]
-  pub unsafe fn load(p: *const u8) -> u64 {
+  pub(super) unsafe fn load(p: *const u8) -> u64 {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe { _mm_cvtsi128_si64(read_volatile(p.cast::<__m128i>())) as u64 }
   }
@@ -64,7 +64,7 @@ mod wide {
 
   /// A 16-byte volatile vector store of `lo` then `hi` to `p`, which is 16-byte aligned.
   #[inline(always)]
-  pub unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
+  pub(super) unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe {
       write_volatile(
@@ -76,14 +76,14 @@ mod wide {
 
   /// A 16-byte volatile vector load from `p`, which is 16-byte aligned. Returns its low half.
   #[inline(always)]
-  pub unsafe fn load(p: *const u8) -> u64 {
+  pub(super) unsafe fn load(p: *const u8) -> u64 {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe { vgetq_lane_u64::<0>(read_volatile(p.cast::<uint64x2_t>())) }
   }
 
   /// One `ldp` of the two words at `p`, which is 8-byte aligned. Returns their xor.
   #[inline(always)]
-  pub unsafe fn load_pair(p: *const u8) -> u64 {
+  pub(super) unsafe fn load_pair(p: *const u8) -> u64 {
     let (low, high): (u64, u64);
     // SAFETY: the caller passes a valid `p` with 16 readable bytes; `ldp` writes only its outputs.
     unsafe {
@@ -105,13 +105,13 @@ mod wide {
   use std::ptr::{read_volatile, write_volatile};
 
   #[inline(always)]
-  pub unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
+  pub(super) unsafe fn store(p: *mut u8, lo: u64, hi: u64) {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe { write_volatile(p.cast::<u128>(), (u128::from(hi) << 64) | u128::from(lo)) }
   }
 
   #[inline(always)]
-  pub unsafe fn load(p: *const u8) -> u64 {
+  pub(super) unsafe fn load(p: *const u8) -> u64 {
     // SAFETY: the caller passes a valid, 16-byte aligned `p`.
     unsafe { read_volatile(p.cast::<u128>()) as u64 }
   }
