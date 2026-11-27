@@ -187,6 +187,29 @@ mod tests {
   }
 
   #[test]
+  fn four_word_arc_clones_copy_the_descriptor_and_hold_one_reference_each() {
+    fn check<S: InlineSize>() {
+      let input = Arc::<[u8]>::from(vec![3u8, 5, 7, 11].into_boxed_slice());
+      let mut source = Slice::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
+      source.advance(1);
+      let peer = source.clone();
+      assert_eq!(Arc::strong_count(&input), 3);
+      assert!(is_arc(peer.layout.owner()));
+      assert_eq!(peer.layout.owner(), source.layout.owner());
+      assert_eq!(peer.layout.tag.get(), super::super::EXTERNAL);
+      assert_eq!(peer.as_slice().as_ptr(), input.as_ptr().wrapping_add(1));
+      drop(source);
+      assert_eq!(Arc::strong_count(&input), 2);
+      assert_eq!(peer.as_slice(), &[5, 7, 11]);
+      drop(peer);
+      assert_eq!(Arc::strong_count(&input), 1);
+    }
+    check::<typenum::U0>();
+    check::<crate::DefaultSize>();
+    check::<typenum::U32>();
+  }
+
+  #[test]
   fn arc_windows_remain_covariant_after_adoption() {
     type Any = for<'a> fn(&'a str) -> &'a str;
     type Static = fn(&'static str) -> &'static str;
