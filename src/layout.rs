@@ -258,10 +258,15 @@ impl<T, S: InlineSize> Layout<T, S> {
   where
     T: Copy,
   {
+    (values.len() <= Self::INLINE_CAPACITY).then(|| Self::copy_inline(values))
+  }
+
+  fn copy_inline(values: &[T]) -> Self
+  where
+    T: Copy,
+  {
     let len = values.len();
-    if len > Self::INLINE_CAPACITY {
-      return None;
-    }
+    assert!(len <= Self::INLINE_CAPACITY);
     let (cursor, tag) = Self::inline_cursor(0..len);
     let mut layout = Self {
       _align: [],
@@ -270,12 +275,22 @@ impl<T, S: InlineSize> Layout<T, S> {
       tag,
       _element: PhantomData,
     };
-    if len != 0 && size_of::<T>() != 0 {
+    if size_of::<T>() != 0 && len != 0 {
       // SAFETY: The capacity check guarantees alignment and space for len elements.
       // The fresh payload cannot overlap values. T: Copy permits the duplicates.
-      unsafe { ptr::copy_nonoverlapping(values.as_ptr(), layout.payload.as_mut_ptr().cast(), len) };
+      unsafe {
+        if S::HANDLE_BYTES == size_of::<usize>() {
+          copy_tiny(
+            values.as_ptr().cast(),
+            layout.payload.as_mut_ptr().cast(),
+            core::mem::size_of_val(values),
+          );
+        } else {
+          ptr::copy_nonoverlapping(values.as_ptr(), layout.payload.as_mut_ptr().cast(), len);
+        }
+      }
     }
-    Some(layout)
+    layout
   }
 
   pub(super) fn is_inline(&self) -> bool {
@@ -452,6 +467,29 @@ impl<T, S: InlineSize> Layout<T, S> {
       [cursor] => *cursor = start as u8,
       [lo, hi, _] => [*lo, *hi] = (start as u16).to_le_bytes(),
       _ => unreachable!(),
+    }
+  }
+}
+
+/// Copies up to seven bytes between disjoint ranges.
+///
+/// # Safety
+///
+/// Both ranges must be valid for `bytes` bytes, and `bytes` must be at most seven.
+#[inline]
+unsafe fn copy_tiny(src: *const u8, dst: *mut u8, bytes: usize) {
+  debug_assert!(bytes <= 7);
+  // The first and last blocks may overlap each other. Each individual copy
+  // goes between disjoint allocations and never extends beyond either range.
+  unsafe {
+    if bytes >= 4 {
+      ptr::copy_nonoverlapping(src, dst, 4);
+      ptr::copy_nonoverlapping(src.add(bytes - 4), dst.add(bytes - 4), 4);
+    } else if bytes >= 2 {
+      ptr::copy_nonoverlapping(src, dst, 2);
+      ptr::copy_nonoverlapping(src.add(bytes - 2), dst.add(bytes - 2), 2);
+    } else if bytes == 1 {
+      ptr::copy_nonoverlapping(src, dst, 1);
     }
   }
 }

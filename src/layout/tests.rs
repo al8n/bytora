@@ -76,6 +76,35 @@ fn compact_static_windows_cross_the_fast_tag_length_boundary() {
 }
 
 #[test]
+fn packed_static_tags_stay_external_across_short_windows() {
+  struct Field(u8);
+  static DATA: [Field; 64] = [const { Field(42) }; 64];
+  for len in [0, 1, 7, 22, 23, 31, 32, 63, 64] {
+    let mut source =
+      crate::SliceN::<Field, { 3 * size_of::<usize>() }>::try_from_static(&DATA[..len]).unwrap();
+    assert_eq!(source.layout.tag, COMPACT_STATIC);
+    assert!(!source.layout.is_inline());
+    assert_eq!(source.as_slice().as_ptr(), DATA.as_ptr());
+    let start = len / 2;
+    let window = source.slice(start..);
+    assert_eq!(window.layout.tag, COMPACT_STATIC);
+    assert_eq!(
+      window.as_slice().as_ptr(),
+      DATA.as_ptr().wrapping_add(start)
+    );
+    assert_eq!(window.len(), len - start);
+    if let Some(field) = window.as_slice().first() {
+      assert_eq!(field.0, 42);
+    }
+    source.advance(start);
+    let clone = source.clone();
+    assert_eq!(clone.layout.tag, COMPACT_STATIC);
+    assert_eq!(clone.as_slice().as_ptr(), DATA.as_ptr().wrapping_add(start));
+    assert_eq!(clone.len(), len - start);
+  }
+}
+
+#[test]
 fn moved_external_prefix_preserves_pointer_provenance() {
   fn check<S: InlineSize>() {
     let values = [11u16, 13];
