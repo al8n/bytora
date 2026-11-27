@@ -10,9 +10,11 @@ extern crate alloc as std;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod error;
 mod layout;
 mod vector;
 use core::ops::{Bound, Range, RangeBounds};
+pub use error::{ByteEditError, OutOfBounds, RangeOutOfBounds, TryPutError, TryReserveError};
 use layout::Layout;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use layout::local::{LocalVector, LocalVectorN};
