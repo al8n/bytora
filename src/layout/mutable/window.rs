@@ -308,6 +308,25 @@ impl<T> Window<T> {
     }
   }
 
+  // A complete initialized prefix can become a Vec without moving anything.
+  // A former sibling may leave uninitialized slots before owned_start.
+  #[cfg(smol_slice_atomic)]
+  pub(super) fn take_vec_prefix(
+    &mut self,
+    fits: impl FnOnce(usize) -> bool,
+  ) -> Option<(Vec<T>, usize)> {
+    if self.owned_start != 0 || !fits(self.end) {
+      return None;
+    }
+    let allocation = mem::replace(self.buffer.exclusive()?, Allocation::empty());
+    let start = mem::take(&mut self.start);
+    let end = mem::take(&mut self.end);
+    self.limit = 0;
+    // SAFETY: No other window can access the allocation. This window owned
+    // every initialized element in 0..end and now has an empty drop range.
+    Some((unsafe { allocation.into_vec(end) }, start))
+  }
+
   pub(super) fn split_off(&mut self, at: usize) -> Self {
     assert!(at <= self.capacity(), "split_off past capacity");
     let boundary = self.start + at;

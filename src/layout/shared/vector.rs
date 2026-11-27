@@ -115,7 +115,7 @@ pub(super) struct Vector<T> {
 }
 
 impl<T> Vector<T> {
-  fn new(base: *const T, len: usize, capacity: usize, strong: usize) -> Self {
+  pub(super) fn new(base: *const T, len: usize, capacity: usize, strong: usize) -> Self {
     Self {
       strong: AtomicUsize::new(strong),
       base,
@@ -224,10 +224,21 @@ pub(super) unsafe fn promote<T>(
   data: *const (),
   len: usize,
 ) -> *const () {
-  let candidate = Box::into_raw(Box::new(Vector::<T>::parts(owner, data, len, 2)));
+  // SAFETY: The candidate represents this source plus the caller's new peer.
+  unsafe { publish(slot, owner, Vector::<T>::parts(owner, data, len, 2)) }
+}
+
+// The expected word belongs to the borrowed source. Its replacement must
+// describe the same buffer with one reference for the source and one for the peer.
+pub(super) unsafe fn publish<T>(
+  slot: &AtomicPtr<()>,
+  expected: *const (),
+  candidate: Vector<T>,
+) -> *const () {
+  let candidate = Box::into_raw(Box::new(candidate));
   let published = candidate.cast::<()>();
   match slot.compare_exchange(
-    owner.cast_mut(),
+    expected.cast_mut(),
     published,
     Ordering::AcqRel,
     Ordering::Acquire,

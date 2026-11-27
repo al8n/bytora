@@ -221,6 +221,7 @@ pub struct Layout<T, S: InlineSize> {
 
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
+  const TWO_WORD_VEC: bool = cfg!(smol_slice_atomic) && S::HANDLE_BYTES == 2 * size_of::<usize>();
   const FITS_EXTERNAL: bool = S::HANDLE_BYTES >= 3 * size_of::<usize>();
   const PACKED_LEN: bool = S::HANDLE_BYTES == 3 * size_of::<usize>();
   pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::HANDLE_BYTES <= 32;
@@ -277,6 +278,15 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   const fn inline_tag(tag: NonZeroU8) -> bool {
+    if Self::TWO_WORD_VEC {
+      // Tiny inline endpoints set bit 6. A sixteen-byte inline handle
+      // has a one-byte endpoint in the range 1 through 15.
+      return if size_of::<S::Cursor>() == 0 {
+        tag.get() & 0xc0 == TINY_INLINE
+      } else {
+        tag.get() <= Self::PAYLOAD_BYTES as u8 + 1
+      };
+    }
     let first_external = if Self::COMPACT_EXTERNAL {
       COMPACT_STATIC.get()
     } else {
@@ -339,6 +349,10 @@ impl<T, S: InlineSize> Layout<T, S> {
     if Self::inline_tag(self.tag) {
       let range = self.inline_range();
       return range.end - range.start;
+    }
+    #[cfg(smol_slice_atomic)]
+    if Self::TWO_WORD_VEC {
+      return self.two_word_len();
     }
     self.external_len()
   }

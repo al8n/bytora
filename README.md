@@ -183,18 +183,27 @@ builds, a constant can also read the length from the static handle itself.
 With `std` or `alloc` and shared ownership available,
 `Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. A
 handle of at least three machine words keeps the vector's allocation, even for
-a short vector or an empty vector with spare capacity. A smaller handle copies
-the elements inline when they fit. An empty vector without an allocation and
-short vectors of zero-sized elements can also use inline storage.
+a short vector or an empty vector with spare capacity. On targets with suitable
+pointer alignment, a two-word handle also keeps an allocated vector of non-zero-sized
+elements up to `(1 << (usize::BITS / 2 - 1)) - 1` elements. This covers
+2,147,483,647 elements on 64-bit targets and 32,767 on 32-bit targets. Smaller
+handles can copy fitting elements inline. An empty vector without an allocation
+and short vectors of zero-sized elements can also use inline storage.
 
-On targets with suitable pointer alignment, an exact-capacity vector of
-non-zero-sized elements needs no additional allocation on adoption or drop.
+For an exact-capacity vector, two-word adoption and unique conversion back
+into a vector need no additional allocation. The first share or in-place
+narrowing allocates a reference-counted owner. All subwindows share the
+original data.
+
+In a handle of at least three words on targets with suitable pointer alignment,
+an exact-capacity vector of non-zero-sized elements needs no additional
+allocation on adoption or drop.
 The descriptor records skipped prefixes and truncated suffixes of up to
 `(1 << ((usize::BITS - 2) / 2)) - 1` elements each. The first clone, shared
 range, or larger window adjustment allocates a reference-counted owner.
 Concurrent first clones can allocate competing owners and publish only one.
 
-For a vector with spare capacity, adoption initializes the owner immediately.
+Adopting a vector with spare capacity initializes the owner immediately.
 It uses aligned space beyond the initialized elements when the four-word owner
 fits, and allocates a separate owner otherwise. Clones and ranges then need no
 additional allocation. Shared zero-sized vectors and exact-capacity vectors on
@@ -203,7 +212,8 @@ Every shared range keeps an independent cursor. The final handle owns the
 entire original vector allocation, including its spare capacity.
 
 `try_from_shared_vec` always uses external storage, even for short inputs,
-and accepts any `T: Send + Sync`. `Slice::from_owner` and `try_from_owner`
+and accepts any `T: Send + Sync` within the handle's vector limits. Boxed
+slices follow the same limits. `Slice::from_owner` and `try_from_owner`
 keep an `AsRef<[T]> + Send + 'static` owner alive without copying its slice;
 their elements must be `Sync`. Shared ownership and its target requirements
 are described under [Features and targets](#features-and-targets).
@@ -244,8 +254,9 @@ assert!(Rc::ptr_eq(&values, &tail.into_original_rc()));
 # }
 ```
 
-Shared storage requires a handle of at least three machine words and a length
-of at most `isize::MAX` elements. If the elements need shared storage and the
+Static borrows, Arc slices, and custom owners require a handle of at least
+three machine words and a length of at most `isize::MAX` elements.
+If the elements need shared storage and the
 handle or length cannot accommodate them, the constructor returns the original
 vector in `Err`.
 The default `Slice<u8>` on a 64-bit target keeps up to 22 bytes inline.
@@ -342,10 +353,13 @@ can freeze.
 
 With shared ownership, `try_freeze_shared` accepts any `Send + Sync` element
 type for any budget. It preserves the allocation of a heap window and moves
-the elements of a nonempty inline window into shared storage. A shared
-descriptor needs three machine words and a length of at most `isize::MAX`.
-A two-word mutable handle can spill, but a request to freeze that spill returns
-the original handle through either fallible method. `SliceMut::into_vec` reuses
+the elements of a nonempty inline window into shared storage when three
+words are available. A two-word heap window can also freeze a unique
+allocation if it owns a contiguous initialized prefix from the allocation base
+and the prefix fits the two-word vector limits. Its visible window can start
+anywhere in that prefix and retains its address. Unsupported windows,
+including those with live mutable siblings, are returned intact.
+`SliceMut::into_vec` reuses
 a unique heap allocation where possible and otherwise moves its elements to a
 new vector without requiring `Clone`.
 
