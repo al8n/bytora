@@ -805,7 +805,7 @@ impl<S: InlineSize> SliceMut<u8, S> {
 }
 
 impl<T> SliceMut<T, typenum::U0> {
-  /// Creates an allocation-free three-word buffer for any element type.
+  /// Creates an allocation-free four-word buffer for any element type.
   pub const fn empty() -> Self {
     Self::blank()
   }
@@ -846,6 +846,6 @@ impl<T> From<Vec<T>> for SliceMut<T, typenum::U0> {
   fn from(values: Vec<T>) -> Self {
     Self::try_from_vec(values)
       .ok()
-      .expect("three-word mutable handle fits a vector")
+      .expect("zero-budget mutable handle fits a vector")
   }
 }

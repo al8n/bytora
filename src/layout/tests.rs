@@ -31,6 +31,7 @@ fn external_lengths_round_trip_on_every_descriptor_tier() {
     check::<U132>(true);
     check::<Diff<U2048, U4>>(true);
   }
+  check::<typenum::U0>(true);
   check::<U8>(false);
   check::<U16>(size_of::<usize>() == 4);
   check::<U24>(true);
@@ -67,6 +68,10 @@ fn compact_static_windows_cross_the_fast_tag_length_boundary() {
   }
   check::<typenum::U0>();
   check::<crate::DefaultSize>();
+  #[cfg(target_pointer_width = "32")]
+  check::<U12>();
+  #[cfg(target_pointer_width = "64")]
+  check::<U24>();
   check::<U32>();
 }
 
@@ -108,6 +113,7 @@ fn moved_external_prefix_preserves_pointer_provenance() {
     check::<U132>();
     check::<Diff<U2048, U4>>();
   }
+  check::<typenum::U0>();
   check::<U24>();
   check::<U64>();
   check::<U136>();

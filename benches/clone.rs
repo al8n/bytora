@@ -226,7 +226,7 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
   }
 
   let mut lengths = vec![SHORT, capacity, 0, 1, capacity + 1, MATCHED_HANDLE];
-  if handle_size == size_of::<Slice<u8>>() {
+  if handle_size == 3 * size_of::<usize>() {
     lengths.push(MEDIUM);
   }
   for len in unique_lengths(lengths) {
@@ -596,7 +596,10 @@ fn array_copy<const N: usize>(group: &mut BenchmarkGroup<'_, WallTime>, method: 
 fn clone_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone");
   #[cfg(target_pointer_width = "32")]
-  inline(&mut group, SliceN::<u8, 4>::try_from_slice);
+  {
+    inline(&mut group, SliceN::<u8, 4>::try_from_slice);
+    inline(&mut group, SliceN::<u8, 12>::try_from_slice);
+  }
   inline(&mut group, SliceN::<u8, 8>::try_from_slice);
   inline(&mut group, SliceN::<u8, 16>::try_from_slice);
   #[cfg(target_pointer_width = "32")]
@@ -604,10 +607,7 @@ fn clone_benches(c: &mut Criterion) {
     inline(&mut group, SliceN::<u8, 20>::try_from_slice);
     inline(&mut group, SliceN::<u8, 28>::try_from_slice);
   }
-  inline(&mut group, Slice::<u8>::try_from_slice);
-  if size_of::<Slice<u8>>() != 24 {
-    inline(&mut group, SliceN::<u8, 24>::try_from_slice);
-  }
+  inline(&mut group, SliceN::<u8, 24>::try_from_slice);
   inline(&mut group, SliceN::<u8, MATCHED_HANDLE>::try_from_slice);
   inline(&mut group, SliceN::<u8, 64>::try_from_slice);
   inline(&mut group, SliceN::<u8, 128>::try_from_slice);
@@ -643,8 +643,8 @@ fn clone_benches(c: &mut Criterion) {
 
   let lengths = [
     SHORT,
-    Slice::<u8>::INLINE_CAPACITY,
-    Slice::<u8>::INLINE_CAPACITY + 1,
+    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
+    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
     MEDIUM,
     SliceN::<u8, 64>::INLINE_CAPACITY,
     SliceN::<u8, 128>::INLINE_CAPACITY,
@@ -662,8 +662,8 @@ fn clone_benches(c: &mut Criterion) {
   }
   let lengths = [
     SHORT,
-    Slice::<u8>::INLINE_CAPACITY,
-    Slice::<u8>::INLINE_CAPACITY + 1,
+    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
+    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
     MEDIUM,
   ]
   .into_iter()

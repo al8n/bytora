@@ -20,15 +20,16 @@ pub use layout::mutable::WritableSize;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
 pub use typenum;
 #[cfg(target_pointer_width = "32")]
-use typenum::U12 as DefaultSize;
+use typenum::U16 as DefaultSize;
 #[cfg(target_pointer_width = "64")]
-use typenum::U24 as DefaultSize;
+use typenum::U32 as DefaultSize;
 
 /// A slice with inline storage for `Copy` elements, static borrows, and optional heap storage.
 ///
 /// A positive `S` is the exact size in bytes of the handle and its `Option`. It
-/// defaults to three machine words, the size of a `Vec<T>`. [`typenum::U0`]
-/// disables inline elements and keeps the three-word handle.
+/// defaults to four machine words, the size of `bytes::Bytes` (16 bytes on
+/// 32-bit targets and 32 bytes on 64-bit targets). [`typenum::U0`] has the same
+/// size and disables inline elements.
 /// Use [`SliceN`] for a numeric byte budget.
 /// An inline clone copies the whole handle. Static and heap-backed clones
 /// share their elements. Each clone has an independent cursor.
@@ -165,7 +166,8 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
 ///
 /// Positive budgets store `Copy` elements inline. [`typenum::U0`] disables
 /// inline elements and can own a vector of any element type with `alloc` or
-/// `std`. The default budget is three machine words, the size of a `Vec<T>`.
+/// `std`. The default and zero budgets use four machine words, the size of
+/// `bytes::Bytes` (16 bytes on 32-bit targets and 32 bytes on 64-bit targets).
 /// Use [`SliceMutN`] for a numeric byte budget.
 pub type SliceMut<T, S = DefaultSize> =
   layout::mutable::Mutable<T, S, <S as InlineSize>::Mutable<T>>;
@@ -174,18 +176,10 @@ pub type SliceMut<T, S = DefaultSize> =
 pub type SliceMutN<T, const N: usize> = SliceMut<T, <[u8; N] as AssocInlineSize>::Size>;
 
 const _: () = {
-  assert!(size_of::<Slice<u32>>() == 3 * size_of::<usize>());
-  assert!(size_of::<SliceMut<u32>>() == 3 * size_of::<usize>());
-  assert!(size_of::<Option<Slice<u32>>>() == 3 * size_of::<usize>());
-  assert!(size_of::<Option<SliceMut<u32>>>() == 3 * size_of::<usize>());
-};
-
-#[cfg(any(feature = "std", feature = "alloc"))]
-const _: () = {
-  assert!(size_of::<Slice<u32>>() == size_of::<std::vec::Vec<u32>>());
-  assert!(size_of::<SliceMut<u32>>() == size_of::<std::vec::Vec<u32>>());
-  assert!(size_of::<Option<Slice<u32>>>() == size_of::<std::vec::Vec<u32>>());
-  assert!(size_of::<Option<SliceMut<u32>>>() == size_of::<std::vec::Vec<u32>>());
+  assert!(size_of::<Slice<u32>>() == 4 * size_of::<usize>());
+  assert!(size_of::<SliceMut<u32>>() == 4 * size_of::<usize>());
+  assert!(size_of::<Option<Slice<u32>>>() == 4 * size_of::<usize>());
+  assert!(size_of::<Option<SliceMut<u32>>>() == 4 * size_of::<usize>());
 };
 
 #[cfg(test)]

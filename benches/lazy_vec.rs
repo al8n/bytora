@@ -23,10 +23,16 @@ mod ownership {
   const DIRECT_BATCH: usize = 64;
   type DefaultSlice = Slice<u8>;
   type ZeroSlice = Slice<u8, typenum::U0>;
+  type PackedSlice = SliceN<u8, { 3 * size_of::<usize>() }>;
   type WideSlice = SliceN<u8, 32>;
+  const PACKED_LABEL: &str = if cfg!(target_pointer_width = "32") {
+    "slice_12"
+  } else {
+    "slice_24"
+  };
 
-  // All construction and clone results use the same output stride, including
-  // the default three-word Slice. Round trips all return a Vec directly.
+  // All construction and clone results use the same output stride.
+  // Round trips all return a Vec directly.
   const _: () = {
     assert!(size_of::<DefaultSlice>() <= OUTPUT_BYTES);
     assert!(size_of::<WideSlice>() == OUTPUT_BYTES);
@@ -382,6 +388,10 @@ mod ownership {
       <DefaultSlice as SliceSize>::Size,
       { OUTPUT_BYTES - size_of::<DefaultSlice>() },
     >(&mut group, "slice_default");
+    short_slice_cases::<
+      <PackedSlice as SliceSize>::Size,
+      { OUTPUT_BYTES - size_of::<PackedSlice>() },
+    >(&mut group, PACKED_LABEL);
     short_slice_cases::<typenum::U32, { OUTPUT_BYTES - size_of::<WideSlice>() }>(
       &mut group, "slice_32",
     );
@@ -409,6 +419,7 @@ mod ownership {
     for kind in [Capacity::Exact, Capacity::OneSpare, Capacity::Spare] {
       slice_preflight::<<DefaultSlice as SliceSize>::Size>(kind);
       slice_preflight::<typenum::U0>(kind);
+      slice_preflight::<<PackedSlice as SliceSize>::Size>(kind);
       slice_preflight::<<WideSlice as SliceSize>::Size>(kind);
       #[cfg(target_pointer_width = "32")]
       {
@@ -421,6 +432,7 @@ mod ownership {
     }
     drop_preflight::<<DefaultSlice as SliceSize>::Size>();
     drop_preflight::<typenum::U0>();
+    drop_preflight::<<PackedSlice as SliceSize>::Size>();
     drop_preflight::<<WideSlice as SliceSize>::Size>();
 
     let mut group = c.benchmark_group("lazy_vec");
@@ -437,6 +449,13 @@ mod ownership {
         "slice_zero",
         kind,
         |values| ZeroSlice::try_from_vec(values).unwrap(),
+        |slice| slice.try_into_vec().ok().expect("unique slice"),
+      );
+      cases::<PackedSlice, { OUTPUT_BYTES - size_of::<PackedSlice>() }>(
+        &mut group,
+        PACKED_LABEL,
+        kind,
+        |values| PackedSlice::try_from_vec(values).unwrap(),
         |slice| slice.try_into_vec().ok().expect("unique slice"),
       );
       cases::<WideSlice, { OUTPUT_BYTES - size_of::<WideSlice>() }>(
