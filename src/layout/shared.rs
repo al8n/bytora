@@ -24,11 +24,90 @@ mod vector;
 #[cfg(any(feature = "std", feature = "alloc"))]
 type HandleWord = core::mem::MaybeUninit<[u8; size_of::<usize>()]>;
 
+// Vec's accessors supply the raw parts independently of its private field
+// order. This record describes the initialized words of the resulting handle.
+#[cfg(smol_slice_atomic)]
+#[repr(C)]
+struct WideVecWords {
+  prefix: ExternalPrefix,
+  len: usize,
+  tag_word: usize,
+}
+
+#[cfg(smol_slice_atomic)]
+impl WideVecWords {
+  fn new<T>(data: *const T, owner: *const (), len: usize, tag: u8) -> Self {
+    Self {
+      prefix: ExternalPrefix {
+        data: data.cast(),
+        owner,
+      },
+      len,
+      tag_word: ((tag as usize) << super::TAG_SHIFT).to_le(),
+    }
+  }
+
+  #[inline(never)]
+  fn uncached<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
+    let len = values.len();
+    if values.capacity() == len {
+      let base = values.as_mut_ptr();
+      core::mem::forget(values);
+      (base, vector::full_owner(len))
+    } else {
+      vector::from_vec(values)
+    }
+  }
+}
+
 // Strong Arc pointers are non-null and aligned. No actual managed pointer
 // tagged by adding one can have this address. The sentinel is never dereferenced.
 const STATIC_OWNER: *const () = ptr::without_provenance(1);
 
 impl<T, S: InlineSize> Layout<T, S> {
+  #[cfg(smol_slice_atomic)]
+  #[inline(always)]
+  fn adopt_wide_vec(mut values: Vec<T>) -> Self {
+    const {
+      assert!(size_of::<WideVecWords>() == 4 * size_of::<usize>());
+    }
+    assert!(S::HANDLE_BYTES >= 4 * size_of::<usize>() && S::HANDLE_BYTES <= 128);
+    assert!(vector::AVAILABLE && size_of::<T>() != 0);
+    let len = values.len();
+    let capacity = values.capacity();
+    let (data, owner) = if capacity == len && len <= vector::MAX_FULL_LEN {
+      let data = values.as_mut_ptr();
+      core::mem::forget(values);
+      (data, vector::full_owner(len))
+    } else {
+      WideVecWords::uncached(values)
+    };
+    let tag = if capacity == 0 {
+      NonZeroU8::MIN.get()
+    } else {
+      EXTERNAL
+    };
+    let parts = WideVecWords::new(data, owner, len, tag);
+    let mut storage = core::mem::MaybeUninit::<Self>::uninit();
+    let dest = storage.as_mut_ptr();
+    let count = S::HANDLE_BYTES / size_of::<usize>();
+    // SAFETY: Both records are repr(C), and verify_size checks the handle's
+    // word alignment, cursor and tag offsets. The first three words hold the
+    // typed pointer prefix and native length. At these sizes the final word
+    // covers the complete cursor and tag, with a nonzero final address byte
+    // on either endian. Any intervening words belong to the MaybeUninit payload.
+    unsafe {
+      if count == 4 {
+        dest.cast::<WideVecWords>().write(parts);
+      } else {
+        dest.cast::<ExternalPrefix>().write(parts.prefix);
+        dest.cast::<usize>().add(2).write(parts.len);
+        dest.cast::<usize>().add(count - 1).write(parts.tag_word);
+      }
+      storage.assume_init()
+    }
+  }
+
   const fn try_static(data: *const T, len: usize) -> Option<Self> {
     if !Self::FITS_EXTERNAL || len > isize::MAX as usize {
       return None;
@@ -531,13 +610,23 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Copy + Send + Sync,
   {
-    if Layout::<T, S>::fits_two_word_vec(values.len()) && values.capacity() != 0 {
+    if Layout::<T, S>::fits_two_word_vec(0) {
+      if !Layout::<T, S>::fits_two_word_vec(values.len()) {
+        // An unrepresentable non-ZST vector cannot fit inline in two words either.
+        return Err(values);
+      }
       return Ok(Self {
-        layout: Layout::two_word_vec(values),
+        layout: Layout::two_word_vec::<true>(values),
       });
     }
     if Layout::<T, S>::FITS_EXTERNAL {
       if size_of::<T>() != 0 {
+        if vector::AVAILABLE && S::HANDLE_BYTES >= 4 * size_of::<usize>() && S::HANDLE_BYTES <= 128
+        {
+          return Ok(Self {
+            layout: Layout::adopt_wide_vec(values),
+          });
+        }
         let empty = values.capacity() == 0;
         if !vector::AVAILABLE && empty {
           return Ok(Self::new());
@@ -602,7 +691,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     let len = values.len();
     if Layout::<T, S>::fits_two_word_vec(len) {
       return Ok(Self {
-        layout: Layout::two_word_vec(values),
+        layout: Layout::two_word_vec::<false>(values),
       });
     }
     // A non-ZST Vec's allocation already limits its length to isize::MAX.
@@ -618,14 +707,19 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[inline(always)]
   fn adopt_vec(mut values: Vec<T>) -> Layout<T, S> {
     let len = values.len();
-    let data = owner::initial_data(values.as_mut_ptr());
-    let owner = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
+    let (data, owner) = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
+      let data = values.as_mut_ptr();
       core::mem::forget(values);
-      vector::full_owner(len)
+      (data, vector::full_owner(len))
     } else {
       vector::from_vec(values)
     };
-    Layout::external(data, owner, len, NonZeroU8::new(EXTERNAL).unwrap())
+    Layout::external(
+      owner::initial_data(data),
+      owner,
+      len,
+      NonZeroU8::new(EXTERNAL).unwrap(),
+    )
   }
 
   #[cfg(smol_slice_atomic)]
@@ -727,30 +821,37 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   #[cfg(smol_slice_atomic)]
   #[inline(always)]
-  unsafe fn copy_compact_vec(&self, owner: *const ()) -> Self {
-    let word = size_of::<*const ()>();
+  unsafe fn copy_retained_descriptor(&self, owner: *const ()) -> Self {
+    let word = size_of::<usize>();
     let src = ptr::from_ref(self).cast::<u8>();
     let mut copy = core::mem::MaybeUninit::<Self>::uninit();
     let dst = copy.as_mut_ptr().cast::<u8>();
-    // SAFETY: The caller retained this compact external descriptor's vector
-    // header. Copy the immutable data word and bytes beyond its owner,
-    // preserving the tag, padding, and provenance. Only the atomic load
-    // accesses the original owner slot, including during concurrent promotion.
+    // SAFETY: The caller has retained this external window. Its data, length
+    // and final word (including the entire cursor and tag) are immutable.
+    // The two-word prefix fits every such handle. Only the atomic load reads
+    // the potentially promotable owner; its retained result replaces that slot.
+    // The middle of a wide external payload may remain uninitialized.
     unsafe {
       ptr::copy_nonoverlapping(src, dst, word);
       dst.add(word).cast::<*const ()>().write_unaligned(owner);
-      ptr::copy_nonoverlapping(
-        src.add(2 * word),
-        dst.add(2 * word),
-        size_of::<Self>() - 2 * word,
-      );
+      if Layout::<T, S>::COMPACT_EXTERNAL {
+        ptr::copy_nonoverlapping(
+          src.add(2 * word),
+          dst.add(2 * word),
+          size_of::<Self>() - 2 * word,
+        );
+      } else {
+        ptr::copy_nonoverlapping(src.add(2 * word), dst.add(2 * word), word);
+        let last = size_of::<Self>() - word;
+        ptr::copy_nonoverlapping(src.add(last), dst.add(last), word);
+      }
       copy.assume_init()
     }
   }
 
   #[cfg(smol_slice_atomic)]
   #[inline(never)]
-  unsafe fn clone_compact_tagged(&self, owner: *const ()) -> Self {
+  unsafe fn clone_tagged_owner(&self, owner: *const ()) -> Self {
     if vector::raw(owner) {
       // SAFETY: The source pins this window and its raw geometry. Promotion
       // returns a reference for the peer, even when another clone wins.
@@ -767,7 +868,7 @@ impl<T, S: InlineSize> Slice<T, S> {
           vector::promote::<T>(slot, owner, data, self.layout.external_len())
         }
       };
-      return unsafe { self.copy_compact_vec(owner) };
+      return unsafe { self.copy_retained_descriptor(owner) };
     }
     if arc::is_arc(owner) {
       // SAFETY: The enclosing handle keeps the original Arc alive.
@@ -776,14 +877,21 @@ impl<T, S: InlineSize> Slice<T, S> {
       // SAFETY: The caller supplied a tagged pointer and excluded raw geometry.
       unsafe { (owner::managed_operations::<T>(owner).clone)(owner) };
     }
-    // SAFETY: Both managed and static descriptors have immutable owner slots.
-    unsafe { ptr::read(self) }
+    // SAFETY: These owner slots are immutable. Compact descriptors fit in a
+    // few words; wide descriptors only need the prefix, length and final word.
+    unsafe {
+      if Layout::<T, S>::COMPACT_EXTERNAL {
+        ptr::read(self)
+      } else {
+        self.copy_retained_descriptor(owner)
+      }
+    }
   }
 
-  // On AArch64 the call boundary keeps a compact handle's transfer together
-  // across the conditional retain and the caller's subsequent drop.
+  // A call boundary keeps the inline payload copy separate from construction
+  // of a sparse external descriptor in the caller's return slot on AArch64.
   #[cfg_attr(all(target_arch = "aarch64", smol_slice_atomic), inline(never))]
-  pub(crate) fn clone_compact(&self) -> Self {
+  pub(crate) fn clone_descriptor(&self) -> Self {
     #[cfg(smol_slice_atomic)]
     if self.layout.uses_external_owner() {
       let owner = if vector::AVAILABLE {
@@ -799,10 +907,10 @@ impl<T, S: InlineSize> Slice<T, S> {
       // vector headers remain. Acquire observes any published promotion.
       unsafe {
         if owner.addr() & 1 != 0 || vector::raw(owner) {
-          return self.clone_compact_tagged(owner);
+          return self.clone_tagged_owner(owner);
         }
         vector::Vector::<T>::retain(owner);
-        return self.copy_compact_vec(owner);
+        return self.copy_retained_descriptor(owner);
       }
     }
     // SAFETY: An immutable inline window admits elements under a Copy proof
@@ -810,6 +918,30 @@ impl<T, S: InlineSize> Slice<T, S> {
     // and every managed owner has been retained.
     // Reading Self preserves the window, pointer provenance and uninitialized bytes.
     unsafe { ptr::read(self) }
+  }
+
+  #[cfg(smol_slice_atomic)]
+  #[inline(never)]
+  pub(crate) fn replace_external_clone(&mut self, source: &Self) {
+    let data = source.layout.data().cast();
+    let len = source.layout.external_len();
+    let owner = source.layout.retain_owner(0, 0);
+    let previous = if self.layout.uses_external_owner() {
+      Some((
+        *self.layout.external_prefix_mut(),
+        self.layout.external_len(),
+      ))
+    } else {
+      None
+    };
+    // A bare Layout has no destructor. Install the newly retained window first
+    // so even an unwinding destructor leaves a valid destination.
+    self.layout = Layout::external(data, owner, len, NonZeroU8::new(EXTERNAL).unwrap());
+    if let Some((prefix, len)) = previous {
+      // SAFETY: The exclusive destination transferred its old descriptor here.
+      // Inline elements are Copy; all other owners are released exactly once.
+      unsafe { owner::release_owner::<T>(prefix.owner, prefix.data, len) };
+    }
   }
 
   pub(crate) fn clone_shared(&self) -> Self {

@@ -127,8 +127,8 @@ impl<T, S: InlineSize> Slice<T, S> {
 impl<T, S: InlineSize> Clone for Slice<T, S> {
   #[inline]
   fn clone(&self) -> Self {
-    if Layout::<T, S>::COMPACT_EXTERNAL {
-      return self.clone_compact();
+    if Layout::<T, S>::COMPACT_EXTERNAL || Layout::<T, S>::SPARSE_CLONE {
+      return self.clone_descriptor();
     }
     if !self.layout.is_inline() {
       return self.clone_shared();
@@ -140,6 +140,17 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
 
   #[inline]
   fn clone_from(&mut self, source: &Self) {
+    #[cfg(smol_slice_atomic)]
+    if Layout::<T, S>::SPARSE_CLONE {
+      if source.layout.is_inline() {
+        *self = Self {
+          layout: source.layout.clone_inline(),
+        };
+      } else {
+        self.replace_external_clone(source);
+      }
+      return;
+    }
     // Keep the external assignment separate so wide shared descriptors can be
     // written without also moving the unused inline storage.
     if Layout::<T, S>::COMPACT_EXTERNAL || source.layout.is_inline() {

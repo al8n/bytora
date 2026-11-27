@@ -98,21 +98,22 @@ impl<T, S: InlineSize> Layout<T, S> {
     layout
   }
 
-  pub(super) fn two_word_vec(mut values: Vec<T>) -> Self {
+  pub(super) fn two_word_vec<const INLINE_EMPTY: bool>(mut values: Vec<T>) -> Self {
     let len = values.len();
     if values.capacity() != len {
       // Positive spare capacity uses the same embedded-or-boxed owner as wider handles.
-      return Self::two_words(vector::from_vec(values).cast_mut(), window(0, len));
+      return Self::two_words(vector::from_vec(values).1.cast_mut(), window(0, len));
     }
     let base = values.as_mut_ptr().cast::<()>();
     let adjustment = usize::from(base.addr() & 1 == 0);
     let state = base.wrapping_byte_add(adjustment);
-    let tag = if adjustment == 0 {
-      ODD_FULL
-    } else if (1..=64).contains(&len) {
+    let tag = if INLINE_EMPTY && len == 0 {
+      // The fully initialized zero length supplies every inline cursor byte.
+      Self::empty_inline().tag.get()
+    } else if (1..=64).contains(&len) && adjustment != 0 {
       SHORT + (len - 1) as u8
     } else {
-      EVEN_FULL
+      EVEN_FULL | (base.addr() & 1) as u8
     };
     let meta = ((tag as usize) << super::super::TAG_SHIFT) | len;
     let layout = Self::two_words(state, meta);
