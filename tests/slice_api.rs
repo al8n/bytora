@@ -302,3 +302,31 @@ fn owned_split_edges_and_clear_release_exactly_the_expected_owner() {
   drop(suffix);
   assert_eq!(drops.load(SeqCst), 10);
 }
+#[cfg(all(feature = "std", smol_slice_atomic))]
+#[test]
+fn unallocated_vecs_clone_and_thaw_without_allocating() {
+  #[derive(Clone, Copy)]
+  #[repr(align(128))]
+  struct Aligned {
+    _value: u8,
+  }
+
+  fn check<S: smol_slice::InlineSize>() {
+    let allocations = allocation_counter::measure(|| {
+      let empty = smol_slice::Slice::<Aligned, S>::try_from_vec(Vec::new())
+        .ok()
+        .unwrap();
+      let clone = core::hint::black_box(&empty).clone();
+      assert!(clone.is_unique() && clone.is_empty());
+      assert!(clone.as_slice().as_ptr().is_aligned());
+      let mutable = clone.try_into_mut().ok().unwrap();
+      assert_eq!(mutable.capacity(), 0);
+    });
+    assert_eq!(allocations.count_total, 0);
+  }
+
+  check::<smol_slice::typenum::U0>();
+  check::<smol_slice::typenum::U24>();
+  check::<smol_slice::typenum::U32>();
+  check::<smol_slice::typenum::U136>();
+}
