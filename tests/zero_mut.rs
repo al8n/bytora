@@ -1,5 +1,5 @@
+use bytora::{SliceMut, SliceMutN, typenum::U24};
 use core::{cell::Cell, mem::needs_drop};
-use smol_slice::{SliceMut, SliceMutN, typenum::U24};
 
 #[test]
 fn empty_mutable_zero_budget_matches_bytes_and_accepts_any_alignment() {

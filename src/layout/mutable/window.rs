@@ -6,7 +6,7 @@ use core::{
 };
 use std::vec::Vec;
 
-#[cfg(smol_slice_atomic)]
+#[cfg(bytora_atomic)]
 use super::super::shared::Arc;
 
 // Only the allocation, never its elements, belongs to this object. In particular,
@@ -75,7 +75,7 @@ unsafe impl<T> Sync for Allocation<T> {}
 
 enum Buffer<T> {
   Exclusive(Allocation<T>),
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   Shared(Arc<Allocation<T>>),
 }
 
@@ -83,7 +83,7 @@ impl<T> Buffer<T> {
   fn allocation(&self) -> &Allocation<T> {
     match self {
       Self::Exclusive(allocation) => allocation,
-      #[cfg(smol_slice_atomic)]
+      #[cfg(bytora_atomic)]
       Self::Shared(allocation) => allocation,
     }
   }
@@ -91,12 +91,12 @@ impl<T> Buffer<T> {
   fn exclusive(&mut self) -> Option<&mut Allocation<T>> {
     match self {
       Self::Exclusive(allocation) => Some(allocation),
-      #[cfg(smol_slice_atomic)]
+      #[cfg(bytora_atomic)]
       Self::Shared(allocation) => Arc::get_mut(allocation),
     }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   fn share(&mut self) -> Self {
     if let Self::Exclusive(allocation) = self {
       // Allocation and the uniqueness check must finish while the original
@@ -194,7 +194,7 @@ impl<T> Window<T> {
     }
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub(crate) fn keep_range(mut self, range: Range<usize>) -> Self {
     assert!(range.start <= range.end && range.end <= self.len());
     self.truncate(range.end);
@@ -310,7 +310,7 @@ impl<T> Window<T> {
 
   // A complete initialized prefix can become a Vec without moving anything.
   // A former sibling may leave uninitialized slots before owned_start.
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub(super) fn take_vec_prefix(
     &mut self,
     fits: impl FnOnce(usize) -> bool,
@@ -331,7 +331,7 @@ impl<T> Window<T> {
     assert!(at <= self.capacity(), "split_off past capacity");
     let boundary = self.start + at;
 
-    #[cfg(smol_slice_atomic)]
+    #[cfg(bytora_atomic)]
     let right = Self {
       buffer: self.buffer.share(),
       owned_start: boundary,
@@ -340,7 +340,7 @@ impl<T> Window<T> {
       limit: self.limit,
       element: core::marker::PhantomData,
     };
-    #[cfg(not(smol_slice_atomic))]
+    #[cfg(not(bytora_atomic))]
     let right = {
       // Without a thread-safe shared allocation owner, move just the suffix.
       let len = self.end.saturating_sub(boundary);
@@ -361,7 +361,7 @@ impl<T> Window<T> {
     right
   }
 
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   pub(super) fn try_unsplit(&mut self, other: &mut Self) -> bool {
     let (Buffer::Shared(left), Buffer::Shared(right)) = (&self.buffer, &other.buffer) else {
       return false;

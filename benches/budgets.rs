@@ -1,12 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
-#[cfg(smol_slice_atomic)]
+#[cfg(bytora_atomic)]
 mod ownership {
   use bytes::Bytes;
+  use bytora::{AssocInlineSize, InlineSize, Slice, SliceN};
   use criterion::{
     BatchSize, Bencher, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime,
   };
-  use smol_slice::{AssocInlineSize, InlineSize, Slice, SliceN};
   use std::{hint::black_box, mem::size_of, ops::Range};
 
   // Padded control uses the same input Option and handle-output stride.
@@ -79,7 +79,7 @@ mod ownership {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
   }
 
-  impl Adopt for Slice<u8, smol_slice::typenum::U0> {
+  impl Adopt for Slice<u8, bytora::typenum::U0> {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       <Self as TryFrom<Vec<u8>>>::try_from(values)
     }
@@ -316,9 +316,9 @@ mod ownership {
 }
 
 fn benchmarks(c: &mut Criterion) {
-  #[cfg(smol_slice_atomic)]
+  #[cfg(bytora_atomic)]
   ownership::benchmarks(c);
-  #[cfg(not(smol_slice_atomic))]
+  #[cfg(not(bytora_atomic))]
   let _ = c;
 }
 
