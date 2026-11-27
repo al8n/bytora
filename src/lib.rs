@@ -13,29 +13,31 @@ extern crate std;
 
 mod layout;
 use layout::Layout;
-pub use layout::{MAX_HANDLE_BYTES, SupportedBytes};
+pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
+pub use typenum;
+#[cfg(target_pointer_width = "32")]
+use typenum::U12 as DefaultSize;
+#[cfg(target_pointer_width = "64")]
+use typenum::U24 as DefaultSize;
 
 /// An owned slice with inline storage for `Copy` elements.
 ///
-/// `BYTES` is the exact size of the handle and its `Option`. It defaults to
-/// three machine words, the size of a `Vec<T>`. See [`SupportedBytes`] for the available sizes.
+/// `S` is the exact size in bytes of the handle and its `Option`. It defaults
+/// to three machine words, the size of a `Vec<T>`. Use [`SliceN`] for a numeric byte count.
 /// Moving the handle moves its elements. Advancing changes only the cursor.
 #[repr(transparent)]
-pub struct Slice<T, const BYTES: usize = { 3 * size_of::<usize>() }>
-where
-  [(); BYTES]: SupportedBytes,
-{
-  layout: Layout<T, BYTES>,
+pub struct Slice<T, S: InlineSize = DefaultSize> {
+  layout: Layout<T, S>,
 }
 
-impl<T, const BYTES: usize> Slice<T, BYTES>
-where
-  [(); BYTES]: SupportedBytes,
-{
+/// A [`Slice`] with a const-generic size of `N` bytes, including its cursor.
+pub type SliceN<T, const N: usize> = Slice<T, <[u8; N] as AssocInlineSize>::Size>;
+
+impl<T, S: InlineSize> Slice<T, S> {
   /// The maximum number of inline elements. Each zero-sized element counts as
   /// one payload byte. Nonzero-sized elements requiring greater alignment than
   /// the handle have capacity zero.
-  pub const INLINE_CAPACITY: usize = Layout::<T, BYTES>::INLINE_CAPACITY;
+  pub const INLINE_CAPACITY: usize = Layout::<T, S>::INLINE_CAPACITY;
 
   /// Copies `values` inline. Returns `None` if their length exceeds [`Self::INLINE_CAPACITY`].
   pub fn try_from_slice(values: &[T]) -> Option<Self>
@@ -73,22 +75,19 @@ where
 
 /// An owned slice whose inline `Copy` elements can be borrowed mutably.
 ///
-/// `BYTES` is the exact size of the handle and its `Option`. It defaults to
-/// three machine words, the size of a `Vec<T>`. See [`SupportedBytes`] for the available sizes.
+/// `S` is the exact size in bytes of the handle and its `Option`. It defaults
+/// to three machine words, the size of a `Vec<T>`. Use [`SliceMutN`] for a numeric byte count.
 #[repr(transparent)]
-pub struct SliceMut<T, const BYTES: usize = { 3 * size_of::<usize>() }>
-where
-  [(); BYTES]: SupportedBytes,
-{
-  inner: Slice<T, BYTES>,
+pub struct SliceMut<T, S: InlineSize = DefaultSize> {
+  inner: Slice<T, S>,
 }
 
-impl<T, const BYTES: usize> SliceMut<T, BYTES>
-where
-  [(); BYTES]: SupportedBytes,
-{
+/// A [`SliceMut`] with a const-generic size of `N` bytes, including its cursor.
+pub type SliceMutN<T, const N: usize> = SliceMut<T, <[u8; N] as AssocInlineSize>::Size>;
+
+impl<T, S: InlineSize> SliceMut<T, S> {
   /// The maximum number of inline elements, as in [`Slice::INLINE_CAPACITY`].
-  pub const INLINE_CAPACITY: usize = Slice::<T, BYTES>::INLINE_CAPACITY;
+  pub const INLINE_CAPACITY: usize = Slice::<T, S>::INLINE_CAPACITY;
 
   /// Copies `values` inline. Returns `None` if their length exceeds [`Self::INLINE_CAPACITY`].
   pub fn try_from_slice(values: &[T]) -> Option<Self>

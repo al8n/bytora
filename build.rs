@@ -2,6 +2,20 @@ use std::{env, fmt::Write, fs, path::PathBuf};
 
 const MAX_HANDLE_BYTES: usize = 8192;
 
+// Typenum names every integer through U1024. Append low bits to those names
+// for larger sizes, including the ones absent from its const-generic mapping.
+fn typenum(bytes: usize) -> String {
+  if bytes <= 1024 {
+    format!("typenum::U{bytes}")
+  } else {
+    format!(
+      "typenum::UInt<{}, typenum::B{}>",
+      typenum(bytes / 2),
+      bytes % 2
+    )
+  }
+}
+
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
 
@@ -22,8 +36,8 @@ fn main() {
     } else {
       3
     };
-    let align = if bytes == 4 { "u32" } else { "usize" };
-    writeln!(sizes, "size!({bytes}, {cursor}, {align});").expect("writing to a String cannot fail");
+    writeln!(sizes, "size!({bytes}, {}, {cursor});", typenum(bytes))
+      .expect("writing to a String cannot fail");
   }
 
   let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));

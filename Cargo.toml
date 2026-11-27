@@ -20,6 +20,7 @@ std = []
 alloc = []
 
 [dependencies]
+typenum = { version = "1.20", default-features = false }
 
 [dev-dependencies]
 criterion = "0.8"
