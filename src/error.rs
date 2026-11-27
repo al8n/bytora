@@ -47,9 +47,10 @@ impl From<OutOfBounds> for std::io::Error {
 /// A range that is reversed, overflows `usize`, or ends past the length it was checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RangeOutOfBounds {
-  /// The start of the requested range.
+  /// The start of the requested range, or `usize::MAX` when it is past `usize::MAX`.
   pub start: usize,
-  /// The end of the requested range.
+  /// The end of the requested range, or `usize::MAX` when it is past `usize::MAX` or was not
+  /// read because the start already was.
   pub end: usize,
   /// The length that bounds the range.
   pub available: usize,

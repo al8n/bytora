@@ -326,12 +326,13 @@ fn ranged_twins_err_exactly_where_the_ranged_methods_panic() {
         }
       }
     }
-    // An endpoint past usize::MAX is reported as usize::MAX.
+    // An endpoint past usize::MAX is reported as usize::MAX, and so is an end that is not read
+    // because the start already was.
     assert_eq!(
       source
         .try_slice((Excluded(usize::MAX), Unbounded))
         .unwrap_err(),
-      RangeOutOfBounds::new(usize::MAX, len, len)
+      RangeOutOfBounds::new(usize::MAX, usize::MAX, len)
     );
     assert_eq!(
       source.try_slice(..=usize::MAX).unwrap_err(),
@@ -542,6 +543,26 @@ fn try_resize_errs_exactly_where_resize_panics() {
   }
 }
 
+// try_slice returns the error at a start past usize::MAX without reading the end bound, as slice
+// panics there without reading it.
+#[test]
+fn a_start_past_usize_max_is_refused_before_the_end_is_read() {
+  use core::ops::{Bound, RangeBounds};
+
+  struct StartOverflows;
+  impl RangeBounds<usize> for StartOverflows {
+    fn start_bound(&self) -> Bound<&usize> {
+      Bound::Excluded(&usize::MAX)
+    }
+    fn end_bound(&self) -> Bound<&usize> {
+      panic!("the end bound was read")
+    }
+  }
+  let vector = Vector::<u8>::from_static(b"bytes");
+  let error = vector.try_slice(StartOverflows).unwrap_err();
+  assert_eq!((error.start, error.end), (usize::MAX, usize::MAX));
+}
+
 // try_extend errs exactly where extend panics. Its elements are then unchanged, where extend keeps
 // what it appended before the panic, and otherwise it appends what extend appends. It reserves the
 // lower size hint first, then each further element as it comes. Counts stay small or overflow.
@@ -671,4 +692,94 @@ fn write_keeps_the_pieces_before_the_one_that_does_not_fit() {
     buffer.as_slice(),
     format!("{number}-{byte:02x}-{fits}").as_bytes()
   );
+}
+
+// A failed try_extend leaves the elements as they were. A bounded inline buffer reclaims its
+// consumed prefix before it fails, as extend does, so the capacity may have grown.
+#[test]
+fn a_failed_try_extend_leaves_the_elements_as_they_were() {
+  let mut buffer = VectorMutN::<u8, { size_of::<usize>() }>::zeroed(size_of::<usize>() - 1);
+  buffer.advance(1);
+  let capacity = buffer.capacity();
+  let elements = buffer.as_slice().to_vec();
+  // The filter hides the length, so the lower size hint is zero.
+  let more = (0..u8::MAX).filter(|_| true);
+  assert!(buffer.try_extend(more).is_err());
+  assert_eq!(buffer.as_slice(), elements.as_slice());
+  assert!(buffer.capacity() >= capacity);
+}
+
+// try_extend reserves where extend does, so it moves the elements to the front of the allocation
+// rather than grow it where extend does. Here the first reserve, for a lower size hint past the
+// spare capacity, finds a consumed prefix as long as the elements.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[test]
+fn try_extend_grows_only_where_extend_would() {
+  let build = || {
+    let mut buffer = VectorMut::<u8>::with_capacity(64);
+    buffer.resize(62, 7);
+    buffer.advance(31);
+    buffer
+  };
+  let mut panicking = build();
+  panicking.extend([1, 2, 3]);
+  let mut fallible = build();
+  fallible.try_extend([1, 2, 3]).unwrap();
+  assert_eq!(fallible, panicking);
+  assert_eq!(fallible.capacity(), panicking.capacity());
+}
+
+// try_extend drops skipped elements where extend does, before it polls the iterator again: here
+// its first reserve reclaims the prefix that holds the last strong reference, so the iterator
+// finds the value gone in both.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[test]
+fn try_extend_drops_skipped_elements_where_extend_does() {
+  use std::rc::{Rc, Weak};
+
+  // A zero budget, as elements that are not Copy need.
+  fn build() -> (VectorMutN<Option<Rc<u8>>, 0>, Weak<u8>) {
+    let value = Rc::new(7);
+    let weak = Rc::downgrade(&value);
+    let mut buffer = VectorMutN::<Option<Rc<u8>>, 0>::with_capacity(64);
+    buffer.resize(1, Some(value));
+    buffer.resize(64, None);
+    // A full buffer whose skipped prefix is as long as its elements.
+    buffer.advance(32);
+    assert_eq!(buffer.capacity(), buffer.len());
+    (buffer, weak)
+  }
+  let (mut panicking, weak) = build();
+  panicking.extend(core::iter::once_with(|| weak.upgrade()));
+  let (mut fallible, weak) = build();
+  fallible
+    .try_extend(core::iter::once_with(|| weak.upgrade()))
+    .unwrap();
+  assert_eq!(fallible, panicking);
+  assert!(fallible.as_slice().iter().all(Option::is_none));
+}
+
+// try_extend polls an iterator no further once it has ended, as extend does, even one that
+// promises to stay ended.
+#[test]
+fn try_extend_polls_an_ended_iterator_no_further() {
+  struct Ended<'a>(&'a core::cell::Cell<usize>);
+  impl Iterator for Ended<'_> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+      self.0.set(self.0.get() + 1);
+      None
+    }
+  }
+  impl core::iter::FusedIterator for Ended<'_> {}
+
+  fn check<S: InlineSize>(mut buffer: VectorMut<u8, S>) {
+    let polls = core::cell::Cell::new(0);
+    buffer.try_extend(Ended(&polls)).unwrap();
+    assert_eq!(polls.get(), 1);
+  }
+  check(VectorMut::<u8>::new());
+  check(VectorMutN::<u8, { size_of::<usize>() }>::new());
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  check(VectorMut::<u8>::with_capacity(64));
 }

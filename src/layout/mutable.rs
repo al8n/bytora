@@ -338,11 +338,11 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     #[cfg(any(feature = "std", feature = "alloc"))]
     if Layout::<T, S>::FITS_WINDOW {
       // The twin's allocator, so that both forms cost the same. Where it
-      // refuses, the fallback allocates as reserve does and panics or aborts
-      // as it does.
+      // refuses, this form panics or aborts as Vec::with_capacity does, on
+      // that first refusal, as the twin errs on it.
       let window = match try_window_with_capacity(capacity) {
         Some(window) => window,
-        None => window_with_capacity(capacity),
+        None => allocation_refused::<T>(capacity),
       };
       return Self::from_window_ptr(window);
     }
@@ -539,8 +539,10 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics on capacity overflow, or when a bounded buffer cannot fit the request.
-  /// [`Self::try_reserve`] returns an error instead, allocation failure included.
+  /// Panics when the length would pass the most elements an allocation can hold, or when a
+  /// bounded buffer cannot fit the request. Growth doubles the capacity but stops at that limit,
+  /// so a length that fits never overflows. [`Self::try_reserve`] returns an error instead,
+  /// allocation failure included.
   #[inline]
   #[track_caller]
   pub fn reserve(&mut self, additional: usize) {
@@ -613,8 +615,7 @@ impl<T, S: InlineSize> VectorMut<T, S> {
         .try_reserve_exact(required)
         .map_err(|_| window::exact_error::<T>(required))?;
       // SAFETY: A fresh, empty allocation with room for `required >= len` elements.
-      unsafe { self.adopt_inline_into(values, len) };
-      return Ok(());
+      return unsafe { self.try_adopt_inline_into(values, len) };
     }
     let layout = self.storage.layout_mut();
     Err(TryReserveError::Bounded(TryPutError {
@@ -640,6 +641,31 @@ impl<T, S: InlineSize> VectorMut<T, S> {
       }
       Window::from_vec(values)
     });
+  }
+
+  // adopt_inline_into for the twins: the window's box is allocated fallibly,
+  // before any element moves, so a refusal leaves the buffer as it was.
+  //
+  // SAFETY: As for adopt_inline_into.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(always)]
+  unsafe fn try_adopt_inline_into(
+    &mut self,
+    mut values: Vec<T>,
+    len: usize,
+  ) -> Result<(), TryReserveError> {
+    let window = try_boxed(|| {
+      // SAFETY: As in adopt_inline_into.
+      unsafe {
+        ptr::copy_nonoverlapping(self.as_slice().as_ptr(), values.as_mut_ptr(), len);
+        values.set_len(len);
+        self.set_len(0);
+      }
+      Window::from_vec(values)
+    })
+    .ok_or(TryReserveError::AllocError)?;
+    *self = Self::from_window_ptr(window);
+    Ok(())
   }
 
   /// Copies `elements` onto the end of the buffer.
@@ -810,12 +836,16 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   }
 
   /// Appends the elements as the `Extend<T>` implementation does, or returns an
-  /// error where it panics or the allocation fails.
+  /// error where it panics or an allocation fails.
   ///
-  /// It reserves room for the iterator's lower size hint first, and then for
-  /// each further element as it comes. At the first element that does not fit,
-  /// it drops the rest of the iterator and the elements it appended, so on an
-  /// error the elements are unchanged.
+  /// It takes extend's own steps, with [`Self::try_reserve`] for
+  /// [`Self::reserve`]: it reserves the lower size hint before it takes any
+  /// element, and then one more element whenever the room runs out. So it
+  /// polls the iterator, reclaims skipped elements and grows the storage
+  /// where extend does. On an error it drops the rest of the iterator and the
+  /// elements it appended, and the elements are as they were, as std's
+  /// `try_reserve` preserves them. The reserves that succeeded before the
+  /// error stay made: the capacity may have grown and the storage moved.
   pub fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), TryReserveError> {
     let len = self.len();
     let result = self.try_append(iter.into_iter());
@@ -825,7 +855,7 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     result
   }
 
-  // try_extend's appends, up to the first element that does not fit.
+  // try_extend's appends: extend's, with try_reserve in place of reserve.
   fn try_append(&mut self, iter: impl Iterator<Item = T>) -> Result<(), TryReserveError> {
     self.try_reserve(iter.size_hint().0)?;
     for value in iter {
@@ -1207,7 +1237,7 @@ impl<S: InlineSize> VectorMut<u8, S> {
     if Layout::<u8, S>::FITS_WINDOW {
       let window = match try_zeroed_window(len) {
         Some(window) => window,
-        None => zeroed_window(len),
+        None => allocation_refused::<u8>(len),
       };
       return Self::from_window_ptr(window);
     }
@@ -1395,17 +1425,25 @@ fn try_vec_with_capacity<T>(capacity: usize) -> Option<Vec<T>> {
 #[inline(never)]
 fn try_window_with_capacity<T>(capacity: usize) -> Option<NonNull<Window<T>>> {
   let values = try_vec_with_capacity(capacity)?;
-  Some(boxed(|| Window::from_vec(values)))
+  try_boxed(|| Window::from_vec(values))
 }
 
-// with_capacity's window after try_window_with_capacity refused: allocated as
-// reserve allocates, so a refusal panics or aborts as reserve's does.
+// The end of with_capacity and zeroed where the twins' allocator refused:
+// the capacity-overflow panic, or the allocation-failure handler, as
+// Vec::with_capacity ends, with no second attempt. The allocator does not say
+// which of its two allocations was refused, so the handler is given the
+// elements' layout, the larger one, or the window's where the elements need
+// no allocation.
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cold]
 #[inline(never)]
-fn window_with_capacity<T>(capacity: usize) -> NonNull<Window<T>> {
-  let values = Vec::with_capacity(capacity);
-  boxed(|| Window::from_vec(values))
+#[track_caller]
+fn allocation_refused<T>(capacity: usize) -> ! {
+  match std::alloc::Layout::array::<T>(capacity) {
+    Ok(layout) if layout.size() != 0 => std::alloc::handle_alloc_error(layout),
+    Ok(_) => std::alloc::handle_alloc_error(std::alloc::Layout::new::<Window<T>>()),
+    Err(_) => panic!("capacity overflow"),
+  }
 }
 
 // The window of `len` zero bytes, returned in a register. Resizing within the
@@ -1415,18 +1453,7 @@ fn window_with_capacity<T>(capacity: usize) -> NonNull<Window<T>> {
 fn try_zeroed_window(len: usize) -> Option<NonNull<Window<u8>>> {
   let mut values = try_vec_with_capacity::<u8>(len)?;
   values.resize(len, 0);
-  Some(boxed(|| Window::from_vec(values)))
-}
-
-// zeroed's window after try_zeroed_window refused, as window_with_capacity:
-// `vec!` fails as `Vec::with_capacity` does, with a capacity overflow panic
-// or the allocation-failure handler.
-#[cfg(any(feature = "std", feature = "alloc"))]
-#[cold]
-#[inline(never)]
-fn zeroed_window(len: usize) -> NonNull<Window<u8>> {
-  let values: Vec<u8> = std::vec![0; len];
-  boxed(|| Window::from_vec(values))
+  try_boxed(|| Window::from_vec(values))
 }
 
 // Boxes the window that `make_window` returns, and leaks the box to the handle
@@ -1440,6 +1467,23 @@ fn boxed<T>(make_window: impl FnOnce() -> Window<T>) -> NonNull<Window<T>> {
   owner.write(make_window());
   // SAFETY: write initialized the entire window.
   NonNull::from(Box::leak(unsafe { owner.assume_init() }))
+}
+
+// boxed for the twins: the box is allocated fallibly, and None, before
+// `make_window` runs, is the allocator's refusal. A box of a window frees with
+// the layout allocated here.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(always)]
+fn try_boxed<T>(make_window: impl FnOnce() -> Window<T>) -> Option<NonNull<Window<T>>> {
+  let layout = std::alloc::Layout::new::<Window<T>>();
+  // SAFETY: A window has fields, so the layout's size is nonzero.
+  let raw = NonNull::new(unsafe { std::alloc::alloc(layout) })?;
+  // SAFETY: The global allocator returned this block for exactly a
+  // Window<T>'s layout, which is what a Box of it frees, so the box owns it.
+  let mut owner = unsafe { Box::from_raw(raw.as_ptr().cast::<MaybeUninit<Window<T>>>()) };
+  owner.write(make_window());
+  // SAFETY: write initialized the entire window.
+  Some(NonNull::from(Box::leak(unsafe { owner.assume_init() })))
 }
 
 // The heap arm of both splits, out of line: it partitions `window` at `at` and

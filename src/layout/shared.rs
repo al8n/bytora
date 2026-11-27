@@ -908,9 +908,6 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// suffix built from words last, for split_off's arm that stays in the
   /// public method. The retain comes before the narrowing, as in `slice`
   /// then `truncate`, so a promotion it publishes is seen by the narrowing.
-  /// Between the two the suffix's reference is held as a word; an
-  /// allocation in `truncate_shared` aborts on failure, and if it could
-  /// unwind the reference would leak, which is safe.
   ///
   /// # Safety
   ///
@@ -925,10 +922,13 @@ impl<T, S: InlineSize> Vector<T, S> {
     // SAFETY: The caller's, with nothing omitted at the back. WORD_SPLIT
     // makes the source a four-word descriptor whose owner slot is atomic.
     let (owner, kind) = unsafe { self.retain_window(at, 0, len) };
-    self.truncate_shared(at);
-    Self {
+    // The suffix owns its reference from here, so an unwind out of the
+    // narrowing drops it, as `slice` then `truncate` would.
+    let suffix = Self {
       layout: Layout::external(data, owner, len - at, kind),
-    }
+    };
+    self.truncate_shared(at);
+    suffix
   }
 
   /// Retains a raw or tagged owner for a subwindow and returns the owner word

@@ -75,23 +75,24 @@ pub(crate) fn try_checked_range(
   len: usize,
 ) -> Result<Range<usize>, RangeOutOfBounds> {
   let start = match range.start_bound() {
-    Bound::Included(&start) => Some(start),
-    Bound::Excluded(&start) => start.checked_add(1),
-    Bound::Unbounded => Some(0),
+    Bound::Included(&start) => start,
+    Bound::Excluded(&start) => match start.checked_add(1) {
+      Some(start) => start,
+      // checked_range panics here, before it reads the end bound, so the end
+      // is not read either. An endpoint past usize::MAX, or one not read, is
+      // reported as usize::MAX.
+      None => return Err(RangeOutOfBounds::new(usize::MAX, usize::MAX, len)),
+    },
+    Bound::Unbounded => 0,
   };
   let end = match range.end_bound() {
     Bound::Included(&end) => end.checked_add(1),
     Bound::Excluded(&end) => Some(end),
     Bound::Unbounded => Some(len),
   };
-  match (start, end) {
-    (Some(start), Some(end)) if start <= end && end <= len => Ok(start..end),
-    // An endpoint past usize::MAX is reported as usize::MAX.
-    (start, end) => Err(RangeOutOfBounds::new(
-      start.unwrap_or(usize::MAX),
-      end.unwrap_or(usize::MAX),
-      len,
-    )),
+  match end {
+    Some(end) if start <= end && end <= len => Ok(start..end),
+    end => Err(RangeOutOfBounds::new(start, end.unwrap_or(usize::MAX), len)),
   }
 }
 
