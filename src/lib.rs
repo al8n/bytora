@@ -90,9 +90,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// cannot be represented as a half-open range.
   #[track_caller]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
-    let range = checked_range(range, self.len());
+    let len = self.len();
+    let range = checked_range(range, len);
     if !self.layout.is_inline() {
-      return self.slice_shared(range);
+      // SAFETY: The tag selects external storage and checked_range validated
+      // both endpoints against this immutable window's length.
+      return unsafe { self.slice_shared(range, len) };
     }
     Self {
       layout: self.layout.slice_inline(range),

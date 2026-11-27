@@ -405,20 +405,27 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
     }
   }
 
-  fn exercise<S: InlineSize>(spare: usize)
+  fn exercise<S: InlineSize>(spare: usize, trim: bool)
   where
     for<'a> Slice<Count<'a>, S>: Send + Sync,
   {
-    let drops = AtomicUsize::new(0);
+    let drops = [const { AtomicUsize::new(0) }; 10];
     let mut input = Vec::with_capacity(10 + spare);
-    input.extend((0..10).map(|value| Count {
-      drops: &drops,
-      value,
+    input.extend(drops.iter().enumerate().map(|(value, drops)| Count {
+      drops,
+      value: value as u8,
     }));
     let (base, capacity) = (input.as_ptr(), input.capacity());
     let mut source = Slice::<_, S>::try_from_shared_vec(input).ok().unwrap();
-    source.advance(1);
-    source.truncate(8);
+    if trim {
+      source.advance(1);
+      source.truncate(8);
+    }
+    let (start, len) = if trim { (1, 8) } else { (0, 10) };
+    assert_eq!(
+      vector::full_len(source.layout.owner()),
+      (vector::AVAILABLE && spare == 0 && !trim).then_some(10)
+    );
     assert_eq!(
       vector::raw(source.layout.owner()),
       vector::AVAILABLE && spare == 0
@@ -452,25 +459,37 @@ fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
     let winner = source.layout.owner();
     assert!(!vector::raw(winner));
     assert!(peers.iter().all(|p| p.layout.owner() == winner));
-    assert_eq!(borrowed[7].value, 8);
-    assert_eq!(peers[1].as_slice().as_ptr(), base.wrapping_add(3));
-    assert_eq!(peers[3].as_slice().as_ptr(), base.wrapping_add(9));
+    assert_eq!(borrowed[7].value, (start + 7) as u8);
+    assert_eq!(peers[1].as_slice().as_ptr(), base.wrapping_add(start + 2));
+    assert_eq!(peers[1].as_slice()[0].value, (start + 2) as u8);
+    assert_eq!(peers[3].as_slice().as_ptr(), base.wrapping_add(start + 8));
+    assert_eq!(peers[3].len(), len - 8);
+    assert_eq!(drops.each_ref().map(|d| d.load(Relaxed)), [0; 10]);
     let source = source.try_into_vec().err().unwrap();
+    assert_eq!(source.as_slice().as_ptr(), base.wrapping_add(start));
+    assert_eq!(source.len(), len);
+    assert_eq!(source.as_slice()[0].value, start as u8);
     drop(peers);
     let result = source.try_into_vec().ok().unwrap();
     assert_eq!(
       (result.as_ptr(), result.len(), result.capacity()),
-      (base, 8, capacity)
+      (base, len, capacity)
     );
-    assert_eq!(drops.load(Relaxed), 2);
+    assert_eq!(result[0].value, start as u8);
+    assert_eq!(
+      drops.each_ref().map(|d| d.load(Relaxed)),
+      core::array::from_fn(|i| usize::from(trim && (i == 0 || i == 9)))
+    );
     drop(result);
-    assert_eq!(drops.load(Relaxed), 10);
+    assert_eq!(drops.each_ref().map(|d| d.load(Relaxed)), [1; 10]);
   }
 
   for spare in [0, 1, 8] {
-    exercise::<crate::DefaultSize>(spare);
-    exercise::<typenum::U8192>(spare);
+    exercise::<crate::DefaultSize>(spare, true);
+    exercise::<typenum::U8192>(spare, true);
   }
+  exercise::<crate::DefaultSize>(0, false);
+  exercise::<typenum::U0>(0, false);
 }
 
 #[test]
