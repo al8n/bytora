@@ -21,6 +21,11 @@
 //! - `consume`: the setup builds the handle from a `Vec`; the routine turns it back into a `Vec`.
 //! - `warmed_clone`, `range`: nothing per iteration; the source handle, already cloned once so that
 //!   its owner exists, is built before the loop.
+//! - `try_range`: as `range`, through `try_slice`, the twin of the `slice` that `range` calls. Each
+//!   case compares with the `range` case of the same label and length. Its criterion row is
+//!   `budgets_twins_vector`'s `slice/try_slice`, which runs at the default budget and 64 bytes only.
+//!   `Bytes` has no twin, so its `try_range` is its `slice` again, and its two rows are a control
+//!   for each other.
 //! - `drop`: the setup builds the handle from a `Vec`; the routine drops it. A never-shared
 //!   handle's drop goes through `release_owner`, and no criterion row times it. Its `@setup` loop
 //!   forgets the handle it built, so that the difference is the drop alone.
@@ -60,7 +65,14 @@ mod driver {
   };
 
   const LABELS: [&str; 5] = ["bytes", "n_0", "n_16", "n_24", "n_32"];
-  const OPS: [&str; 5] = ["from_vec", "consume", "warmed_clone", "range", "drop"];
+  const OPS: [&str; 6] = [
+    "from_vec",
+    "consume",
+    "warmed_clone",
+    "range",
+    "try_range",
+    "drop",
+  ];
   const LENS: [usize; 3] = [0, 7, 64];
   const USAGE: &str =
     "usage: opcount [--forget] <case> <k> | opcount [--forget] <case>@setup <k> | opcount --list";
@@ -74,6 +86,7 @@ mod driver {
   trait Handle: Clone + Sized {
     fn from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
     fn range(&self, range: Range<usize>) -> Self;
+    fn try_range(&self, range: Range<usize>) -> Self;
     fn into_vec(self) -> Vec<u8>;
   }
 
@@ -84,8 +97,11 @@ mod driver {
     fn range(&self, range: Range<usize>) -> Self {
       self.slice(range)
     }
+    fn try_range(&self, range: Range<usize>) -> Self {
+      self.try_slice(range).expect("in bounds")
+    }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique vector")
+      self.try_into_vec().expect("unique vector")
     }
   }
 
@@ -94,6 +110,10 @@ mod driver {
       Ok(Self::from(values))
     }
     fn range(&self, range: Range<usize>) -> Self {
+      self.slice(range)
+    }
+    // `Bytes` has no twin; `slice` is its nearest equivalent.
+    fn try_range(&self, range: Range<usize>) -> Self {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
@@ -265,6 +285,25 @@ mod driver {
     let _ = black_box(&peer);
   }
 
+  #[inline(never)]
+  fn run_try_range<T: Handle, const FORGET: bool>(len: usize, setup_only: bool, k: u64) {
+    let bounds = if len > 1 { 1..len - 1 } else { 0..len };
+    let source = T::from_vec(input(len, len)).expect("representable input");
+    let peer = source.clone();
+    drop(T::try_range(&source, bounds.clone()));
+    for _ in 0..k {
+      if setup_only {
+        let _ = black_box(&source);
+      } else {
+        dispose::<FORGET, _>(black_box(T::try_range(
+          black_box(&source),
+          black_box(bounds.start)..black_box(bounds.end),
+        )));
+      }
+    }
+    let _ = black_box(&peer);
+  }
+
   // The routine is the drop of a handle that was never shared. The `@setup` loop forgets the handle
   // it built, so that the difference is the drop alone.
   #[inline(never)]
@@ -290,6 +329,7 @@ mod driver {
       "consume" => run_consume::<T, FORGET>(case.len, case.cap, setup_only, k),
       "warmed_clone" => run_warmed_clone::<T, FORGET>(case.len, setup_only, k),
       "range" => run_range::<T, FORGET>(case.len, setup_only, k),
+      "try_range" => run_try_range::<T, FORGET>(case.len, setup_only, k),
       "drop" => run_drop::<T>(case.len, case.cap, setup_only, k),
       other => panic!("unknown operation {other}"),
     }
