@@ -23,6 +23,25 @@ bytes.as_mut_slice().make_ascii_uppercase();
 assert_eq!(bytes.as_slice(), b"VALUE");
 ```
 
+`Bytes` and `BytesMut` are `Vector<u8>` and `VectorMut<u8>` at `DefaultSize`, and
+`BytesN<N>` and `BytesMutN<N>` take a byte budget. The two default aliases have no
+budget parameter, so `Bytes::new()` and `BytesMut::with_capacity(n)` need no type
+annotation. Both handles dereference to a slice, compare, order and hash by their
+elements, and print `Debug` as a slice does, a list of numbers for bytes. They
+also implement most of the conversions and standard traits of `bytes::Bytes` and
+`bytes::BytesMut`. The `error` module holds the errors of the `try_*` operations.
+
+```rust
+use bytora::{Bytes, BytesMut};
+
+let mut buffer = BytesMut::new();
+buffer.extend_from_slice(b"hello");
+let frozen: Bytes = buffer.freeze();
+assert_eq!(frozen, *b"hello");
+assert_eq!(&frozen[1..], b"ello");
+assert_eq!(Bytes::from("hello"), frozen);
+```
+
 Positive budgets are multiples of 4 through 8192 on 32-bit targets,
 and multiples of 8 through 8192 on 64-bit targets.
 Advancing changes the cursor in constant time. Moving an inline handle moves
