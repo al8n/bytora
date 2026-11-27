@@ -336,7 +336,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     layout
   }
 
-  pub(super) fn is_inline(&self) -> bool {
+  pub(super) const fn is_inline(&self) -> bool {
     Self::inline_tag(self.tag)
   }
 
