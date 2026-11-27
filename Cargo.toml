@@ -19,13 +19,15 @@ default = ["std"]
 std = []
 alloc = []
 # Shared ownership on targets without native pointer-width compare-and-swap.
-extra-platforms = ["alloc", "dep:portable-atomic-util"]
+extra-platforms = ["alloc", "dep:portable-atomic", "dep:portable-atomic-util"]
 
 [dependencies]
 typenum = { version = "1.20", default-features = false }
+portable-atomic = { version = "1.5.1", optional = true, default-features = false }
 portable-atomic-util = { version = "0.2.4", optional = true, default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+allocation-counter = "0.8.1"
 bytes = "1"
 criterion = "0.8"
 smol-bytes = "=0.2.1"
@@ -43,6 +45,11 @@ bench = false
 [[bench]]
 path = "benches/clone.rs"
 name = "clone"
+harness = false
+
+[[bench]]
+path = "benches/lazy_vec.rs"
+name = "lazy_vec"
 harness = false
 
 [profile.bench]

@@ -5,7 +5,6 @@ use smol_slice::{SliceMut, SliceMutN, typenum::U24};
 fn empty_mutable_zero_budget_has_three_words_and_accepts_any_alignment() {
   #[repr(align(256))]
   struct Aligned;
-  const EMPTY: SliceMutN<Aligned, 0> = SliceMutN::<_, 0>::empty();
   const WORDS: usize = 3 * size_of::<usize>();
 
   assert_eq!(size_of::<SliceMutN<Aligned, 0>>(), WORDS);
@@ -13,7 +12,7 @@ fn empty_mutable_zero_budget_has_three_words_and_accepts_any_alignment() {
   assert_eq!(align_of::<SliceMutN<Aligned, 0>>(), align_of::<usize>());
   assert_eq!(SliceMutN::<Aligned, 0>::INLINE_CAPACITY, 0);
   assert!(SliceMutN::<(), 0>::try_from_slice(&[()]).is_none());
-  let mut empty = EMPTY;
+  let mut empty = const { SliceMutN::<Aligned, 0>::empty() };
   empty.advance(0);
   assert!(empty.is_empty());
   assert!(empty.as_mut_slice().as_mut_ptr().is_aligned());

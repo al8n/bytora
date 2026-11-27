@@ -1,3 +1,4 @@
+use super::vector::{self, Vector};
 use super::{Arc, STATIC_OWNER};
 use crate::{InlineSize, Slice, layout::mutable::Window};
 use core::{mem::ManuallyDrop, ops::Range};
@@ -33,19 +34,22 @@ impl<T> StorageVtable<T> {
   };
 
   const VECTOR: Self = Self {
-    clone: retain::<Vec<T>>,
+    clone: retain::<Vector<T>>,
     into_vec: vector_into_vec,
     into_mut: vector_into_window,
-    is_unique: unique::<Vec<T>>,
-    drop: release::<Vec<T>>,
+    is_unique: |owner| {
+      // SAFETY: A direct vector supplies a strong reference to its header.
+      vector::raw(owner) || unsafe { unique::<Vector<T>>(owner) }
+    },
+    drop: release::<Vector<T>>,
     zst_base: Some(|owner| {
-      // SAFETY: The vector table receives a live untagged Arc<Vec<T>> pointer.
-      unsafe { (&*owner.cast::<Vec<T>>()).as_ptr().cast() }
+      // SAFETY: ZST vectors always use a live direct Arc<Vector<T>>.
+      unsafe { (*owner.cast::<Vector<T>>()).base.cast() }
     }),
   };
 }
 
-// Vec owners keep their direct Arc<Vec<T>> pointer. Other managed owners put
+// Promoted Vec owners keep their direct Arc<Vector<T>> pointer. Other managed owners put
 // a pointer to their typed operations first and tag their Arc pointer. Keeping
 // the table in constant storage lets scoped T (such as &'a str) use it too.
 #[repr(C)]
@@ -97,7 +101,7 @@ fn untag(owner: *const ()) -> *const () {
 // The caller borrows a live external descriptor for T. Its table is in
 // constant storage, while the tagged owner's header lives as long as the handle.
 pub(super) unsafe fn operations<'a, T>(owner: *const ()) -> &'a StorageVtable<T> {
-  if owner.addr() & 1 == 0 {
+  if owner.addr() & 1 == 0 || vector::raw(owner) {
     &StorageVtable::<T>::VECTOR
   } else if owner == STATIC_OWNER {
     &StorageVtable::<T>::STATIC
@@ -121,7 +125,7 @@ pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
     return owner == STATIC_OWNER;
   }
   // SAFETY: The caller holds a live external descriptor. Its untagged owner
-  // came from Arc<Vec<T>>::into_raw.
+  // came from Arc<Vector<T>>::into_raw. Raw descriptors are promoted before retain.
   unsafe { (StorageVtable::<T>::VECTOR.clone)(owner) };
   true
 }
@@ -129,7 +133,7 @@ pub(super) unsafe fn retain_direct<T>(owner: *const ()) -> bool {
 #[inline]
 pub(super) unsafe fn release_owner<T>(owner: *const ()) {
   if owner.addr() & 1 == 0 {
-    // SAFETY: The untagged owner transfers a direct Arc<Vec<T>> reference.
+    // SAFETY: The untagged owner transfers a direct Arc<Vector<T>> reference.
     unsafe { (StorageVtable::<T>::VECTOR.drop)(owner) };
   } else if owner != STATIC_OWNER {
     // SAFETY: The tagged managed owner transfers a reference to its own table.
@@ -196,12 +200,24 @@ fn active_range<T>(original: &[T], data: *const T, len: usize) -> Range<usize> {
 }
 
 unsafe fn vector_into_vec<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
-  // SAFETY: The vector table receives an untagged Arc<Vec<T>> strong reference.
-  let mut original = unsafe { take_arc::<Vec<T>>(owner) }?;
+  // SAFETY: This callback consumes the source's raw vector or its strong reference.
+  let mut original = unsafe { take_vector(owner, data, len) }?;
   let range = active_range(&original, data.cast::<T>(), len);
   original.truncate(range.end);
   drop(original.drain(..range.start));
   Some(original)
+}
+
+unsafe fn take_vector<T>(owner: *const (), data: *const (), len: usize) -> Option<Vec<T>> {
+  let buffer = if vector::raw(owner) {
+    // SAFETY: A consuming take transfers the raw descriptor's original vector.
+    unsafe { Vector::<T>::take_raw(owner, data, len) }
+  } else {
+    // SAFETY: A direct descriptor transfers its strong reference, or restores
+    // it when other immutable views still exist.
+    unsafe { take_arc::<Vector<T>>(owner) }?
+  };
+  Some(buffer.into_vec())
 }
 
 unsafe fn vector_into_window<T>(
@@ -209,8 +225,8 @@ unsafe fn vector_into_window<T>(
   data: *const (),
   len: usize,
 ) -> Option<Window<T>> {
-  // SAFETY: The vector table receives an untagged Arc<Vec<T>> strong reference.
-  let original = unsafe { take_arc::<Vec<T>>(owner) }?;
+  // SAFETY: This callback consumes the source's raw vector or its strong reference.
+  let original = unsafe { take_vector(owner, data, len) }?;
   let range = active_range(&original, data.cast::<T>(), len);
   Some(Window::from_vec(original).keep_range(range))
 }
@@ -298,4 +314,5 @@ mod covariance {
   // allocation still inside. Both stored types must admit the same coercion.
   const _: fn(StorageVtable<AnyArg>) -> StorageVtable<StaticArg> = |ops| ops;
   const _: fn(Frozen<AnyArg>) -> Frozen<StaticArg> = |managed| managed;
+  const _: fn(Vector<AnyArg>) -> Vector<StaticArg> = |buffer| buffer;
 }
