@@ -38,10 +38,14 @@ request, and `release.yml` publishes the released section as the GitHub Release 
   error or `None` where `split_to`, `split_off` and `slice_ref` panic.
   `try_copy_from_slice` returns `Result<_, TryPutError>` instead of `Option`, and
   `from_slice` copies as `copy_from_slice` does.
-- The twins of the operations that guard storage: `try_slice` and `try_advance`
-  on `Vector`, `VectorMut` and `LocalVector`; `VectorMut::try_split_off`,
+- The twins of the operations that guard storage: `try_slice` on `Vector` and
+  `LocalVector`, and `try_advance` on those and on `VectorMut`;
+  `VectorMut::try_split_off`,
   `try_reserve`, `try_with_capacity`, `try_extend_from_slice`,
   `try_extend_from_within` and `try_zeroed`. Each returns an error where its
   panicking form panics, and leaves the elements unchanged when it does. The
   allocating twins also return `TryReserveError::AllocError` when the
-  allocator refuses, where the panicking forms abort.
+  allocator refuses, where the panicking forms abort. `VectorMut::try_resize`
+  and `try_extend` are the twins of `resize` and `Extend`, and `VectorMut<u8>`
+  implements `fmt::Write`, which returns `fmt::Error` and appends nothing where
+  `try_extend_from_slice` returns an error.

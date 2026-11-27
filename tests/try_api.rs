@@ -495,3 +495,180 @@ fn allocating_twins_return_what_the_allocating_methods_return() {
   assert!(VectorMut::<u8>::try_with_capacity(usize::MAX).is_err());
   assert!(VectorMut::<u8>::try_zeroed(usize::MAX).is_err());
 }
+
+// try_resize errs exactly where resize panics, with the elements unchanged, and otherwise resizes
+// as resize does. Lengths stay small or overflow, as in the try_reserve test above.
+#[test]
+fn try_resize_errs_exactly_where_resize_panics() {
+  fn check<S: InlineSize>(buffer: VectorMut<u8, S>) {
+    let len = buffer.len();
+    let cap = buffer.capacity();
+    for new_len in [0, 1, len, len + 1, cap, cap + 1, 64, 4096, usize::MAX] {
+      let mut fallible = buffer.clone();
+      let result = fallible.try_resize(new_len, 7);
+      let mut panicking = buffer.clone();
+      let panicked = catch_unwind(AssertUnwindSafe(|| panicking.resize(new_len, 7))).is_err();
+      assert_eq!(result.is_err(), panicked, "new_len {new_len}");
+      match result {
+        Ok(()) => assert_eq!(fallible, panicking),
+        Err(TryReserveError::Bounded(error)) => {
+          assert_eq!(error.requested, new_len - len);
+          assert_eq!(fallible, buffer);
+        }
+        Err(error) => {
+          assert_eq!(error, TryReserveError::CapacityOverflow);
+          assert_eq!(fallible, buffer);
+        }
+      }
+    }
+  }
+  // The one-word budget never grows. The 16-byte budget grows only with an allocator.
+  let mut tiny = VectorMutN::<u8, { size_of::<usize>() }>::new();
+  tiny.extend_from_slice(b"abc");
+  check(tiny);
+  let mut narrow = VectorMutN::<u8, 16>::new();
+  narrow.extend_from_slice(b"abc");
+  check(narrow);
+  let mut inline = VectorMut::<u8>::new();
+  inline.extend_from_slice(b"abc");
+  check(inline);
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  {
+    // A heap buffer whose view starts past the base of its allocation.
+    let mut heap = VectorMut::<u8>::with_capacity(256);
+    heap.extend_from_slice(b"heap bytes");
+    heap.advance(5);
+    check(heap);
+  }
+}
+
+// try_extend errs exactly where extend panics. Its elements are then unchanged, where extend keeps
+// what it appended before the panic, and otherwise it appends what extend appends. It reserves the
+// lower size hint first, then each further element as it comes. Counts stay small or overflow.
+#[test]
+fn try_extend_errs_exactly_where_extend_panics() {
+  use core::iter::{from_fn, repeat_n};
+
+  fn compare<S: InlineSize, I: Iterator<Item = u8>>(
+    buffer: &VectorMut<u8, S>,
+    items: impl Fn() -> I,
+  ) -> Result<(), TryReserveError> {
+    let mut fallible = buffer.clone();
+    let result = fallible.try_extend(items());
+    let mut panicking = buffer.clone();
+    let panicked = catch_unwind(AssertUnwindSafe(|| panicking.extend(items()))).is_err();
+    assert_eq!(result.is_err(), panicked);
+    if result.is_ok() {
+      assert_eq!(fallible, panicking);
+    } else {
+      assert_eq!(fallible, *buffer);
+    }
+    result
+  }
+
+  fn check<S: InlineSize>(buffer: VectorMut<u8, S>) {
+    for count in [0, 1, 3, 7, 16, 64, 4096] {
+      // An exact size hint reserves every element at once.
+      if let Err(error) = compare(&buffer, || repeat_n(7, count)) {
+        assert!(matches!(error, TryReserveError::Bounded(put) if put.requested == count));
+      }
+      // Without one, each element reserves its own slot, and the first that finds none fails.
+      let unhinted = || {
+        let mut items = repeat_n(7, count);
+        from_fn(move || items.next())
+      };
+      if let Err(error) = compare(&buffer, unhinted) {
+        let full = TryPutError {
+          requested: 1,
+          available: 0,
+        };
+        assert_eq!(error, TryReserveError::Bounded(full));
+      }
+    }
+    // A size hint that no buffer can hold is refused before any element is taken.
+    assert!(compare(&buffer, || repeat_n(7, usize::MAX)).is_err());
+  }
+  // The one-word budget never grows. The 16-byte budget grows only with an allocator.
+  let mut tiny = VectorMutN::<u8, { size_of::<usize>() }>::new();
+  tiny.extend_from_slice(b"abc");
+  check(tiny);
+  let mut narrow = VectorMutN::<u8, 16>::new();
+  narrow.extend_from_slice(b"abc");
+  check(narrow);
+  let mut inline = VectorMut::<u8>::new();
+  inline.extend_from_slice(b"abc");
+  check(inline);
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  {
+    // A heap buffer whose view starts past the base of its allocation.
+    let mut heap = VectorMut::<u8>::with_capacity(256);
+    heap.extend_from_slice(b"heap bytes");
+    heap.advance(5);
+    check(heap);
+  }
+}
+
+// write_str appends where extend_from_slice does and errs exactly where it panics, and a failed
+// call appends nothing. Lengths stay small, as in the try_reserve test above.
+#[test]
+fn write_str_errs_exactly_where_extend_from_slice_panics() {
+  use core::fmt::Write;
+
+  fn check<S: InlineSize>(buffer: VectorMut<u8, S>) {
+    for len in [0, 1, 3, 7, 16, 64, 4096] {
+      let text = "x".repeat(len);
+      let mut writer = buffer.clone();
+      let result = writer.write_str(&text);
+      let mut panicking = buffer.clone();
+      let panicked = catch_unwind(AssertUnwindSafe(|| {
+        panicking.extend_from_slice(text.as_bytes())
+      }))
+      .is_err();
+      assert_eq!(result.is_err(), panicked, "len {len}");
+      if result.is_ok() {
+        assert_eq!(writer, panicking);
+      } else {
+        assert_eq!(writer, buffer);
+      }
+    }
+  }
+  // The one-word budget never grows. The 16-byte budget grows only with an allocator.
+  let mut tiny = VectorMutN::<u8, { size_of::<usize>() }>::new();
+  tiny.extend_from_slice(b"abc");
+  check(tiny);
+  let mut narrow = VectorMutN::<u8, 16>::new();
+  narrow.extend_from_slice(b"abc");
+  check(narrow);
+  let mut inline = VectorMut::<u8>::new();
+  inline.extend_from_slice(b"abc");
+  check(inline);
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  {
+    // A heap buffer whose view starts past the base of its allocation.
+    let mut heap = VectorMut::<u8>::with_capacity(256);
+    heap.extend_from_slice(b"heap bytes");
+    heap.advance(5);
+    check(heap);
+  }
+}
+
+// write! makes one write_str call per piece. A piece past the room of a buffer that cannot grow is
+// refused whole and the pieces before it stay. A buffer with room holds what format! prints.
+#[test]
+fn write_keeps_the_pieces_before_the_one_that_does_not_fit() {
+  use core::fmt::Write;
+
+  // Variables rather than literal arguments, which `format_args!` may fold into a single piece.
+  let (fits, too_long) = ("ab", "cdefghijk");
+  let mut tiny = VectorMutN::<u8, { size_of::<usize>() }>::new();
+  assert_eq!(write!(tiny, "{fits}{too_long}"), Err(core::fmt::Error));
+  assert_eq!(tiny.as_slice(), b"ab");
+
+  let (number, byte) = (1, 255u8);
+  let mut buffer = VectorMut::<u8>::new();
+  write!(buffer, "{number}-{byte:02x}-{fits}").unwrap();
+  assert_eq!(
+    buffer.as_slice(),
+    format!("{number}-{byte:02x}-{fits}").as_bytes()
+  );
+}

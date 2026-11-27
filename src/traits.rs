@@ -280,6 +280,24 @@ impl<T: fmt::Debug, S: InlineSize> fmt::Debug for VectorMut<T, S> {
   }
 }
 
+/// Appends the bytes of each text where `try_extend_from_slice` would, and returns [`fmt::Error`]
+/// where it returns an error.
+///
+/// A write never panics on capacity. A text past the room of a buffer that cannot grow returns the
+/// error, as `bytes::BytesMut` does past its `remaining_mut`, and that call appends nothing.
+/// `write!` makes one call per piece, so after an error the pieces before the failed one stay.
+///
+/// One departure from `bytes`: an allocation that the allocator refuses returns [`fmt::Error`]
+/// here, where `bytes` aborts.
+impl<S: InlineSize> fmt::Write for VectorMut<u8, S> {
+  #[inline]
+  fn write_str(&mut self, text: &str) -> fmt::Result {
+    self
+      .try_extend_from_slice(text.as_bytes())
+      .map_err(|_| fmt::Error)
+  }
+}
+
 impl<'a, T, S: InlineSize> IntoIterator for &'a Vector<T, S> {
   type Item = &'a T;
   type IntoIter = slice::Iter<'a, T>;
@@ -393,7 +411,8 @@ impl<S: WritableSize<u8>> From<&str> for VectorMut<u8, S> {
 ///
 /// Panics when the buffer cannot hold the elements, as its `extend` does, or cannot freeze them:
 /// heap storage needs shared ownership, which targets without pointer-width atomics get only with
-/// the `extra-platforms` feature.
+/// the `extra-platforms` feature. `try_extend` and `try_freeze` on a new buffer report either
+/// failure instead.
 impl<T: Send + Sync, S: WritableSize<T>> FromIterator<T> for Vector<T, S> {
   fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
     iter.into_iter().collect::<VectorMut<T, S>>().freeze()
