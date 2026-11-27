@@ -26,8 +26,10 @@ use typenum::U24 as DefaultSize;
 
 /// A slice with inline storage for `Copy` elements, static borrows, and optional heap storage.
 ///
-/// `S` is the exact size in bytes of the handle and its `Option`. It defaults
-/// to three machine words, the size of a `Vec<T>`. Use [`SliceN`] for a numeric byte count.
+/// A positive `S` is the exact size in bytes of the handle and its `Option`. It
+/// defaults to three machine words, the size of a `Vec<T>`. [`typenum::U0`]
+/// disables inline elements and keeps the three-word handle.
+/// Use [`SliceN`] for a numeric byte budget.
 /// An inline clone copies the whole handle. Static and heap-backed clones
 /// share their elements. Each clone has an independent cursor.
 #[repr(transparent)]
@@ -35,7 +37,7 @@ pub struct Slice<T, S: InlineSize = DefaultSize> {
   layout: Layout<T, S>,
 }
 
-/// A [`Slice`] with a const-generic size of `N` bytes, including its cursor.
+/// A [`Slice`] with byte budget `N`. Zero disables inline elements.
 pub type SliceN<T, const N: usize> = Slice<T, <[u8; N] as AssocInlineSize>::Size>;
 
 impl<T, S: InlineSize> Slice<T, S> {
@@ -143,14 +145,14 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
 
 /// An owned slice whose inline `Copy` elements can be borrowed mutably.
 ///
-/// `S` is the exact size in bytes of the handle and its `Option`. It defaults
-/// to three machine words, the size of a `Vec<T>`. Use [`SliceMutN`] for a numeric byte count.
+/// The byte budget `S` follows the same sizing rules as [`Slice`]. It defaults
+/// to three machine words, the size of a `Vec<T>`. Use [`SliceMutN`] for a numeric byte budget.
 #[repr(transparent)]
 pub struct SliceMut<T, S: InlineSize = DefaultSize> {
   layout: Layout<T, S>,
 }
 
-/// A [`SliceMut`] with a const-generic size of `N` bytes, including its cursor.
+/// A [`SliceMut`] with byte budget `N`. Zero disables inline elements.
 pub type SliceMutN<T, const N: usize> = SliceMut<T, <[u8; N] as AssocInlineSize>::Size>;
 
 impl<T, S: InlineSize> SliceMut<T, S> {

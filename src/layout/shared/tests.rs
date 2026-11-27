@@ -69,6 +69,20 @@ fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
 }
 
 #[test]
+fn zero_budget_copy_vectors_share_short_inputs_and_empty_vectors_need_no_owner() {
+  fn copy<T: Copy + Send + Sync, S: InlineSize>(values: Vec<T>) -> Result<Slice<T, S>, Vec<T>> {
+    Slice::try_from_vec(values)
+  }
+  let short = vec![7u8];
+  let ptr = short.as_ptr();
+  let shared = copy::<_, typenum::U0>(short).unwrap();
+  assert_eq!(shared.as_slice().as_ptr(), ptr);
+  let empty = SliceN::<std::string::String, 0>::try_from(Vec::with_capacity(1)).unwrap();
+  assert_eq!(empty.layout.tag, COMPACT_STATIC);
+  assert!(!empty.layout.uses_external_owner());
+}
+
+#[test]
 fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
   fn check<const BYTES: usize>()
   where

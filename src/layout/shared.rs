@@ -36,6 +36,16 @@ unsafe fn vtable(owner: *const ()) -> Option<&'static StorageVtable> {
 }
 
 impl<T, S: InlineSize> Layout<T, S> {
+  const fn try_static(data: *const T, len: usize) -> Option<Self> {
+    let Some(mut layout) = Self::try_external(data, STATIC_VTABLE.tagged_owner(), len) else {
+      return None;
+    };
+    if Self::COMPACT_EXTERNAL && layout.tag.get() == EXTERNAL {
+      layout.tag = COMPACT_STATIC;
+    }
+    Some(layout)
+  }
+
   fn subwindow_tag(&self, new_tag: NonZeroU8) -> NonZeroU8 {
     if !Self::COMPACT_EXTERNAL || new_tag.get() != EXTERNAL {
       return new_tag;
@@ -57,6 +67,36 @@ impl<T, S: InlineSize> Layout<T, S> {
     // SAFETY: The external tag guarantees an initialized packed prefix. We
     // have exclusive access to this handle's descriptor, independent of its peers.
     unsafe { &mut *self.payload.as_mut_ptr().cast::<ExternalPrefix>() }
+  }
+}
+
+impl<T> Slice<T, typenum::U0> {
+  /// Creates an empty three-word handle with zero inline capacity.
+  /// This uses only `core` and works for every element type.
+  pub const fn empty() -> Self {
+    let data = ptr::NonNull::<T>::dangling().as_ptr();
+    // A zero-length window needs only an aligned, non-null data pointer.
+    Self {
+      layout: Layout::try_static(data, 0).expect("a zero-budget handle fits a static window"),
+    }
+  }
+}
+
+/// Shares a vector's buffer with zero inline capacity. A nonempty input keeps
+/// its original data pointer. Clones and ranges share those elements.
+/// An empty vector yields [`Slice::empty`] without allocating a shared owner.
+///
+/// Returns the original vector if it contains more than `isize::MAX` elements.
+/// `Send + Sync` allows the owning handles to be cloned and used across threads.
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
+  type Error = Vec<T>;
+
+  fn try_from(values: Vec<T>) -> Result<Self, Self::Error> {
+    if values.is_empty() {
+      return Ok(Self::empty());
+    }
+    Self::try_from_shared_vec(values)
   }
 }
 
@@ -97,12 +137,8 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Sync,
   {
-    let owner = STATIC_VTABLE.tagged_owner();
-    match Layout::try_external(values.as_ptr(), owner, values.len()) {
-      Some(mut layout) => {
-        layout.mark_static();
-        Some(Self { layout })
-      }
+    match Layout::try_static(values.as_ptr(), values.len()) {
+      Some(layout) => Some(Self { layout }),
       None => None,
     }
   }
@@ -121,10 +157,18 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Copy + Send + Sync,
   {
-    const { assert!(align_of::<Vec<T>>() >= 2) };
     if let Some(inline) = Self::try_from_slice(&values) {
       return Ok(inline);
     }
+    Self::try_from_shared_vec(values)
+  }
+
+  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+  fn try_from_shared_vec(values: Vec<T>) -> Result<Self, Vec<T>>
+  where
+    T: Send + Sync,
+  {
+    const { assert!(align_of::<Vec<T>>() >= 2) };
     let Some(mut layout) = Layout::try_external(ptr::null(), ptr::null(), values.len()) else {
       return Err(values);
     };
