@@ -925,13 +925,21 @@ impl<T, S: InlineSize> Vector<T, S> {
     // SAFETY: The caller's, with nothing omitted at the back. WORD_SPLIT
     // makes the source a four-word descriptor whose owner slot is atomic.
     let (owner, kind) = unsafe { self.retain_window(at, 0, len) };
-    // The suffix owns its reference from here, so an unwind out of the
-    // narrowing drops it, as `slice` then `truncate` would.
-    let suffix = Self {
-      layout: Layout::external(data, owner, len - at, kind),
+    // The suffix owns its reference from here. Its words wait in a guard, so
+    // that an unwind out of the narrowing drops the suffix, as `slice` then
+    // `truncate` would, while the handle itself is built only once the
+    // narrowing returns: built before the call, it waits in memory, and its
+    // last word is then stored in pieces that a whole-word reload cannot
+    // forward.
+    let suffix = PendingSuffix::<T, S> {
+      data,
+      owner,
+      len: len - at,
+      kind,
+      _budget: core::marker::PhantomData,
     };
     self.truncate_shared(at);
-    suffix
+    suffix.into_vector()
   }
 
   /// Retains a raw or tagged owner for a subwindow and returns the owner word
@@ -1241,3 +1249,38 @@ impl<T, S: InlineSize> Drop for Vector<T, S> {
 
 #[cfg(all(test, bytora_atomic))]
 mod tests;
+
+// The words of split_off_words' suffix while the source narrows. The suffix
+// owns the reference retain_window took, so an unwind out of the narrowing
+// drops it as the Vector would; the normal path builds the Vector instead.
+#[cfg(bytora_atomic)]
+struct PendingSuffix<T, S: InlineSize> {
+  data: *const T,
+  owner: *const (),
+  len: usize,
+  kind: NonZeroU8,
+  _budget: core::marker::PhantomData<S>,
+}
+
+#[cfg(bytora_atomic)]
+impl<T, S: InlineSize> PendingSuffix<T, S> {
+  // Builds the suffix on the normal path, without running the guard.
+  #[inline(always)]
+  fn into_vector(self) -> Vector<T, S> {
+    let this = ManuallyDrop::new(self);
+    Vector {
+      layout: Layout::external(this.data, this.owner, this.len, this.kind),
+    }
+  }
+}
+
+#[cfg(bytora_atomic)]
+impl<T, S: InlineSize> Drop for PendingSuffix<T, S> {
+  // Reached only by an unwind out of the narrowing: building the suffix and
+  // dropping it releases its reference, as dropping the Vector does.
+  fn drop(&mut self) {
+    drop(Vector::<T, S> {
+      layout: Layout::external(self.data, self.owner, self.len, self.kind),
+    });
+  }
+}
