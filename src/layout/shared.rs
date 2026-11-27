@@ -905,7 +905,8 @@ impl<T, S: InlineSize> Vector<T, S> {
     && size_of::<T>() != 0;
 
   /// `slice(at..)` then `truncate(at)` on an external source, with the
-  /// suffix built from words last, for split_off's arm that stays in the
+  /// suffix built from words before the truncation, so that an unwind out of
+  /// it releases the suffix's reference, for split_off's arm that stays in the
   /// public method. The retain comes before the narrowing, as in `slice`
   /// then `truncate`, so a promotion it publishes is seen by the narrowing.
   ///

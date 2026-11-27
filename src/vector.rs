@@ -25,7 +25,43 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// Panics if a nonempty subset is outside this vector's current window.
   /// [`Self::try_slice_ref`] returns `None` instead.
   #[track_caller]
+  #[allow(
+    clippy::needless_return,
+    reason = "each target's body ends in a cfg-selected return"
+  )]
   pub fn slice_ref(&self, subset: &[T]) -> Self {
+    // On x86-64 the external arm ends in words here, and every other arm is
+    // one out-of-line call that returns the handle, for the reason `slice`
+    // gives.
+    #[cfg(target_arch = "x86_64")]
+    {
+      if !subset.is_empty() && !self.layout.is_inline() {
+        return match self.subset_range(subset) {
+          // SAFETY: The tag selects external storage, and subset_range
+          // returns an ordered subrange of the visible length.
+          Some(range) => unsafe { self.slice_shared(range, self.len()) },
+          None => subset_outside_vector(),
+        };
+      }
+      return self.slice_ref_other(subset);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+      if subset.is_empty() {
+        return Self::new();
+      }
+      return match self.subset_range(subset) {
+        Some(range) => self.slice(range),
+        None => subset_outside_vector(),
+      };
+    }
+  }
+
+  // slice_ref's other arms on x86-64: the other targets' body, out of line.
+  #[cfg(target_arch = "x86_64")]
+  #[track_caller]
+  #[inline(never)]
+  fn slice_ref_other(&self, subset: &[T]) -> Self {
     if subset.is_empty() {
       return Self::new();
     }
@@ -39,12 +75,29 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// [`Self::slice_ref`] does, or `None` where that method panics: for a
   /// nonempty subset outside this vector's current window.
   #[inline]
+  #[allow(
+    clippy::needless_return,
+    reason = "each target's body ends in a cfg-selected return"
+  )]
   pub fn try_slice_ref(&self, subset: &[T]) -> Option<Self> {
-    if subset.is_empty() {
-      return Some(Self::new());
+    // On x86-64 the twin checks the subset and then takes the panicking form,
+    // which can no longer panic, so that its words reach the result as the
+    // form's do: no out-of-line arm returns an Option.
+    #[cfg(target_arch = "x86_64")]
+    {
+      if !subset.is_empty() && self.subset_range(subset).is_none() {
+        return None;
+      }
+      return Some(self.slice_ref(subset));
     }
-    let range = self.subset_range(subset)?;
-    Some(self.slice(range))
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+      if subset.is_empty() {
+        return Some(Self::new());
+      }
+      let range = self.subset_range(subset)?;
+      return Some(self.slice(range));
+    }
   }
 
   // The range of a nonempty `subset` within the current window.
@@ -190,6 +243,11 @@ impl<T, S: InlineSize> Vector<T, S> {
       return Self::new();
     }
 
+    // On x86-64 `slice` splits its arms; this core keeps the other targets'
+    // body, which it was measured with.
+    #[cfg(target_arch = "x86_64")]
+    let prefix = self.slice_whole(..at);
+    #[cfg(not(target_arch = "x86_64"))]
     let prefix = self.slice(..at);
     self.advance(at);
     prefix

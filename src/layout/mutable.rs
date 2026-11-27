@@ -1432,8 +1432,9 @@ fn try_window_with_capacity<T>(capacity: usize) -> Option<NonNull<Window<T>>> {
 // the capacity-overflow panic, or the allocation-failure handler, as
 // Vec::with_capacity ends, with no second attempt. The allocator does not say
 // which of its two allocations was refused, so the handler is given the
-// elements' layout, the larger one, or the window's where the elements need
-// no allocation.
+// elements' layout, or the window's where the elements need no allocation:
+// a refused window box is reported with the elements' layout, whichever is
+// larger.
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cold]
 #[inline(never)]
