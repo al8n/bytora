@@ -1,4 +1,4 @@
-use super::{Slice, SliceMut, SupportedBytes};
+use super::{MAX_HANDLE_BYTES, Slice, SliceMut, SupportedBytes};
 use core::{hint::black_box, ptr};
 
 #[test]
@@ -30,6 +30,7 @@ fn full_byte_windows_move_and_advance() {
     check::<20>(18);
     check::<132>(128);
     check::<2044>(2040);
+    check::<4100>(4096);
   }
   check::<8>(7);
   check::<16>(14);
@@ -45,6 +46,48 @@ fn full_byte_windows_move_and_advance() {
   check::<256>(252);
   check::<264>(260);
   check::<2048>(2044);
+  check::<2056>(2052);
+  check::<4096>(4092);
+  check::<4104>(4100);
+  check::<MAX_HANDLE_BYTES>(8188);
+}
+
+#[test]
+fn large_payloads_are_inline_within_the_handle_budget() {
+  let source = core::array::from_fn::<_, 8189, _>(|i| i as u8);
+  let mut four_kib = SliceMut::<u8, 4104>::try_from_slice(&source[..4096]).unwrap();
+  assert_eq!(
+    four_kib.as_slice().as_ptr(),
+    ptr::from_ref(&four_kib).cast::<u8>()
+  );
+  four_kib.advance(4095);
+  assert_eq!(four_kib.as_mut_slice(), &source[4095..4096]);
+
+  let mut eight_kib = SliceMut::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source[..8188]).unwrap();
+  assert_eq!(
+    eight_kib.as_slice().as_ptr(),
+    ptr::from_ref(&eight_kib).cast::<u8>()
+  );
+  eight_kib.advance(4096);
+  let mut moved = black_box(Some(eight_kib)).unwrap();
+  assert_eq!(
+    moved.as_slice().as_ptr(),
+    ptr::from_ref(&moved).cast::<u8>().wrapping_add(4096)
+  );
+  assert_eq!(moved.as_slice(), &source[4096..8188]);
+  moved.as_mut_slice()[4091] = 17;
+  assert_eq!(moved.as_slice()[4091], 17);
+  moved.advance(4092);
+  assert!(moved.is_empty());
+
+  assert!(Slice::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert!(SliceMut::<u8, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert_eq!(Slice::<u32, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 2047);
+  assert_eq!(Slice::<(), MAX_HANDLE_BYTES>::INLINE_CAPACITY, 8188);
+  assert!(Slice::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8189]).is_none());
+  let mut zsts = SliceMut::<(), MAX_HANDLE_BYTES>::try_from_slice(&[(); 8188]).unwrap();
+  zsts.advance(8188);
+  assert!(zsts.is_empty());
 }
 
 #[test]

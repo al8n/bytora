@@ -13,15 +13,15 @@ extern crate std;
 
 mod layout;
 use layout::Layout;
-pub use layout::SupportedBytes;
+pub use layout::{MAX_HANDLE_BYTES, SupportedBytes};
 
 /// An owned slice with inline storage for `Copy` elements.
 ///
 /// `BYTES` is the exact size of the handle and its `Option`. It defaults to
-/// four machine words. See [`SupportedBytes`] for the available sizes.
+/// three machine words, the size of a `Vec<T>`. See [`SupportedBytes`] for the available sizes.
 /// Moving the handle moves its elements. Advancing changes only the cursor.
 #[repr(transparent)]
-pub struct Slice<T, const BYTES: usize = { 4 * size_of::<usize>() }>
+pub struct Slice<T, const BYTES: usize = { 3 * size_of::<usize>() }>
 where
   [(); BYTES]: SupportedBytes,
 {
@@ -74,9 +74,9 @@ where
 /// An owned slice whose inline `Copy` elements can be borrowed mutably.
 ///
 /// `BYTES` is the exact size of the handle and its `Option`. It defaults to
-/// four machine words. See [`SupportedBytes`] for the available sizes.
+/// three machine words, the size of a `Vec<T>`. See [`SupportedBytes`] for the available sizes.
 #[repr(transparent)]
-pub struct SliceMut<T, const BYTES: usize = { 4 * size_of::<usize>() }>
+pub struct SliceMut<T, const BYTES: usize = { 3 * size_of::<usize>() }>
 where
   [(); BYTES]: SupportedBytes,
 {
@@ -130,8 +130,18 @@ where
 }
 
 const _: () = {
-  assert!(size_of::<Slice<u32>>() == 4 * size_of::<usize>());
-  assert!(size_of::<Option<SliceMut<u32>>>() == 4 * size_of::<usize>());
+  assert!(size_of::<Slice<u32>>() == 3 * size_of::<usize>());
+  assert!(size_of::<SliceMut<u32>>() == 3 * size_of::<usize>());
+  assert!(size_of::<Option<Slice<u32>>>() == 3 * size_of::<usize>());
+  assert!(size_of::<Option<SliceMut<u32>>>() == 3 * size_of::<usize>());
+};
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+const _: () = {
+  assert!(size_of::<Slice<u32>>() == size_of::<std::vec::Vec<u32>>());
+  assert!(size_of::<SliceMut<u32>>() == size_of::<std::vec::Vec<u32>>());
+  assert!(size_of::<Option<Slice<u32>>>() == size_of::<std::vec::Vec<u32>>());
+  assert!(size_of::<Option<SliceMut<u32>>>() == size_of::<std::vec::Vec<u32>>());
 };
 
 #[cfg(test)]
