@@ -148,22 +148,12 @@ impl<T, S: InlineSize> Layout<T, S> {
     if len > Self::INLINE_CAPACITY {
       return None;
     }
-    let mut cursor = S::ZERO_CURSOR;
-    let tag = match cursor.as_mut() {
-      [] => TINY_INLINE | len as u8,
-      [_] => len as u8 + 1,
-      [_, _, end_low] => {
-        let [low, high] = (len as u16).to_le_bytes();
-        *end_low = low;
-        high + 1
-      }
-      _ => unreachable!(),
-    };
+    let (cursor, tag) = Self::inline_cursor(0..len);
     let mut layout = Self {
       _align: [],
       payload: MaybeUninit::uninit(),
       cursor,
-      tag: NonZeroU8::new(tag).unwrap(),
+      tag,
       _element: PhantomData,
     };
     if len != 0 && size_of::<T>() != 0 {
@@ -185,6 +175,21 @@ impl<T, S: InlineSize> Layout<T, S> {
     // Reading the MaybeUninit payload as part of Self preserves both
     // pointer provenance and uninitialized bytes, including element padding.
     unsafe { ptr::read(self) }
+  }
+
+  #[track_caller]
+  pub(super) fn slice_inline(&self, range: Range<usize>) -> Self {
+    let current = self.inline_range();
+    assert!(
+      range.start <= range.end && range.end <= current.len(),
+      "slice range out of bounds"
+    );
+    // The new absolute endpoints stay inside the initialized window. Copy the
+    // inline elements with their padding and provenance before changing the cursor.
+    let mut layout = self.clone_inline();
+    (layout.cursor, layout.tag) =
+      Self::inline_cursor(current.start + range.start..current.start + range.end);
+    layout
   }
 
   fn external_prefix(&self) -> &ExternalPrefix {
@@ -219,6 +224,26 @@ impl<T, S: InlineSize> Layout<T, S> {
       }
       _ => unreachable!(),
     }
+  }
+
+  // Callers supply a window within the inline capacity for this size.
+  fn inline_cursor(range: Range<usize>) -> (S::Cursor, NonZeroU8) {
+    let mut cursor = S::ZERO_CURSOR;
+    let tag = match cursor.as_mut() {
+      [] => TINY_INLINE | ((range.start as u8) << 3) | range.end as u8,
+      [start] => {
+        *start = range.start as u8;
+        range.end as u8 + 1
+      }
+      [lo, hi, end_low] => {
+        [*lo, *hi] = (range.start as u16).to_le_bytes();
+        let [low, high] = (range.end as u16).to_le_bytes();
+        *end_low = low;
+        high + 1
+      }
+      _ => unreachable!(),
+    };
+    (cursor, NonZeroU8::new(tag).unwrap())
   }
 
   // Empty and zero-sized slices need only a non-null, T-aligned pointer.

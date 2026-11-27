@@ -31,13 +31,17 @@ fn tagged_owner_dispatches_its_storage_operations_for_each_handle() {
     peer.advance(7);
     drop(original);
     let last = peer.clone();
+    let range = peer.slice(..2);
+    let empty = range.slice(2..);
     drop(peer);
     assert_eq!(last.as_slice(), b"owner");
+    assert_eq!(range.as_slice(), b"ow");
+    assert_eq!(empty.as_slice().as_ptr(), data[9..].as_ptr());
   }
   check::<{ 3 * size_of::<usize>() }>();
   check::<4104>();
-  assert_eq!(RETAINS.load(Relaxed), 4);
-  assert_eq!(RELEASES.load(Relaxed), 6);
+  assert_eq!(RETAINS.load(Relaxed), 8);
+  assert_eq!(RELEASES.load(Relaxed), 10);
 }
 
 #[test]
@@ -82,12 +86,24 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
     drop(peer);
     assert_eq!(weak.strong_count(), 1);
     assert_eq!(last.as_slice()[0], 13);
+    let short = last.slice(1..3);
+    let nested = short.slice(1..);
+    let empty_range = nested.slice(1..);
+    assert_eq!(short.as_slice().as_ptr(), base.wrapping_add(14));
+    assert_eq!(weak.strong_count(), 4);
+    drop(short);
     last.advance(last.len());
     let empty = last.clone();
     drop(last);
     assert!(empty.is_empty());
-    assert_eq!(weak.strong_count(), 1);
+    assert_eq!(weak.strong_count(), 3);
     drop(empty);
+    assert_eq!(nested.as_slice(), &[15]);
+    drop(nested);
+    assert_eq!(weak.strong_count(), 1);
+    assert!(empty_range.is_empty());
+    assert_eq!(empty_range.as_slice().as_ptr(), base.wrapping_add(16));
+    drop(empty_range);
     assert!(weak.upgrade().is_none());
   }
   check::<24>();
