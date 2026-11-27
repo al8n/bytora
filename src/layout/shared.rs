@@ -21,7 +21,7 @@ mod two_word;
 #[cfg(smol_slice_atomic)]
 mod vector;
 
-#[cfg(any(feature = "std", feature = "alloc"))]
+#[cfg(smol_slice_atomic)]
 type HandleWord = core::mem::MaybeUninit<[u8; size_of::<usize>()]>;
 
 // Vec's accessors supply the raw parts independently of its private field
@@ -476,25 +476,8 @@ impl<T, S: InlineSize> Slice<T, S> {
         // A zero-budget inline window is empty for every element type.
         return Ok(Vec::new());
       }
-      let values = if cfg!(smol_slice_atomic)
-        && Layout::<T, S>::COMPACT_EXTERNAL
-        && size_of::<Self>() == 4 * size_of::<HandleWord>()
-      {
-        let words = ptr::from_ref(&*this).cast::<HandleWord>();
-        // SAFETY: Four words cover the owned descriptor. Only None leaves
-        // ownership with this handle; success and unwind suppress its Drop.
-        unsafe {
-          Self::take_four_words(
-            words.read_unaligned(),
-            words.add(1).read_unaligned(),
-            words.add(2).read_unaligned(),
-            words.add(3).read_unaligned(),
-          )
-        }
-      } else {
-        // SAFETY: Only failure below reads the original handle again.
-        unsafe { Self::take_backing_vec(&mut this) }
-      };
+      // SAFETY: Only failure below reads the original handle again.
+      let values = unsafe { Self::take_backing_vec(&mut this) };
       let Some(values) = values else {
         return Err(ManuallyDrop::into_inner(this));
       };
@@ -522,31 +505,6 @@ impl<T, S: InlineSize> Slice<T, S> {
       }
       values.assume_init()
     }
-  }
-
-  // Separate scalar arguments let the caller read a full raw vector's two
-  // pointer words directly from an Option slot, even across Option::take.
-  /// # Safety
-  ///
-  /// The words must be the complete representation of one live, owned Self.
-  /// Only a failed take permits the caller to use the original handle again.
-  #[cfg(any(feature = "std", feature = "alloc"))]
-  #[inline(never)]
-  unsafe fn take_four_words(
-    first: HandleWord,
-    second: HandleWord,
-    third: HandleWord,
-    fourth: HandleWord,
-  ) -> Option<Vec<T>> {
-    let words = [first, second, third, fourth];
-    // SAFETY: The caller transfers exactly the bytes of one valid Self. The
-    // four padding-free words preserve partial pointer provenance and every
-    // uninitialized byte. Their array need not have the alignment of Self.
-    let handle = unsafe { ptr::from_ref(&words).cast::<Self>().read_unaligned() };
-    let mut this = ManuallyDrop::new(handle);
-    // SAFETY: The copy carries the original handle's ownership. On failure
-    // it remains with the caller and this copy's destructor stays suppressed.
-    unsafe { Self::take_owned_window(&mut this) }
   }
 
   /// # Safety

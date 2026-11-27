@@ -166,6 +166,27 @@ mod tests {
   }
 
   #[test]
+  fn arc_windows_keep_the_handle_and_copy_into_a_vector_on_demand() {
+    fn check<S: InlineSize>() {
+      let input = Arc::<[u8]>::from(vec![3u8, 5, 7, 11].into_boxed_slice());
+      let mut adopted = Slice::<u8, S>::try_from_arc(Arc::clone(&input)).unwrap();
+      adopted.advance(1);
+      let adopted = adopted.try_into_vec().err().unwrap();
+      assert_eq!(adopted.as_slice().as_ptr(), input.as_ptr().wrapping_add(1));
+      assert_eq!(Arc::strong_count(&input), 2);
+      let copied = adopted.into_vec();
+      assert_eq!(copied, [5, 7, 11]);
+      assert_ne!(copied.as_ptr(), input.as_ptr().wrapping_add(1));
+      assert_eq!(Arc::strong_count(&input), 1);
+    }
+    check::<typenum::U0>();
+    check::<crate::DefaultSize>();
+    check::<typenum::U24>();
+    check::<typenum::U32>();
+    check::<typenum::U40>();
+  }
+
+  #[test]
   fn arc_windows_remain_covariant_after_adoption() {
     type Any = for<'a> fn(&'a str) -> &'a str;
     type Static = fn(&'static str) -> &'static str;
