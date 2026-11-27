@@ -86,7 +86,16 @@ impl<T, S: InlineSize> Vector<T, S> {
     if at > len {
       split_index_out_of_bounds();
     }
-    self.split_off_within(at, len)
+    // The arm that ends in words stays here, for the class WORD_SPLIT names,
+    // and every other arm is one call that returns the result: a helper with
+    // several arms, wrapped once, would take this arm's words apart.
+    #[cfg(bytora_atomic)]
+    if Self::WORD_SPLIT && at != 0 && at != len && !self.layout.is_inline() {
+      // SAFETY: WORD_SPLIT holds, the source is external, `len` is its
+      // length, and `0 < at < len`.
+      return unsafe { self.split_off_words(at, len) };
+    }
+    self.split_off_other(at, len)
   }
 
   /// Splits at `at` as [`Self::split_off`] does, returning the suffix and
@@ -101,6 +110,24 @@ impl<T, S: InlineSize> Vector<T, S> {
     if at > len {
       return Err(OutOfBounds::new(at, len));
     }
+    #[cfg(bytora_atomic)]
+    if Self::WORD_SPLIT && at != 0 && at != len && !self.layout.is_inline() {
+      // SAFETY: WORD_SPLIT holds, the source is external, `len` is its
+      // length, and `0 < at < len`.
+      return Ok(unsafe { self.split_off_words(at, len) });
+    }
+    self.try_split_off_other(at, len)
+  }
+
+  // split_off's other arms, one wrapper per form, each returning its form's
+  // own result.
+  #[inline(never)]
+  fn split_off_other(&mut self, at: usize, len: usize) -> Self {
+    self.split_off_within(at, len)
+  }
+
+  #[inline(never)]
+  fn try_split_off_other(&mut self, at: usize, len: usize) -> Result<Self, OutOfBounds> {
     Ok(self.split_off_within(at, len))
   }
 
