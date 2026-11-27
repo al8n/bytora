@@ -72,6 +72,11 @@ path = "benches/opcount.rs"
 name = "opcount"
 harness = false
 
+[[bench]]
+path = "benches/forwarding.rs"
+name = "forwarding"
+harness = false
+
 [profile.bench]
 opt-level = 3
 debug = false
