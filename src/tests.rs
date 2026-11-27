@@ -84,6 +84,14 @@ fn static_storage_supports_noncopy_and_overaligned_elements() {
   assert_eq!(last.as_slice()[0].0, 5);
   assert!(ptr::eq(&last.as_slice()[0], &DATA[1]));
   assert_eq!(HANDLE.len(), 2);
+
+  let source = SliceN::<Aligned, 64>::try_from_static(&DATA).unwrap();
+  let mut replacement = source.slice(1..);
+  replacement.clone_from(&source);
+  assert_eq!(replacement.len(), 2);
+  assert!(ptr::eq(&replacement.as_slice()[0], &DATA[0]));
+  replacement.advance(1);
+  assert_eq!(source.len(), 2);
 }
 
 #[test]
@@ -384,6 +392,11 @@ fn copies_preserve_pointer_fields_and_uninitialized_padding() {
     byte: 5,
     number: &numbers[1],
   };
+  let compact = SliceN::<Padded<'_>, 32>::try_from_slice(&[second]).unwrap();
+  let copy = black_box(compact.clone());
+  assert_eq!(copy.as_slice()[0].byte, 5);
+  assert!(ptr::eq(copy.as_slice()[0].number, &numbers[1]));
+
   let mut values = SliceMutN::<Padded<'_>, 48>::try_from_slice(&[first, second]).unwrap();
   values.advance(1);
   let mut moved = black_box(Some(values)).unwrap();
