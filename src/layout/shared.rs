@@ -1027,7 +1027,7 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// path a frame on Linux, for its outline-atomic call, and on Windows, for
   /// the refcount overflow call. macOS's atomics are inline and its plain
   /// path was a leaf either way; the attribute keeps one shape on every
-  /// AArch64 target. Inlined everywhere else, as the arm was before.
+  /// AArch64 target. Inlined everywhere else.
   ///
   /// # Safety
   ///
@@ -1038,7 +1038,7 @@ impl<T, S: InlineSize> Vector<T, S> {
   unsafe fn clone_owned(&self) -> Self {
     // SAFETY: This restates the caller's obligation. Out of line, the
     // function cannot see the caller's tag test, so without it every owned
-    // clone tested the tag again before reaching the owner.
+    // clone would test the tag again before reaching the owner.
     unsafe { core::hint::assert_unchecked(self.layout.uses_external_owner()) };
     let owner = if vector::AVAILABLE {
       self
