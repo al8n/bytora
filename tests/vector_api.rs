@@ -1,4 +1,4 @@
-use bytora::{InlineSize, Vector, VectorN};
+use bytora::{InlineSize, TryPutError, Vector, VectorN};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
@@ -209,7 +209,13 @@ fn copied_values_use_inline_capacity_and_report_unsupported_overflow() {
   let copy = Vector::<u8>::copy_from_slice(&source);
   assert_eq!(copy.as_slice(), &source);
   type OneWord = VectorN<u8, { size_of::<usize>() }>;
-  assert!(OneWord::try_copy_from_slice(&[9; 64]).is_none());
+  assert_eq!(
+    OneWord::try_copy_from_slice(&[9; 64]).err(),
+    Some(TryPutError {
+      requested: 64,
+      available: OneWord::INLINE_CAPACITY,
+    })
+  );
   assert!(catch_unwind(|| OneWord::copy_from_slice(&[9; 64])).is_err());
 }
 
@@ -230,7 +236,7 @@ fn two_word_borrowed_copy_spills_when_the_owned_vector_fits() {
     );
     assert_eq!(TwoWords::copy_from_slice(&input).as_slice(), &input);
   } else {
-    assert!(copied.is_none());
+    assert!(copied.is_err());
   }
 }
 
@@ -248,7 +254,13 @@ fn copied_values_spill_and_reject_unrepresentable_zst_lengths() {
   assert_eq!(zero_budget.as_slice(), &[3, 4, 5]);
 
   let too_long = &[(); isize::MAX as usize + 1];
-  assert!(VectorN::<(), 0>::try_copy_from_slice(too_long).is_none());
+  assert_eq!(
+    VectorN::<(), 0>::try_copy_from_slice(too_long).err(),
+    Some(TryPutError {
+      requested: isize::MAX as usize + 1,
+      available: isize::MAX as usize,
+    })
+  );
 }
 
 #[cfg(not(bytora_atomic))]
