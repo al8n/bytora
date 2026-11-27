@@ -2,9 +2,11 @@ name: perf
 
 # ── THE MEASUREMENT LANE ────────────────────────────────────────────────────────────────────
 #
-# The criterion benches, each run once in test mode (`-- --test`): a smoke check that they still
-# compile and run, and not a measurement. A shared GitHub runner is far too noisy for timings that
-# mean anything, so no number is read and nothing here can regress; real timings are taken off CI.
+# `bench-smoke` runs the criterion benches once each in test mode (`-- --test`): a smoke check that
+# they still compile and run, and not a measurement. No timing is taken by it, and nothing in it
+# can regress. A shared GitHub runner is far too noisy for an absolute timing to mean anything;
+# the dispatched `bench-matrix` job below is the only place CI takes timings, and it reads them
+# only as same-run ratios against `bytes::Bytes`.
 #
 # It is a workflow of its own because `[profile.bench]` (`opt-level = 3`, thin LTO, one codegen
 # unit) builds the crate and criterion's whole dependency tree fully optimised, which is the
@@ -35,10 +37,38 @@ on:
       - 'LICENSE-*'
       - '**.txt'
   workflow_dispatch:
+    inputs:
+      base:
+        description: 'Git ref to A/B against on the same runner (optional; empty = head only)'
+        required: false
+        default: ''
+        type: string
+      filter:
+        description: 'Criterion filter regex (empty = every benchmark)'
+        required: false
+        default: ''
+        type: string
+      toolchain:
+        description: 'Rust toolchain'
+        required: false
+        default: 'stable'
+        type: string
+      rounds:
+        description: 'Rounds of the whole bench set per runner'
+        required: false
+        default: '2'
+        type: string
+      benches:
+        description: 'Space-separated bench targets'
+        required: false
+        default: 'budgets clone lazy_vec stages storage'
+        type: string
 
+# A dispatched matrix run lasts hours: it has a group of its own, keyed on the run id, so that two
+# dispatches never queue behind or cancel one another, and a push never cancels one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || format('{0}-{1}', github.ref, github.ref == 'refs/heads/main' && github.sha || '') }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -69,3 +99,177 @@ jobs:
       # failing it, and a skipped bench is a green job over a bench that never ran.
       - name: cargo bench --all-features -- --test
         run: cargo bench --all-features -- --test
+
+  # ── bench-matrix: same-run ratios on five runner types ───────────────────────────────────────
+  #
+  # What it measures: the criterion bench targets named by `benches` (default: budgets, clone,
+  # lazy_vec, stages, storage) with the
+  # settings the handoff uses (`--sample-size 60 --warm-up-time 0.25 --measurement-time 0.85
+  # --nresamples 10000`), `rounds` times, on Linux x86_64, Linux ARM64, Windows x86_64, Windows
+  # ARM64 and macOS (Apple silicon). Dispatch only:
+  #   gh workflow run perf.yml --ref <branch> -f base=<ref> -f filter='stages_native_stride' -f rounds=2
+  #
+  # How to read it: ABSOLUTE ns DO NOT COMPARE ACROSS RUNNERS (different CPUs, shared hosts, noisy
+  # neighbours). Every table cell is `ns (ratio)`, the ratio being that handle's time over the
+  # `bytes::Bytes` control measured in the SAME run, for the same operation and the same len/cap
+  # (or backing); compare ratios across runners, and read a ratio near 1.00 as a tie. The
+  # `max ratio` column is the worst operation of the row. Two rounds are summarised by their median;
+  # the CSV keeps both. Round 2 runs the bench targets in reverse order, so that a drift of the
+  # machine over the job does not land on the same target twice.
+  #
+  # The per-runner jobs only measure and upload; the `bench-summary` job below reads every
+  # platform's artifact and writes one summary: a cross-platform overview, then each platform's
+  # tables.
+  #
+  # With `base` set, the base ref is checked out beside the head and benched on the same runner in
+  # the same job: per bench target and round, the base runs `--save-baseline base` and the head
+  # runs `--baseline-lenient base` right after it, both under one `CRITERION_HOME`, so the change
+  # columns are criterion's own base -> head comparison. The lenient form is what lets a head id
+  # that the base lacks run without a comparison instead of failing the run. A bench target the base lacks (e.g. `stages`
+  # before it existed) is skipped for the base and shows `—`.
+  #
+  # Timeout: the M1 run measured about 900 ids per round (220 each in budgets_native_stride and
+  # budgets_padded_128, 338 in stages_native_stride, 114 in storage, plus clone and lazy_vec) at
+  # ~1.4 s each (0.25 s warm-up + 0.85 s measurement + resampling): ~21 min per round, so two rounds
+  # are ~45 min plus 10-15 min of thin-LTO compilation, and a base A/B doubles the benching to
+  # ~1.7 h. Cold hosted ARM and Windows runners are slower, hence a job of 350 min (the hosted
+  # ceiling is 360) and a Benchmark step of 320, so that an overrun still reaches the upload with
+  # the rounds already done. Narrow `filter` or lower `rounds` for a quick run.
+  #
+  # Windows: every multi-line step sets `shell: bash` explicitly (PowerShell breaks backslash
+  # continuations), which also turns `pipefail` on, so no step pipes into `grep -q`.
+  bench-matrix:
+    name: bench matrix (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
+    env:
+      BASE_REF: ${{ inputs.base }}
+      BENCH_FILTER: ${{ inputs.filter }}
+      TOOLCHAIN: ${{ inputs.toolchain }}
+      ROUNDS: ${{ inputs.rounds }}
+      BENCHES: ${{ inputs.benches }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            # windows-11-arm images may not ship rustup.
+            curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.exe https://win.rustup.rs/aarch64
+            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            # The Git Bash form for this step, the Windows form for the steps after it.
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cygpath -w "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$TOOLCHAIN"
+      - name: Machine
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) cpu=$(lscpu | grep 'Model name' | cut -d: -f2- | sed 's/^ *//') ;;
+            macOS) cpu=$(sysctl -n machdep.cpu.brand_string) ;;
+            Windows) cpu=$(powershell -NoProfile -Command '(Get-CimInstance Win32_Processor).Name' | tr -d '\r') ;;
+          esac
+          {
+            echo "runner=${{ matrix.os }}"
+            echo "os=$RUNNER_OS"
+            echo "arch=$RUNNER_ARCH"
+            echo "cpu=$cpu"
+            echo "head=$(git rev-parse HEAD)"
+            echo "base="
+            rustc -vV
+            cargo -V
+          } > machine.txt
+          cat machine.txt
+      - name: Resolve dependencies once
+        shell: bash
+        run: cargo generate-lockfile
+      - name: Check out the base
+        if: ${{ inputs.base != '' }}
+        shell: bash
+        run: |
+          git worktree add "$RUNNER_TEMP/base-src" "$BASE_REF"
+          git -C "$RUNNER_TEMP/base-src" log --format='base %h %s' -1
+          echo "base resolved to $(git -C "$RUNNER_TEMP/base-src" rev-parse HEAD)"
+          sed "s/^base=.*/base=$(git -C "$RUNNER_TEMP/base-src" rev-parse HEAD)/" machine.txt > machine.tmp
+          mv machine.tmp machine.txt
+          # Both sides build against the same resolved dependencies.
+          cp Cargo.lock "$RUNNER_TEMP/base-src/Cargo.lock"
+      - name: Benchmark
+        shell: bash
+        timeout-minutes: 320
+        run: |
+          export CRITERION_HOME="$GITHUB_WORKSPACE/target/criterion"
+          args=(--sample-size 60 --warm-up-time 0.25 --measurement-time 0.85 --nresamples 10000 --noplot)
+          if [ -n "$BENCH_FILTER" ]; then args=("$BENCH_FILTER" "${args[@]}"); fi
+          mkdir -p criterion-rounds
+          for round in $(seq 1 "$ROUNDS"); do
+            # A fresh criterion directory per round, so that `change/` can only ever be the
+            # base -> head comparison and never round 2 against round 1.
+            rm -rf "$CRITERION_HOME"
+            # Even rounds run the targets in reverse order.
+            order="$BENCHES"
+            if [ $((round % 2)) -eq 0 ]; then
+              order=""
+              for b in $BENCHES; do order="$b $order"; done
+            fi
+            for b in $order; do
+              if [ -n "$BASE_REF" ] && [ -f "$RUNNER_TEMP/base-src/benches/$b.rs" ]; then
+                (cd "$RUNNER_TEMP/base-src" && cargo bench --locked --bench "$b" -- "${args[@]}" --save-baseline base)
+                compare=(--baseline-lenient base)
+              else
+                compare=()
+              fi
+              cargo bench --locked --bench "$b" -- "${args[@]}" "${compare[@]}"
+            done
+            cp -R "$CRITERION_HOME" "criterion-rounds/round$round"
+          done
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: |
+            criterion-rounds
+            machine.txt
+            Cargo.lock
+          if-no-files-found: warn
+
+  # ── bench-summary: one summary for every platform ────────────────────────────────────────────
+  #
+  # Runs on Linux, where `python3` is a real interpreter (on a Windows 11 image it can be the
+  # Microsoft Store stub), after every matrix job, whether it passed, failed or timed out. A
+  # platform with no artifact is named in the overview instead of being left out.
+  bench-summary:
+    name: bench summary
+    needs: bench-matrix
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download every platform's artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: artifacts
+      - name: Summarize
+        shell: bash
+        run: |
+          python3 -I ci/bench/summarize.py --platforms artifacts --csv bench-summary.csv \
+            --expect ubuntu-latest ubuntu-24.04-arm windows-latest windows-11-arm macos-latest \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the combined CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-summary
+          path: bench-summary.csv
+          if-no-files-found: warn
