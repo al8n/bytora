@@ -9,8 +9,8 @@ request, and `release.yml` publishes the released section as the GitHub Release 
 
 ## Unreleased
 
-- Default and zero-budget `Slice`, `SliceMut`, and `LocalSlice` handles and
+- Default and zero-budget `Vector`, `VectorMut`, and `LocalVector` handles and
   their `Option`s use four machine words, matching `bytes::Bytes` (16 bytes on
-  32-bit targets and 32 bytes on 64-bit targets). Both default `Slice<u8>` and
-  `SliceMut<u8>` hold 30 inline bytes on 64-bit targets and 14 on 32-bit targets.
+  32-bit targets and 32 bytes on 64-bit targets). Both default `Vector<u8>` and
+  `VectorMut<u8>` hold 30 inline bytes on 64-bit targets and 14 on 32-bit targets.
   The zero-budget inline capacity remains zero.

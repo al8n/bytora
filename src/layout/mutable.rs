@@ -1,5 +1,5 @@
 use super::{InlineSize, Layout};
-use crate::{Slice, SliceMut};
+use crate::{Vector, VectorMut};
 use core::{
   marker::PhantomData,
   mem::{self, MaybeUninit},
@@ -96,7 +96,7 @@ mod writable {
 ///
 /// Every positive budget implements this trait for `T: Copy`. The zero budget
 /// accepts every element type. Use this bound on code generic over the budget
-/// that calls `SliceMut::new`, `SliceMut::with_capacity`, or `SliceMut::freeze`.
+/// that calls `VectorMut::new`, `VectorMut::with_capacity`, or `VectorMut::freeze`.
 ///
 /// ```compile_fail
 /// use bytora::{WritableSize, typenum::U24};
@@ -110,13 +110,13 @@ mod writable {
 ///
 /// ```compile_fail
 /// use core::marker::PhantomData;
-/// use bytora::SliceMut;
+/// use bytora::VectorMut;
 /// struct Element<F>(u8, PhantomData<F>);
 /// impl Copy for Element<fn(&())> {}
 /// impl Clone for Element<fn(&())> { fn clone(&self) -> Self { *self } }
 /// let value = Element::<fn(&())>(1, PhantomData);
-/// let original = SliceMut::<_>::try_from_slice(&[value]).unwrap();
-/// let widened: SliceMut<Element<fn(&'static ())>> = original;
+/// let original = VectorMut::<_>::try_from_slice(&[value]).unwrap();
+/// let widened: VectorMut<Element<fn(&'static ())>> = original;
 /// let _ = widened.freeze();
 /// ```
 pub trait WritableSize<T>: InlineSize + writable::Sealed<T> {}
@@ -184,9 +184,9 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 }
 
-impl<T, S: InlineSize> SliceMut<T, S> {
-  /// The maximum number of inline elements, as in [`Slice::INLINE_CAPACITY`].
-  pub const INLINE_CAPACITY: usize = Slice::<T, S>::INLINE_CAPACITY;
+impl<T, S: InlineSize> VectorMut<T, S> {
+  /// The maximum number of inline elements, as in [`Vector::INLINE_CAPACITY`].
+  pub const INLINE_CAPACITY: usize = Vector::<T, S>::INLINE_CAPACITY;
 
   const fn blank() -> Self {
     Self {
@@ -672,7 +672,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
     values
   }
 
-  fn freeze_inline(mut self) -> Slice<T, S>
+  fn freeze_inline(mut self) -> Vector<T, S>
   where
     S: WritableSize<T>,
   {
@@ -682,7 +682,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
     if layout.tag == EMPTY_WITHOUT_COPY {
       layout = Layout::empty_inline();
     }
-    Slice { layout }
+    Vector { layout }
   }
 
   /// Freezes this view and preserves the addresses of heap elements. Handles
@@ -693,7 +693,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// window outside the immutable descriptor's limits. Positive budgets
   /// require the current element type to be `Copy`.
   #[cfg(bytora_atomic)]
-  pub fn try_freeze(self) -> Result<Slice<T, S>, Self>
+  pub fn try_freeze(self) -> Result<Vector<T, S>, Self>
   where
     S: WritableSize<T>,
     T: Send + Sync,
@@ -712,7 +712,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// elements begin at the allocation base and their count fits the two-word
   /// vector descriptor. The visible window can start within that prefix.
   #[cfg(bytora_atomic)]
-  pub fn try_freeze_shared(mut self) -> Result<Slice<T, S>, Self>
+  pub fn try_freeze_shared(mut self) -> Result<Vector<T, S>, Self>
   where
     T: Send + Sync,
   {
@@ -723,7 +723,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
       else {
         return Err(self);
       };
-      let mut frozen = Slice::try_from_shared_vec(values)
+      let mut frozen = Vector::try_from_shared_vec(values)
         .unwrap_or_else(|_| unreachable!("the original vector fits in the two-word handle"));
       frozen.advance(start);
       return Ok(frozen);
@@ -735,13 +735,13 @@ impl<T, S: InlineSize> SliceMut<T, S> {
       Some(window) => *window,
       None => Window::from_vec(self.into_vec()),
     };
-    Slice::try_from_window(window).map_err(Self::from_window)
+    Vector::try_from_window(window).map_err(Self::from_window)
   }
 
   /// Freezes an inline view. Without a shared allocation owner, heap windows
   /// are returned intact.
   #[cfg(not(bytora_atomic))]
-  pub fn try_freeze(self) -> Result<Slice<T, S>, Self>
+  pub fn try_freeze(self) -> Result<Vector<T, S>, Self>
   where
     S: WritableSize<T>,
   {
@@ -760,7 +760,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// a two-word heap window with live mutable siblings or a relinquished prefix.
   #[cfg(bytora_atomic)]
   #[track_caller]
-  pub fn freeze(self) -> Slice<T, S>
+  pub fn freeze(self) -> Vector<T, S>
   where
     S: WritableSize<T>,
     T: Send + Sync,
@@ -778,7 +778,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   /// Panics if the view uses a heap allocation on a target without shared ownership.
   #[cfg(not(bytora_atomic))]
   #[track_caller]
-  pub fn freeze(self) -> Slice<T, S>
+  pub fn freeze(self) -> Vector<T, S>
   where
     S: WritableSize<T>,
   {
@@ -789,7 +789,7 @@ impl<T, S: InlineSize> SliceMut<T, S> {
   }
 }
 
-impl<S: InlineSize> SliceMut<u8, S> {
+impl<S: InlineSize> VectorMut<u8, S> {
   /// Creates a buffer of `len` initialized zero bytes.
   #[track_caller]
   pub fn zeroed(len: usize) -> Self {
@@ -804,7 +804,7 @@ impl<S: InlineSize> SliceMut<u8, S> {
   }
 }
 
-impl<T> SliceMut<T, typenum::U0> {
+impl<T> VectorMut<T, typenum::U0> {
   /// Creates an allocation-free four-word buffer for any element type.
   pub const fn empty() -> Self {
     Self::blank()
@@ -814,22 +814,22 @@ impl<T> SliceMut<T, typenum::U0> {
 /// Takes a vector of any element type with its original allocation.
 ///
 /// ```compile_fail
-/// use bytora::SliceMutN;
+/// use bytora::VectorMutN;
 /// use std::rc::Rc;
 /// fn send<T: Send>(_: T) {}
-/// send(SliceMutN::<_, 0>::from(vec![Rc::new(1)]));
+/// send(VectorMutN::<_, 0>::from(vec![Rc::new(1)]));
 /// ```
 ///
 /// ```compile_fail
 /// use core::cell::Cell;
-/// use bytora::SliceMutN;
+/// use bytora::VectorMutN;
 /// fn sync<T: Sync>() {}
-/// sync::<SliceMutN<Cell<u8>, 0>>();
+/// sync::<VectorMutN<Cell<u8>, 0>>();
 /// ```
 ///
 /// ```compile_fail
 /// use core::cell::Cell;
-/// use bytora::SliceMutN;
+/// use bytora::VectorMutN;
 /// struct OnDrop<'a>(&'a Cell<bool>);
 /// impl Drop for OnDrop<'_> {
 ///     fn drop(&mut self) { self.0.set(true); }
@@ -837,12 +837,12 @@ impl<T> SliceMut<T, typenum::U0> {
 /// let handle;
 /// {
 ///     let flag = Cell::new(false);
-///     handle = SliceMutN::<_, 0>::from(vec![OnDrop(&flag)]);
+///     handle = VectorMutN::<_, 0>::from(vec![OnDrop(&flag)]);
 /// }
 /// drop(handle);
 /// ```
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl<T> From<Vec<T>> for SliceMut<T, typenum::U0> {
+impl<T> From<Vec<T>> for VectorMut<T, typenum::U0> {
   fn from(values: Vec<T>) -> Self {
     Self::try_from_vec(values)
       .ok()

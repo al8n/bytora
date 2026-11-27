@@ -46,7 +46,7 @@ fn compact_static_windows_cross_the_fast_tag_length_boundary() {
   const BOUNDARY: usize = 1 << (usize::BITS - 8);
   static DATA: [(); BOUNDARY + 1] = [(); BOUNDARY + 1];
   fn check<S: InlineSize>() {
-    let mut source = crate::Slice::<(), S>::try_from_static(&DATA).unwrap();
+    let mut source = crate::Vector::<(), S>::try_from_static(&DATA).unwrap();
     assert_eq!(
       source.layout.tag == COMPACT_STATIC,
       !Layout::<(), S>::PACKED_LEN
@@ -81,7 +81,7 @@ fn packed_static_tags_stay_external_across_short_windows() {
   static DATA: [Field; 64] = [const { Field(42) }; 64];
   for len in [0, 1, 7, 22, 23, 31, 32, 63, 64] {
     let mut source =
-      crate::SliceN::<Field, { 3 * size_of::<usize>() }>::try_from_static(&DATA[..len]).unwrap();
+      crate::VectorN::<Field, { 3 * size_of::<usize>() }>::try_from_static(&DATA[..len]).unwrap();
     assert_eq!(source.layout.tag, COMPACT_STATIC);
     assert!(!source.layout.is_inline());
     assert_eq!(source.as_slice().as_ptr(), DATA.as_ptr());

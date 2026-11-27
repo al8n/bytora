@@ -8,7 +8,7 @@
 #[cfg(bytora_atomic)]
 mod measurement {
   use bytes::Bytes;
-  use bytora::{Slice, SliceN};
+  use bytora::{Vector, VectorN};
   use std::hint::black_box;
 
   const LEN: usize = 64;
@@ -131,22 +131,22 @@ mod measurement {
     assert_eq!(measured.count_total, 1);
     drop(probe);
 
-    type DefaultSlice = Slice<u8>;
-    type WideSlice = SliceN<u8, 32>;
+    type DefaultVector = Vector<u8>;
+    type WideVector = VectorN<u8, 32>;
     for kind in [Capacity::Exact, Capacity::Spare] {
       report(
-        "slice_default",
+        "vector_default",
         kind,
-        |values| DefaultSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
-        DefaultSlice::as_slice,
+        |values| DefaultVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        DefaultVector::as_slice,
       );
       report(
-        "slice_32",
+        "vector_32",
         kind,
-        |values| WideSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
-        WideSlice::as_slice,
+        |values| WideVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        WideVector::as_slice,
       );
       report("bytes", kind, Bytes::from, Vec::from, Bytes::as_ref);
     }

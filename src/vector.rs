@@ -1,25 +1,25 @@
-use crate::{InlineSize, Layout, Slice};
+use crate::{InlineSize, Layout, Vector};
 use core::{mem, ptr};
 
-impl<T, S: InlineSize> Slice<T, S> {
-  /// Creates an empty slice without allocating, for any element type or size.
+impl<T, S: InlineSize> Vector<T, S> {
+  /// Creates an empty vector without allocating, for any element type or size.
   pub const fn new() -> Self {
     Self {
       layout: Layout::empty_inline(),
     }
   }
 
-  /// Returns the part of this slice corresponding to `subset`.
+  /// Returns the part of this vector corresponding to `subset`.
   ///
   /// An empty subset is accepted regardless of its pointer and returns a new
-  /// empty slice. For nonempty zero-sized elements, the pointer must match
-  /// this slice's pointer and the length must fit. Such pointers do not encode
+  /// empty vector. For nonempty zero-sized elements, the pointer must match
+  /// this vector's pointer and the length must fit. Such pointers do not encode
   /// an element offset or reliably distinguish allocations, so the returned
   /// window uses the corresponding prefix.
   ///
   /// # Panics
   ///
-  /// Panics if a nonempty subset is outside this slice's current window.
+  /// Panics if a nonempty subset is outside this vector's current window.
   #[track_caller]
   pub fn slice_ref(&self, subset: &[T]) -> Self {
     if subset.is_empty() {
@@ -30,7 +30,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     if mem::size_of::<T>() == 0 {
       assert!(
         ptr::eq(source, subset.as_ptr()) && subset.len() <= self.len(),
-        "subset is outside this slice"
+        "subset is outside this vector"
       );
       return self.slice(..subset.len());
     }
@@ -39,16 +39,16 @@ impl<T, S: InlineSize> Slice<T, S> {
       .as_ptr()
       .addr()
       .checked_sub(source.addr())
-      .expect("subset is outside this slice");
+      .expect("subset is outside this vector");
     let element_size = mem::size_of::<T>();
     assert!(
       byte_offset % element_size == 0,
-      "subset is outside this slice"
+      "subset is outside this vector"
     );
     let start = byte_offset / element_size;
     assert!(
       start <= self.len() && subset.len() <= self.len() - start,
-      "subset is outside this slice"
+      "subset is outside this vector"
     );
     self.slice(start..start + subset.len())
   }
@@ -103,7 +103,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     prefix
   }
 
-  /// Shortens the slice to `len` elements, keeping its prefix.
+  /// Shortens the vector to `len` elements, keeping its prefix.
   ///
   /// A length greater than the current length has no effect. Truncating to
   /// zero releases this handle's ownership of the original storage.
@@ -122,7 +122,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     self.truncate(0);
   }
 
-  /// Copies elements into a new slice.
+  /// Copies elements into a new vector.
   ///
   /// Elements are stored inline if they fit. When shared ownership is
   /// available through native atomics or `extra-platforms`, larger inputs use
@@ -142,7 +142,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     Self::try_copy_from_slice(values).expect("slice does not fit this handle")
   }
 
-  /// Copies elements into a new inline slice.
+  /// Copies elements into a new inline vector.
   ///
   /// # Panics
   ///
@@ -188,7 +188,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 }
 
-impl<T, S: InlineSize> Default for Slice<T, S> {
+impl<T, S: InlineSize> Default for Vector<T, S> {
   fn default() -> Self {
     Self::new()
   }

@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(bytora_atomic)]
 mod ownership {
   use bytes::Bytes;
-  use bytora::{AssocInlineSize, InlineSize, Slice, SliceN};
+  use bytora::{AssocInlineSize, InlineSize, Vector, VectorN};
   use criterion::{
     BatchSize, Bencher, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime,
   };
@@ -36,7 +36,7 @@ mod ownership {
     fn into_vec(self) -> Vec<u8>;
   }
 
-  impl<S: InlineSize> Handle for Slice<u8, S> {
+  impl<S: InlineSize> Handle for Vector<u8, S> {
     fn from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       Self::try_from_vec(values)
     }
@@ -50,7 +50,7 @@ mod ownership {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique slice")
+      self.try_into_vec().ok().expect("unique vector")
     }
   }
 
@@ -79,7 +79,7 @@ mod ownership {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
   }
 
-  impl Adopt for Slice<u8, bytora::typenum::U0> {
+  impl Adopt for Vector<u8, bytora::typenum::U0> {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
       <Self as TryFrom<Vec<u8>>>::try_from(values)
     }
@@ -241,9 +241,9 @@ mod ownership {
 
   // `N = 0` and `Bytes` are the same size, so one padding serves both.
   fn adoption<const PAD: usize>(group: &mut BenchmarkGroup<'_, WallTime>) {
-    let label = format!("n_0_handle_{}", size_of::<SliceN<u8, 0>>());
+    let label = format!("n_0_handle_{}", size_of::<VectorN<u8, 0>>());
     for len in [0, 7, 64] {
-      adopt_cases::<SliceN<u8, 0>, PAD>(group, &label, len);
+      adopt_cases::<VectorN<u8, 0>, PAD>(group, &label, len);
       adopt_cases::<Bytes, PAD>(group, "bytes", len);
     }
   }
@@ -253,23 +253,23 @@ mod ownership {
     [u8; N]: AssocInlineSize,
   {
     let expected = if N == 0 { size_of::<Bytes>() } else { N };
-    assert_eq!(size_of::<SliceN<u8, N>>(), expected);
-    assert_eq!(size_of::<Option<SliceN<u8, N>>>(), expected);
+    assert_eq!(size_of::<VectorN<u8, N>>(), expected);
+    assert_eq!(size_of::<Option<VectorN<u8, N>>>(), expected);
   }
 
   fn budget<const N: usize, const PAD: usize>(group: &mut BenchmarkGroup<'_, WallTime>)
   where
     [u8; N]: AssocInlineSize,
   {
-    let label = format!("n_{N}_handle_{}", size_of::<SliceN<u8, N>>());
+    let label = format!("n_{N}_handle_{}", size_of::<VectorN<u8, N>>());
     for len in [7, 64] {
-      cases::<SliceN<u8, N>, PAD>(group, &label, len);
+      cases::<VectorN<u8, N>, PAD>(group, &label, len);
     }
     if N == 0 {
-      cases::<SliceN<u8, N>, PAD>(group, &label, 0);
+      cases::<VectorN<u8, N>, PAD>(group, &label, 0);
     }
     if N == size_of::<usize>() {
-      cases::<SliceN<u8, N>, PAD>(group, &label, 3);
+      cases::<VectorN<u8, N>, PAD>(group, &label, 3);
     }
   }
 
@@ -286,7 +286,7 @@ mod ownership {
     }
     macro_rules! register_sizes {
       ($group:ident; $($n:literal),+ $(,)?) => {
-        $(budget::<$n, { STRIDE - size_of::<SliceN<u8, $n>>() }>(&mut $group);)+
+        $(budget::<$n, { STRIDE - size_of::<VectorN<u8, $n>>() }>(&mut $group);)+
       };
     }
     macro_rules! register_native_sizes {

@@ -1,5 +1,5 @@
 use bytes::{Buf, Bytes};
-use bytora::{InlineSize, Slice, SliceN};
+use bytora::{InlineSize, Vector, VectorN};
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
@@ -25,8 +25,8 @@ const SMALL_LENGTHS: [usize; 17] = [
 ];
 
 const _: () = {
-  assert!(size_of::<SliceN<u8, 32>>() == 32);
-  assert!(size_of::<SliceN<u8, 64>>() == 64);
+  assert!(size_of::<VectorN<u8, 32>>() == 32);
+  assert!(size_of::<VectorN<u8, 64>>() == 64);
   assert!(size_of::<SmolBytes>() == 64);
   assert!(size_of::<CompactSmolBytes>() == 64);
 };
@@ -155,14 +155,14 @@ fn unique_lengths(lengths: impl IntoIterator<Item = usize>) -> Vec<usize> {
 
 fn inline<S: InlineSize>(
   group: &mut BenchmarkGroup<'_, WallTime>,
-  make: fn(&[u8]) -> Option<Slice<u8, S>>,
+  make: fn(&[u8]) -> Option<Vector<u8, S>>,
 ) {
-  let capacity = Slice::<u8, S>::INLINE_CAPACITY;
+  let capacity = Vector::<u8, S>::INLINE_CAPACITY;
   let mut lengths = vec![SHORT, capacity];
-  if size_of::<Slice<u8, S>>() <= MATCHED_HANDLE {
+  if size_of::<Vector<u8, S>>() <= MATCHED_HANDLE {
     lengths.extend(SMALL_LENGTHS);
   }
-  if size_of::<Slice<u8, S>>() == 64 {
+  if size_of::<Vector<u8, S>>() == 64 {
     lengths.extend([30, 62]);
   }
   for len in unique_lengths(lengths) {
@@ -177,8 +177,8 @@ fn inline<S: InlineSize>(
       assert_ne!(cloned.as_slice().as_ptr(), source.as_slice().as_ptr());
     }
     let id = format!(
-      "slice_inline/handle_{}/len_{len}",
-      size_of::<Slice<u8, S>>()
+      "vector_inline/handle_{}/len_{len}",
+      size_of::<Vector<u8, S>>()
     );
     group.bench_function(id, |b| bench_clone(b, &source));
   }
@@ -191,22 +191,22 @@ fn advanced_input(total: usize, remaining: usize) -> Vec<u8> {
 }
 
 fn inline_advanced(group: &mut BenchmarkGroup<'_, WallTime>) {
-  let capacity = SliceN::<u8, LARGE_HANDLE>::INLINE_CAPACITY;
+  let capacity = VectorN::<u8, LARGE_HANDLE>::INLINE_CAPACITY;
   let input = advanced_input(capacity, SHORT);
-  let mut source = SliceN::<u8, LARGE_HANDLE>::try_from_slice(&input).unwrap();
+  let mut source = VectorN::<u8, LARGE_HANDLE>::try_from_slice(&input).unwrap();
   source.advance(capacity - SHORT);
   assert_eq!(source.as_slice(), &PAYLOAD[..SHORT]);
-  let id = format!("slice_inline_advanced/handle_{LARGE_HANDLE}/from_{capacity}/len_{SHORT}");
+  let id = format!("vector_inline_advanced/handle_{LARGE_HANDLE}/from_{capacity}/len_{SHORT}");
   group.bench_function(id, |b| bench_clone(b, &source));
 }
 
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
-fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
-  let handle_size = size_of::<Slice<u8, S>>();
+fn vector_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Vector<u8, S>>();
   if handle_size < 3 * size_of::<usize>() {
     return;
   }
-  let capacity = Slice::<u8, S>::INLINE_CAPACITY;
+  let capacity = Vector::<u8, S>::INLINE_CAPACITY;
   let lengths = [MEDIUM, LARGE_PAYLOAD, capacity + 1]
     .into_iter()
     .chain(SMALL_LENGTHS);
@@ -216,11 +216,11 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
   {
     let values = PAYLOAD[..len].to_vec();
     let data = values.as_ptr();
-    let owner = Slice::<u8, S>::try_from_vec(values).unwrap();
+    let owner = Vector::<u8, S>::try_from_vec(values).unwrap();
     let shared = owner.clone();
     assert_eq!(shared.as_slice(), &PAYLOAD[..len]);
     assert_eq!(shared.as_slice().as_ptr(), data);
-    let id = format!("slice_heap_shared/handle_{handle_size}/len_{len}");
+    let id = format!("vector_heap_shared/handle_{handle_size}/len_{len}");
     group.bench_function(id, |b| bench_clone(b, &shared));
     black_box(&owner);
   }
@@ -230,7 +230,7 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
     lengths.push(MEDIUM);
   }
   for len in unique_lengths(lengths) {
-    let owner = Slice::<u8, S>::try_from_vec(advanced_input(LARGE_HANDLE, len)).unwrap();
+    let owner = Vector::<u8, S>::try_from_vec(advanced_input(LARGE_HANDLE, len)).unwrap();
     let data = owner.as_slice().as_ptr();
     let mut shared = owner.clone();
     shared.advance(LARGE_HANDLE - len);
@@ -244,63 +244,63 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
       shared.as_slice().as_ptr()
     );
     let id =
-      format!("slice_heap_shared_advanced/handle_{handle_size}/from_{LARGE_HANDLE}/len_{len}");
+      format!("vector_heap_shared_advanced/handle_{handle_size}/from_{LARGE_HANDLE}/len_{len}");
     group.bench_function(id, |b| bench_clone(b, &shared));
     black_box(&owner);
   }
 }
 
-fn slice_wide<S: InlineSize>(
+fn vector_wide<S: InlineSize>(
   group: &mut BenchmarkGroup<'_, WallTime>,
   method: CloneMethod,
   include_full: bool,
 ) {
-  let handle_size = size_of::<Slice<u8, S>>();
-  let source = Slice::<u8, S>::try_from_static(&PAYLOAD).unwrap();
+  let handle_size = size_of::<Vector<u8, S>>();
+  let source = Vector::<u8, S>::try_from_static(&PAYLOAD).unwrap();
   {
-    let cloned = clone_preflight(&source, method, empty_slice::<S>);
+    let cloned = clone_preflight(&source, method, empty_vector::<S>);
     assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
     assert_eq!(cloned.as_slice().as_ptr(), PAYLOAD.as_ptr());
   }
   if include_full {
-    let id = format!("slice_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
-    bench_clone_case(group, id, &source, method, empty_slice::<S>);
+    let id = format!("vector_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+    bench_clone_case(group, id, &source, method, empty_vector::<S>);
   }
   let mut advanced = source.clone();
   advanced.advance(LARGE_PAYLOAD - SHORT);
   {
-    let cloned = clone_preflight(&advanced, method, empty_slice::<S>);
+    let cloned = clone_preflight(&advanced, method, empty_vector::<S>);
     assert_eq!(cloned.as_slice(), &PAYLOAD[..SHORT]);
     assert_eq!(
       cloned.as_slice().as_ptr(),
       PAYLOAD.as_ptr().wrapping_add(LARGE_PAYLOAD - SHORT)
     );
   }
-  let id = format!("slice_static_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
-  bench_clone_case(group, id, &advanced, method, empty_slice::<S>);
+  let id = format!("vector_static_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+  bench_clone_case(group, id, &advanced, method, empty_vector::<S>);
 
   #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
   {
-    assert!(LARGE_PAYLOAD > Slice::<u8, S>::INLINE_CAPACITY);
+    assert!(LARGE_PAYLOAD > Vector::<u8, S>::INLINE_CAPACITY);
     let values = PAYLOAD.to_vec();
     let data = values.as_ptr();
-    let owner = Slice::<u8, S>::try_from_vec(values).unwrap();
+    let owner = Vector::<u8, S>::try_from_vec(values).unwrap();
     let mut shared = owner.clone();
     assert_eq!(shared.as_slice(), &PAYLOAD[..]);
     assert_eq!(shared.as_slice().as_ptr(), data);
     {
-      let cloned = clone_preflight(&shared, method, empty_slice::<S>);
+      let cloned = clone_preflight(&shared, method, empty_vector::<S>);
       assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
       assert_eq!(cloned.as_slice().as_ptr(), data);
     }
     if include_full {
-      let id = format!("slice_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
-      bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+      let id = format!("vector_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+      bench_clone_case(group, id, &shared, method, empty_vector::<S>);
     }
 
     shared.advance(LARGE_PAYLOAD - SHORT);
     {
-      let cloned = clone_preflight(&shared, method, empty_slice::<S>);
+      let cloned = clone_preflight(&shared, method, empty_vector::<S>);
       assert_eq!(cloned.as_slice(), &PAYLOAD[..SHORT]);
       assert_eq!(
         cloned.as_slice().as_ptr(),
@@ -308,30 +308,30 @@ fn slice_wide<S: InlineSize>(
       );
     }
     let id =
-      format!("slice_heap_shared_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
-    bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+      format!("vector_heap_shared_advanced/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+    bench_clone_case(group, id, &shared, method, empty_vector::<S>);
     black_box(&owner);
   }
 }
 
-fn slice_static<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
-  let handle_size = size_of::<Slice<u8, S>>();
-  if Slice::<u8, S>::try_from_static(&PAYLOAD[..0]).is_none() {
+fn vector_static<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Vector<u8, S>>();
+  if Vector::<u8, S>::try_from_static(&PAYLOAD[..0]).is_none() {
     return;
   }
-  let capacity = Slice::<u8, S>::INLINE_CAPACITY;
+  let capacity = Vector::<u8, S>::INLINE_CAPACITY;
   let lengths = [SHORT, capacity, capacity + 1, MEDIUM, LARGE_PAYLOAD]
     .into_iter()
     .chain(SMALL_LENGTHS);
   for len in unique_lengths(lengths) {
     let contents = &PAYLOAD[..len];
-    let source = Slice::<u8, S>::try_from_static(contents).unwrap();
+    let source = Vector::<u8, S>::try_from_static(contents).unwrap();
     assert_eq!(source.as_slice(), contents);
     assert_eq!(source.as_slice().as_ptr(), contents.as_ptr());
     let cloned = source.clone();
     assert_eq!(cloned.as_slice(), contents);
     assert_eq!(cloned.as_slice().as_ptr(), contents.as_ptr());
-    let id = format!("slice_static/handle_{handle_size}/len_{len}");
+    let id = format!("vector_static/handle_{handle_size}/len_{len}");
     group.bench_function(id, |b| bench_clone(b, &source));
   }
 }
@@ -548,19 +548,19 @@ fn smol_bytes_wide_benches(group: &mut BenchmarkGroup<'_, WallTime>, method: Clo
   );
 }
 
-fn slice_inline_clone_from<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
-  let handle_size = size_of::<Slice<u8, S>>();
+fn vector_inline_clone_from<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Vector<u8, S>>();
   for len in [SHORT, 30, 62] {
-    if len > Slice::<u8, S>::INLINE_CAPACITY {
+    if len > Vector::<u8, S>::INLINE_CAPACITY {
       continue;
     }
-    let source = Slice::<u8, S>::try_from_slice(&PAYLOAD[..len]).unwrap();
-    let cloned = clone_preflight(&source, CloneMethod::From, empty_slice::<S>);
+    let source = Vector::<u8, S>::try_from_slice(&PAYLOAD[..len]).unwrap();
+    let cloned = clone_preflight(&source, CloneMethod::From, empty_vector::<S>);
     assert_eq!(source.as_slice(), &PAYLOAD[..len]);
     assert_eq!(cloned.as_slice(), &PAYLOAD[..len]);
     assert_ne!(cloned.as_slice().as_ptr(), source.as_slice().as_ptr());
-    let id = format!("slice_inline/handle_{handle_size}/len_{len}");
-    bench_clone_case(group, id, &source, CloneMethod::From, empty_slice::<S>);
+    let id = format!("vector_inline/handle_{handle_size}/len_{len}");
+    bench_clone_case(group, id, &source, CloneMethod::From, empty_vector::<S>);
   }
 }
 
@@ -597,59 +597,59 @@ fn clone_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone");
   #[cfg(target_pointer_width = "32")]
   {
-    inline(&mut group, SliceN::<u8, 4>::try_from_slice);
-    inline(&mut group, SliceN::<u8, 12>::try_from_slice);
+    inline(&mut group, VectorN::<u8, 4>::try_from_slice);
+    inline(&mut group, VectorN::<u8, 12>::try_from_slice);
   }
-  inline(&mut group, SliceN::<u8, 8>::try_from_slice);
-  inline(&mut group, SliceN::<u8, 16>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 8>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 16>::try_from_slice);
   #[cfg(target_pointer_width = "32")]
   {
-    inline(&mut group, SliceN::<u8, 20>::try_from_slice);
-    inline(&mut group, SliceN::<u8, 28>::try_from_slice);
+    inline(&mut group, VectorN::<u8, 20>::try_from_slice);
+    inline(&mut group, VectorN::<u8, 28>::try_from_slice);
   }
-  inline(&mut group, SliceN::<u8, 24>::try_from_slice);
-  inline(&mut group, SliceN::<u8, MATCHED_HANDLE>::try_from_slice);
-  inline(&mut group, SliceN::<u8, 64>::try_from_slice);
-  inline(&mut group, SliceN::<u8, 128>::try_from_slice);
-  inline(&mut group, SliceN::<u8, 256>::try_from_slice);
-  inline(&mut group, SliceN::<u8, LARGE_HANDLE>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 24>::try_from_slice);
+  inline(&mut group, VectorN::<u8, MATCHED_HANDLE>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 64>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 128>::try_from_slice);
+  inline(&mut group, VectorN::<u8, 256>::try_from_slice);
+  inline(&mut group, VectorN::<u8, LARGE_HANDLE>::try_from_slice);
   inline_advanced(&mut group);
   #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
   {
-    slice_heap::<typenum::U16>(&mut group);
-    slice_heap::<typenum::U24>(&mut group);
-    slice_heap::<typenum::U32>(&mut group);
+    vector_heap::<typenum::U16>(&mut group);
+    vector_heap::<typenum::U24>(&mut group);
+    vector_heap::<typenum::U32>(&mut group);
     #[cfg(target_pointer_width = "32")]
     {
-      slice_heap::<typenum::U12>(&mut group);
-      slice_heap::<typenum::U20>(&mut group);
-      slice_heap::<typenum::U28>(&mut group);
+      vector_heap::<typenum::U12>(&mut group);
+      vector_heap::<typenum::U20>(&mut group);
+      vector_heap::<typenum::U28>(&mut group);
     }
   }
-  slice_static::<typenum::U16>(&mut group);
-  slice_static::<typenum::U24>(&mut group);
-  slice_static::<typenum::U32>(&mut group);
+  vector_static::<typenum::U16>(&mut group);
+  vector_static::<typenum::U24>(&mut group);
+  vector_static::<typenum::U32>(&mut group);
   #[cfg(target_pointer_width = "32")]
   {
-    slice_static::<typenum::U12>(&mut group);
-    slice_static::<typenum::U20>(&mut group);
-    slice_static::<typenum::U28>(&mut group);
+    vector_static::<typenum::U12>(&mut group);
+    vector_static::<typenum::U20>(&mut group);
+    vector_static::<typenum::U28>(&mut group);
   }
   // Full 32-byte cases were already registered above; add only advanced windows.
-  slice_wide::<typenum::U32>(&mut group, CloneMethod::Push, false);
-  slice_wide::<typenum::U64>(&mut group, CloneMethod::Push, true);
-  slice_wide::<typenum::U128>(&mut group, CloneMethod::Push, true);
-  slice_wide::<typenum::U4096>(&mut group, CloneMethod::Push, true);
+  vector_wide::<typenum::U32>(&mut group, CloneMethod::Push, false);
+  vector_wide::<typenum::U64>(&mut group, CloneMethod::Push, true);
+  vector_wide::<typenum::U128>(&mut group, CloneMethod::Push, true);
+  vector_wide::<typenum::U4096>(&mut group, CloneMethod::Push, true);
 
   let lengths = [
     SHORT,
-    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
-    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
+    VectorN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
+    VectorN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
     MEDIUM,
-    SliceN::<u8, 64>::INLINE_CAPACITY,
-    SliceN::<u8, 128>::INLINE_CAPACITY,
-    SliceN::<u8, 256>::INLINE_CAPACITY,
-    SliceN::<u8, LARGE_HANDLE>::INLINE_CAPACITY,
+    VectorN::<u8, 64>::INLINE_CAPACITY,
+    VectorN::<u8, 128>::INLINE_CAPACITY,
+    VectorN::<u8, 256>::INLINE_CAPACITY,
+    VectorN::<u8, LARGE_HANDLE>::INLINE_CAPACITY,
     62,
     LARGE_PAYLOAD,
   ]
@@ -662,8 +662,8 @@ fn clone_benches(c: &mut Criterion) {
   }
   let lengths = [
     SHORT,
-    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
-    SliceN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
+    VectorN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY,
+    VectorN::<u8, { 3 * size_of::<usize>() }>::INLINE_CAPACITY + 1,
     MEDIUM,
   ]
   .into_iter()
@@ -680,8 +680,8 @@ fn clone_benches(c: &mut Criterion) {
   group.finish();
 }
 
-fn empty_slice<S: InlineSize>() -> Slice<u8, S> {
-  Slice::<u8, S>::try_from_slice(&[]).unwrap()
+fn empty_vector<S: InlineSize>() -> Vector<u8, S> {
+  Vector::<u8, S>::try_from_slice(&[]).unwrap()
 }
 
 fn clone_from_benches(c: &mut Criterion) {
@@ -689,20 +689,20 @@ fn clone_from_benches(c: &mut Criterion) {
   // Compact handles serve as controls for the wider handles.
   #[cfg(target_pointer_width = "32")]
   {
-    slice_wide::<typenum::U12>(&mut group, CloneMethod::From, true);
-    slice_wide::<typenum::U16>(&mut group, CloneMethod::From, true);
-    slice_wide::<typenum::U20>(&mut group, CloneMethod::From, true);
-    slice_wide::<typenum::U28>(&mut group, CloneMethod::From, true);
+    vector_wide::<typenum::U12>(&mut group, CloneMethod::From, true);
+    vector_wide::<typenum::U16>(&mut group, CloneMethod::From, true);
+    vector_wide::<typenum::U20>(&mut group, CloneMethod::From, true);
+    vector_wide::<typenum::U28>(&mut group, CloneMethod::From, true);
   }
-  slice_wide::<typenum::U24>(&mut group, CloneMethod::From, true);
-  slice_wide::<typenum::U32>(&mut group, CloneMethod::From, true);
-  slice_wide::<typenum::U64>(&mut group, CloneMethod::From, true);
-  slice_wide::<typenum::U128>(&mut group, CloneMethod::From, true);
-  slice_wide::<typenum::U4096>(&mut group, CloneMethod::From, true);
+  vector_wide::<typenum::U24>(&mut group, CloneMethod::From, true);
+  vector_wide::<typenum::U32>(&mut group, CloneMethod::From, true);
+  vector_wide::<typenum::U64>(&mut group, CloneMethod::From, true);
+  vector_wide::<typenum::U128>(&mut group, CloneMethod::From, true);
+  vector_wide::<typenum::U4096>(&mut group, CloneMethod::From, true);
   bytes_wide_baselines(&mut group, CloneMethod::From);
   bytes_wide_advanced(&mut group, CloneMethod::From);
-  slice_inline_clone_from::<typenum::U32>(&mut group);
-  slice_inline_clone_from::<typenum::U64>(&mut group);
+  vector_inline_clone_from::<typenum::U32>(&mut group);
+  vector_inline_clone_from::<typenum::U64>(&mut group);
   bytes_short_clone_from(&mut group);
   smol_bytes_wide_benches(&mut group, CloneMethod::From);
   array_copy::<32>(&mut group, CloneMethod::From);
@@ -731,20 +731,25 @@ fn bench_range<T, O>(
 
 fn range_static(group: &mut BenchmarkGroup<'_, WallTime>, total: usize, start: usize, end: usize) {
   let contents = &PAYLOAD[..total];
-  let slice = SliceN::<u8, MATCHED_HANDLE>::try_from_static(contents).unwrap();
+  let vector = VectorN::<u8, MATCHED_HANDLE>::try_from_static(contents).unwrap();
   let bytes = Bytes::from_static(contents);
   let expected = &contents[start..end];
-  let slice_window = slice.slice(start..end);
+  let vector_window = vector.slice(start..end);
   let bytes_window = bytes.slice(start..end);
-  assert_eq!(slice.as_slice().as_ptr(), contents.as_ptr());
+  assert_eq!(vector.as_slice().as_ptr(), contents.as_ptr());
   assert_eq!(bytes.as_ptr(), contents.as_ptr());
-  assert_eq!(slice_window.as_slice(), expected);
+  assert_eq!(vector_window.as_slice(), expected);
   assert_eq!(bytes_window.as_ref(), expected);
-  assert_eq!(slice_window.as_slice().as_ptr(), expected.as_ptr());
+  assert_eq!(vector_window.as_slice().as_ptr(), expected.as_ptr());
   assert_eq!(bytes_window.as_ptr(), expected.as_ptr());
-  bench_range(group, "slice_static", &slice, total, start..end, |s, r| {
-    s.slice(r)
-  });
+  bench_range(
+    group,
+    "vector_static",
+    &vector,
+    total,
+    start..end,
+    |s, r| s.slice(r),
+  );
   bench_range(group, "bytes_static", &bytes, total, start..end, |s, r| {
     s.slice(r)
   });
@@ -752,17 +757,22 @@ fn range_static(group: &mut BenchmarkGroup<'_, WallTime>, total: usize, start: u
 
 fn range_inline(group: &mut BenchmarkGroup<'_, WallTime>, start: usize, end: usize) {
   let contents = &PAYLOAD[..SHORT];
-  let slice = SliceN::<u8, MATCHED_HANDLE>::try_from_slice(contents).unwrap();
-  let window = slice.slice(start..end);
-  assert_eq!(slice.as_slice(), contents);
+  let vector = VectorN::<u8, MATCHED_HANDLE>::try_from_slice(contents).unwrap();
+  let window = vector.slice(start..end);
+  assert_eq!(vector.as_slice(), contents);
   assert_eq!(window.as_slice(), &contents[start..end]);
   assert_ne!(
     window.as_slice().as_ptr(),
-    slice.as_slice()[start..end].as_ptr()
+    vector.as_slice()[start..end].as_ptr()
   );
-  bench_range(group, "slice_inline", &slice, SHORT, start..end, |s, r| {
-    s.slice(r)
-  });
+  bench_range(
+    group,
+    "vector_inline",
+    &vector,
+    SHORT,
+    start..end,
+    |s, r| s.slice(r),
+  );
 }
 
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
@@ -770,17 +780,17 @@ fn range_heap(group: &mut BenchmarkGroup<'_, WallTime>, start: usize, end: usize
   let contents = &PAYLOAD[..MEDIUM];
   let values = contents.to_vec();
   let data = values.as_ptr();
-  let owner = SliceN::<u8, MATCHED_HANDLE>::try_from_vec(values).unwrap();
-  let slice = owner.clone();
-  let window = slice.slice(start..end);
-  assert_eq!(slice.as_slice(), contents);
-  assert_eq!(slice.as_slice().as_ptr(), data);
+  let owner = VectorN::<u8, MATCHED_HANDLE>::try_from_vec(values).unwrap();
+  let vector = owner.clone();
+  let window = vector.slice(start..end);
+  assert_eq!(vector.as_slice(), contents);
+  assert_eq!(vector.as_slice().as_ptr(), data);
   assert_eq!(window.as_slice(), &contents[start..end]);
   assert_eq!(window.as_slice().as_ptr(), data.wrapping_add(start));
   bench_range(
     group,
-    "slice_heap_shared",
-    &slice,
+    "vector_heap_shared",
+    &vector,
     MEDIUM,
     start..end,
     |s, r| s.slice(r),
