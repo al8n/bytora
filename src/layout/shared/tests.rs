@@ -669,6 +669,159 @@ fn whole_vec_round_trip_preserves_even_an_empty_allocation() {
   }
 }
 
+#[test]
+fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() {
+  // Where an adopted vector keeps its owner: a raw marker in the handle, a
+  // header in its own spare capacity, or a header in a box.
+  #[derive(Clone, Copy, Debug, PartialEq)]
+  enum Owner {
+    Marker,
+    Tail,
+    Boxed,
+  }
+  // An exact vector needs no header. Word-aligned spare capacity holds one
+  // exactly when its bytes span it, and anything smaller leaves it to a box.
+  fn expected<T>(spare: usize) -> Owner {
+    if spare == 0 && vector::AVAILABLE && size_of::<T>() != 0 {
+      Owner::Marker
+    } else if spare.saturating_mul(size_of::<T>()) >= size_of::<vector::Vector<T>>() {
+      assert!(align_of::<T>() >= align_of::<vector::Vector<T>>());
+      Owner::Tail
+    } else {
+      Owner::Boxed
+    }
+  }
+  fn placed<T, S: InlineSize>(source: &Slice<T, S>, base: *const T, capacity: usize) -> Owner {
+    let owner = source.layout.owner();
+    if vector::raw(owner) {
+      return Owner::Marker;
+    }
+    assert_eq!(header_refs(source), 1);
+    // A box lies outside every byte of the vector's allocation.
+    if owner.addr().wrapping_sub(base.addr()) < capacity.saturating_mul(size_of::<T>()) {
+      Owner::Tail
+    } else {
+      Owner::Boxed
+    }
+  }
+  fn check<T, S: InlineSize>(element: T, shared: bool)
+  where
+    T: Copy + core::fmt::Debug + PartialEq + Send + Sync,
+  {
+    for len in [0, 1, 5] {
+      for spare in [0, 1, 3, 4, 9] {
+        for recover in [false, true] {
+          let mut values = Vec::with_capacity(len + spare);
+          values.resize(len, element);
+          let (base, capacity) = (values.as_ptr(), values.capacity());
+          // The spare count selects the owner only at this exact capacity.
+          assert_eq!(capacity, len + spare);
+          let source = if shared {
+            Slice::<T, S>::try_from_shared_vec(values)
+          } else {
+            Slice::<T, S>::try_from_vec(values)
+          }
+          .unwrap();
+          if capacity == 0 && !shared {
+            // The copying constructor has no allocation to keep.
+            assert!(source.layout.is_inline() && source.is_empty());
+            assert!(source.try_into_vec().ok().unwrap().is_empty());
+            continue;
+          }
+          assert!(source.is_unique());
+          assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
+          assert!(source.as_slice().iter().all(|value| *value == element));
+          let found = placed(&source, base, capacity);
+          assert_eq!(found, expected::<T>(spare));
+          let owner = source.layout.owner();
+          match found {
+            Owner::Marker => assert_eq!(vector::full_len(owner), Some(len)),
+            // Nothing pads a word-aligned tail.
+            Owner::Tail => assert_eq!(owner, base.wrapping_add(len).cast()),
+            Owner::Boxed => {}
+          }
+          if !recover {
+            continue;
+          }
+          let mut recovered = source.try_into_vec().ok().unwrap();
+          assert_eq!(
+            (recovered.as_ptr(), recovered.len(), recovered.capacity()),
+            (base, len, capacity)
+          );
+          // The capacity that held a header is the vector's to fill again.
+          recovered.resize(capacity, element);
+          assert_eq!(recovered.as_ptr(), base);
+          assert!(recovered.iter().all(|value| *value == element));
+        }
+      }
+    }
+  }
+  fn zero_sized<S: InlineSize>() {
+    // Past the inline capacity both constructors box a header: a zero-sized
+    // vector has no bytes to spare, whatever its capacity.
+    let count = Slice::<(), S>::INLINE_CAPACITY + 3;
+    for shared in [false, true] {
+      let values = vec![(); count];
+      let (base, capacity) = (values.as_ptr(), values.capacity());
+      let source = if shared {
+        Slice::<(), S>::try_from_shared_vec(values)
+      } else {
+        Slice::<(), S>::try_from_vec(values)
+      }
+      .unwrap();
+      assert_eq!(placed(&source, base, capacity), Owner::Boxed);
+      assert_eq!(expected::<()>(capacity - count), Owner::Boxed);
+      assert_eq!((source.as_slice().as_ptr(), source.len()), (base, count));
+      let recovered = source.try_into_vec().ok().unwrap();
+      assert_eq!(
+        (recovered.as_ptr(), recovered.len(), recovered.capacity()),
+        (base, count, capacity)
+      );
+    }
+  }
+  type ThreeWords = <[u8; 3 * size_of::<usize>()] as crate::AssocInlineSize>::Size;
+  type FiveWords = <[u8; 5 * size_of::<usize>()] as crate::AssocInlineSize>::Size;
+  // Four and five words adopt through the wide constructor. Three words and
+  // the sizes past 128 bytes share the path of the shared constructor.
+  fn at_each_size<T>(element: T)
+  where
+    T: Copy + core::fmt::Debug + PartialEq + Send + Sync,
+  {
+    for shared in [false, true] {
+      check::<T, ThreeWords>(element, shared);
+      check::<T, typenum::U0>(element, shared);
+      check::<T, crate::DefaultSize>(element, shared);
+      check::<T, FiveWords>(element, shared);
+      check::<T, typenum::U136>(element, shared);
+    }
+  }
+  const { assert!(size_of::<[usize; 4]>() == size_of::<vector::Vector<[usize; 4]>>()) };
+  at_each_size(usize::MAX / 3);
+  // One spare element of this size holds the header itself.
+  at_each_size([usize::MAX / 3; 4]);
+  zero_sized::<ThreeWords>();
+  zero_sized::<typenum::U0>();
+  zero_sized::<crate::DefaultSize>();
+  zero_sized::<FiveWords>();
+  zero_sized::<typenum::U136>();
+
+  // The zero-budget conversion adopts every allocated vector the same way.
+  for (len, spare) in [(0, 1), (0, 4), (2, 0), (2, 1), (2, 4)] {
+    let mut values = Vec::with_capacity(len + spare);
+    values.resize(len, 7usize);
+    let (base, capacity) = (values.as_ptr(), values.capacity());
+    assert_eq!(capacity, len + spare);
+    let source = SliceN::<usize, 0>::try_from(values).unwrap();
+    assert_eq!(placed(&source, base, capacity), expected::<usize>(spare));
+    assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
+    let recovered = source.try_into_vec().ok().unwrap();
+    assert_eq!(
+      (recovered.as_ptr(), recovered.len(), recovered.capacity()),
+      (base, len, capacity)
+    );
+  }
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
