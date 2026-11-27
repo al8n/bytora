@@ -159,8 +159,8 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   /// Copies elements inline when possible, or into shared storage when needed.
   ///
-  /// Returns `None` if the handle is too small for shared storage or the
-  /// input's length exceeds `isize::MAX`.
+  /// Shared copies use the vector limits of [`Self::try_from_vec`]. Returns
+  /// `None` if neither the inline payload nor a vector can represent the input.
   #[cfg(smol_slice_atomic)]
   pub fn try_copy_from_slice(values: &[T]) -> Option<Self>
   where
@@ -169,7 +169,10 @@ impl<T, S: InlineSize> Slice<T, S> {
     if let Some(inline) = Self::try_from_slice(values) {
       return Some(inline);
     }
-    if S::HANDLE_BYTES < 3 * mem::size_of::<usize>() || values.len() > isize::MAX as usize {
+    if values.len() > isize::MAX as usize
+      || (S::HANDLE_BYTES < 3 * mem::size_of::<usize>()
+        && !Layout::<T, S>::fits_two_word_vec(values.len()))
+    {
       return None;
     }
     Self::try_from_vec(values.to_vec()).ok()

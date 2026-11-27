@@ -297,6 +297,24 @@ mod ownership {
     });
   }
 
+  // The seven-byte u8 input can use the two-word Vec representation when
+  // its pointer slot meets the same atomic alignment requirements as the library.
+  fn short_vec_is_adopted<S: InlineSize>() -> bool {
+    #[cfg(feature = "extra-platforms")]
+    type AtomicPtr = portable_atomic::AtomicPtr<()>;
+    #[cfg(not(feature = "extra-platforms"))]
+    type AtomicPtr = std::sync::atomic::AtomicPtr<()>;
+
+    let bytes = size_of::<Slice<u8, S>>();
+    let word = size_of::<usize>();
+    bytes >= 3 * word
+      || (bytes == 2 * word
+        && align_of::<*const ()>() >= 4
+        && align_of::<usize>() >= align_of::<AtomicPtr>()
+        && size_of::<*mut ()>() == size_of::<AtomicPtr>()
+        && size_of::<*mut ()>() % align_of::<AtomicPtr>() == 0)
+  }
+
   fn short_slice_cases<S: InlineSize, const PAD: usize>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     label: &str,
@@ -307,7 +325,7 @@ mod ownership {
     let slice = Slice::<u8, S>::try_from_vec(values).unwrap();
     assert_eq!(slice.as_slice(), &CONTENTS[..SHORT_LEN]);
     assert!(slice.is_unique());
-    if size_of::<Slice<u8, S>>() >= 3 * size_of::<usize>() {
+    if short_vec_is_adopted::<S>() {
       assert_eq!(slice.as_slice().as_ptr(), pointer);
       let values = slice.try_into_vec().ok().expect("unique slice");
       assert_eq!(values.as_ptr(), pointer);
@@ -323,7 +341,7 @@ mod ownership {
     let values = short_input();
     let pointer = values.as_ptr();
     let shared = Slice::<u8, S>::try_from_shared_vec(values);
-    if size_of::<Slice<u8, S>>() >= 3 * size_of::<usize>() {
+    if short_vec_is_adopted::<S>() {
       let shared = shared.expect("external slice fits");
       assert_eq!(shared.as_slice(), &CONTENTS[..SHORT_LEN]);
       assert_eq!(shared.as_slice().as_ptr(), pointer);

@@ -377,15 +377,17 @@ fn zero_sized_windows_use_indices_for_adjacency() {
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
-fn two_word_spill_keeps_its_buffer_on_failed_freeze() {
+fn two_word_spill_keeps_its_buffer_through_freeze() {
   let data = vec![9u8; 35];
   let base = data.as_ptr();
   let handle = SliceMutN::<_, { 2 * size_of::<usize>() }>::try_from_vec(data).unwrap();
-  let handle = handle
-    .try_freeze()
-    .err()
-    .expect("immutable external descriptor needs three words");
-  let original = handle.into_vec();
+  let original = match handle.try_freeze() {
+    Ok(frozen) => {
+      assert_eq!(frozen.as_slice().as_ptr(), base);
+      frozen.try_into_vec().ok().unwrap()
+    }
+    Err(handle) => handle.into_vec(),
+  };
   assert_eq!(original.as_ptr(), base);
 }
 
