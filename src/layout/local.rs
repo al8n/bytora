@@ -12,8 +12,9 @@ use std::rc::Rc;
 /// original elements and each keeps its own cursor. Elements can contain
 /// borrowed data or use thread-local interior mutability.
 ///
-/// The default handle and its `Option` each occupy three machine words.
-/// A positive `S` specifies the exact size in bytes. Zero selects three words.
+/// The default handle and its `Option` each occupy four machine words, the
+/// size of `bytes::Bytes` (16 bytes on 32-bit targets and 32 on 64-bit targets).
+/// A positive `S` specifies the exact size in bytes. Zero also selects four words.
 ///
 /// ```compile_fail
 /// fn send<T: Send>() {}
@@ -52,7 +53,7 @@ enum Backing<T> {
 }
 
 impl<T> LocalSlice<T> {
-  /// Takes a reference to the original `Rc` allocation in a three-word handle.
+  /// Takes a reference to the original `Rc` allocation in a four-word handle.
   ///
   /// # Panics
   ///

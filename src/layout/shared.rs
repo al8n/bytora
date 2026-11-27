@@ -222,7 +222,7 @@ impl<T, S: InlineSize> Layout<T, S> {
 }
 
 impl<T> Slice<T, typenum::U0> {
-  /// Creates an empty three-word handle with zero inline capacity.
+  /// Creates an empty four-word handle with zero inline capacity.
   /// This uses only `core` and works for every element type.
   pub const fn empty() -> Self {
     let data = ptr::NonNull::<T>::dangling().as_ptr();
@@ -294,7 +294,7 @@ impl<T> Slice<T> {
     Self::try_from_owner(owner).unwrap_or_else(|_| panic!("owner slice length exceeds isize::MAX"))
   }
 
-  /// Borrows a static slice in the default three-word handle. Construction and
+  /// Borrows a static slice in the default four-word handle. Construction and
   /// cloning leave the elements in place and require no allocation or reference counts.
   ///
   /// # Panics

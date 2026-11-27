@@ -188,7 +188,7 @@ mod ownership {
   where
     [u8; N]: AssocInlineSize,
   {
-    let expected = if N == 0 { 3 * size_of::<usize>() } else { N };
+    let expected = if N == 0 { size_of::<Bytes>() } else { N };
     assert_eq!(size_of::<SliceN<u8, N>>(), expected);
     assert_eq!(size_of::<Option<SliceN<u8, N>>>(), expected);
   }

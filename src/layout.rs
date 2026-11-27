@@ -31,7 +31,7 @@ unsafe trait Repr {
 ///
 /// A positive size is a multiple of the target's word size through [`MAX_HANDLE_BYTES`]
 /// and counts all handle bytes, including the cursor. [`typenum::U0`] disables
-/// inline elements and uses a three-word handle. The trait is sealed.
+/// inline elements and uses a four-word handle. The trait is sealed.
 /// [`INLINE_CAPACITY`](crate::Slice::INLINE_CAPACITY) also depends on the element type.
 #[allow(
   private_bounds,
@@ -47,7 +47,7 @@ pub trait InlineSize: Unsigned + Debug + Repr {
 
 const fn handle_bytes(budget: usize) -> usize {
   if budget == 0 {
-    3 * size_of::<usize>()
+    4 * size_of::<usize>()
   } else {
     budget
   }
