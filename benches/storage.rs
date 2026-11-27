@@ -30,11 +30,17 @@ const fn payload() -> [u8; LARGE_PAYLOAD] {
 
 static PAYLOAD: [u8; LARGE_PAYLOAD] = payload();
 
+// A timed result is written to a stack temporary or an output slot whose alignment would
+// otherwise be only the ABI's; on some cores its address modulo 32 selects the speed of the
+// timed loop. Wrapping each result pins it to a 32-byte boundary, for every handle alike.
+#[repr(C, align(32))]
+struct Aligned<T>(T);
+
 fn bench_operation<T>(b: &mut Bencher<'_>, mut operation: impl FnMut() -> T) {
   // Pre-touch the bounded output buffer before timing, including its large-handle pages.
   let mut outputs = Vec::with_capacity(BATCH_SIZE);
   for _ in 0..BATCH_SIZE {
-    outputs.push(operation());
+    outputs.push(Aligned(operation()));
   }
   black_box(&outputs);
   outputs.clear();
@@ -46,7 +52,7 @@ fn bench_operation<T>(b: &mut Bencher<'_>, mut operation: impl FnMut() -> T) {
       let count = remaining.min(BATCH_SIZE as u64) as usize;
       let start = Instant::now();
       for _ in 0..count {
-        outputs.push(operation());
+        outputs.push(Aligned(operation()));
       }
       black_box(&outputs);
       elapsed += start.elapsed();
@@ -64,13 +70,13 @@ fn bench_clone<T: Clone>(b: &mut Bencher<'_>, source: &T) {
 fn bench_clone_from<T: Clone>(b: &mut Bencher<'_>, source: &T, empty: impl Fn() -> T) {
   // The timed operation replaces an empty destination; reset and drop the
   // resulting clones after timing, as in the clone-and-push benchmark.
-  let mut outputs: Vec<T> = (0..BATCH_SIZE).map(|_| empty()).collect();
+  let mut outputs: Vec<Aligned<T>> = (0..BATCH_SIZE).map(|_| Aligned(empty())).collect();
   for slot in &mut outputs {
-    slot.clone_from(black_box(source));
+    slot.0.clone_from(black_box(source));
   }
   black_box(&outputs);
   for slot in &mut outputs {
-    *slot = empty();
+    *slot = Aligned(empty());
   }
 
   b.iter_custom(|iterations| {
@@ -80,12 +86,12 @@ fn bench_clone_from<T: Clone>(b: &mut Bencher<'_>, source: &T, empty: impl Fn() 
       let count = remaining.min(BATCH_SIZE as u64) as usize;
       let start = Instant::now();
       for slot in &mut outputs[..count] {
-        slot.clone_from(black_box(source));
+        slot.0.clone_from(black_box(source));
       }
       black_box(&outputs);
       elapsed += start.elapsed();
       for slot in &mut outputs[..count] {
-        *slot = empty();
+        *slot = Aligned(empty());
       }
       remaining -= count as u64;
     }
