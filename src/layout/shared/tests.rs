@@ -277,7 +277,10 @@ fn allocated_copy_vectors_keep_their_buffers_at_short_and_empty_lengths() {
   }
   check::<typenum::U0>();
   check::<crate::DefaultSize>();
+  #[cfg(target_pointer_width = "32")]
+  check::<typenum::U16>();
   check::<typenum::U32>();
+  check::<typenum::U128>();
   check::<typenum::U136>();
   assert!(
     Slice::<()>::try_from_vec(vec![(); 2])
@@ -636,6 +639,39 @@ fn clone_from_releases_the_old_owner_and_keeps_the_new_owner_live() {
   check::<64>();
   check::<128>();
   check::<4096>();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_clone_from_keeps_the_new_owner_when_the_old_owner_panics() {
+  struct PanicsOnDrop;
+  impl AsRef<[u8]> for PanicsOnDrop {
+    fn as_ref(&self) -> &[u8] {
+      b"old"
+    }
+  }
+  impl Drop for PanicsOnDrop {
+    fn drop(&mut self) {
+      panic!("intentional owner destructor panic");
+    }
+  }
+
+  let mut destination = SliceN::<u8, 128>::try_from_owner(PanicsOnDrop)
+    .ok()
+    .unwrap();
+  let values = vec![1, 2, 3];
+  let base = values.as_ptr();
+  let source = SliceN::<u8, 128>::try_from_vec(values).unwrap();
+  assert!(
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      destination.clone_from(&source);
+    }))
+    .is_err()
+  );
+  drop(source);
+  let recovered = destination.try_into_vec().ok().unwrap();
+  assert_eq!(recovered.as_ptr(), base);
+  assert_eq!(recovered, [1, 2, 3]);
 }
 
 #[test]
