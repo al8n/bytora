@@ -55,7 +55,7 @@ mod ownership {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique vector")
+      self.try_into_vec().expect("unique vector")
     }
   }
 

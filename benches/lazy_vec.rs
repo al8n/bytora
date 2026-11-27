@@ -104,7 +104,7 @@ mod ownership {
     assert_eq!(vector.as_slice(), CONTENTS);
     assert_eq!(vector.as_slice().as_ptr(), pointer);
     assert!(vector.is_unique());
-    let values = vector.try_into_vec().ok().expect("unique vector");
+    let values = vector.try_into_vec().expect("unique vector");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(values, CONTENTS);
@@ -122,7 +122,7 @@ mod ownership {
     drop(warmed);
     let vector = vector.try_into_vec().expect_err("vector is shared");
     drop(cloned);
-    let values = vector.try_into_vec().ok().expect("vector is unique again");
+    let values = vector.try_into_vec().expect("vector is unique again");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(values, CONTENTS);
@@ -177,7 +177,7 @@ mod ownership {
     let pointer = values.as_ptr();
     let capacity = values.capacity();
     let vector = Vector::<DropProbe, S>::try_from_shared_vec(values).expect("shared vector fits");
-    let values = vector.try_into_vec().ok().expect("unique vector");
+    let values = vector.try_into_vec().expect("unique vector");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -349,7 +349,7 @@ mod ownership {
     assert!(vector.is_unique());
     if short_vec_is_adopted::<S>() {
       assert_eq!(vector.as_slice().as_ptr(), pointer);
-      let values = vector.try_into_vec().ok().expect("unique vector");
+      let values = vector.try_into_vec().expect("unique vector");
       assert_eq!(values.as_ptr(), pointer);
       assert_eq!(values.capacity(), SHORT_LEN);
       assert_eq!(values, &CONTENTS[..SHORT_LEN]);
@@ -368,14 +368,14 @@ mod ownership {
       assert_eq!(shared.as_slice(), &CONTENTS[..SHORT_LEN]);
       assert_eq!(shared.as_slice().as_ptr(), pointer);
       assert!(shared.is_unique());
-      let values = shared.try_into_vec().ok().expect("unique vector");
+      let values = shared.try_into_vec().expect("unique vector");
       assert_eq!(values.as_ptr(), pointer);
       assert_eq!(values.capacity(), SHORT_LEN);
       short_construct::<Vector<u8, S>, PAD>(group, format!("from_shared_vec/{label}"), |values| {
         Vector::<u8, S>::try_from_shared_vec(values).unwrap()
       });
     } else {
-      let values = shared.err().expect("external vector does not fit");
+      let values = shared.expect_err("external vector does not fit");
       assert_eq!(values, &CONTENTS[..SHORT_LEN]);
       assert_eq!(values.capacity(), SHORT_LEN);
     }
@@ -463,28 +463,28 @@ mod ownership {
         "vector_default",
         kind,
         |values| DefaultVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
       );
       cases::<ZeroVector, { OUTPUT_BYTES - size_of::<ZeroVector>() }>(
         &mut group,
         "vector_zero",
         kind,
         |values| ZeroVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
       );
       cases::<PackedVector, { OUTPUT_BYTES - size_of::<PackedVector>() }>(
         &mut group,
         PACKED_LABEL,
         kind,
         |values| PackedVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
       );
       cases::<WideVector, { OUTPUT_BYTES - size_of::<WideVector>() }>(
         &mut group,
         "vector_32",
         kind,
         |values| WideVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
       );
       #[cfg(target_pointer_width = "32")]
       {
@@ -493,28 +493,28 @@ mod ownership {
           "vector_16",
           kind,
           |values| VectorN::<u8, 16>::try_from_vec(values).unwrap(),
-          |vector| vector.try_into_vec().ok().expect("unique vector"),
+          |vector| vector.try_into_vec().expect("unique vector"),
         );
         cases::<VectorN<u8, 20>, { OUTPUT_BYTES - size_of::<VectorN<u8, 20>>() }>(
           &mut group,
           "vector_20",
           kind,
           |values| VectorN::<u8, 20>::try_from_vec(values).unwrap(),
-          |vector| vector.try_into_vec().ok().expect("unique vector"),
+          |vector| vector.try_into_vec().expect("unique vector"),
         );
         cases::<VectorN<u8, 24>, { OUTPUT_BYTES - size_of::<VectorN<u8, 24>>() }>(
           &mut group,
           "vector_24",
           kind,
           |values| VectorN::<u8, 24>::try_from_vec(values).unwrap(),
-          |vector| vector.try_into_vec().ok().expect("unique vector"),
+          |vector| vector.try_into_vec().expect("unique vector"),
         );
         cases::<VectorN<u8, 28>, { OUTPUT_BYTES - size_of::<VectorN<u8, 28>>() }>(
           &mut group,
           "vector_28",
           kind,
           |values| VectorN::<u8, 28>::try_from_vec(values).unwrap(),
-          |vector| vector.try_into_vec().ok().expect("unique vector"),
+          |vector| vector.try_into_vec().expect("unique vector"),
         );
       }
       cases::<Bytes, { OUTPUT_BYTES - size_of::<Bytes>() }>(

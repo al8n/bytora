@@ -35,7 +35,7 @@ import re
 import sys
 
 LABELS = ["bytes", "n_0", "n_16", "n_24", "n_32"]
-OPS = ["from_vec", "try_from_vec", "consume", "warmed_clone", "range", "drop"]
+OPS = ["from_vec", "try_from_vec", "consume", "warmed_clone", "range", "try_range", "drop"]
 CONTROL = "bytes"
 
 ALLOC_NAMES = [

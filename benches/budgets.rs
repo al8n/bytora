@@ -3,11 +3,14 @@ use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(bytora_atomic)]
 mod ownership {
   use bytes::Bytes;
-  use bytora::{AssocInlineSize, InlineSize, Vector, VectorN};
+  use bytora::{
+    AssocInlineSize, DefaultSize, InlineSize, LocalVector, Vector, VectorMut, VectorN,
+    typenum::Unsigned,
+  };
   use criterion::{
     BatchSize, Bencher, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime,
   };
-  use std::{hint::black_box, mem::size_of, ops::Range};
+  use std::{hint::black_box, mem::size_of, ops::Range, rc::Rc};
 
   // A timed result is written to a stack temporary or an output slot whose alignment would
   // otherwise be only the ABI's; on some cores its address modulo 32 selects the speed of the
@@ -56,7 +59,7 @@ mod ownership {
       self.slice(range)
     }
     fn into_vec(self) -> Vec<u8> {
-      self.try_into_vec().ok().expect("unique vector")
+      self.try_into_vec().expect("unique vector")
     }
   }
 
@@ -284,6 +287,481 @@ mod ownership {
     }
   }
 
+  // ── The `try_*` twins against their panicking forms ─────────────────────────────────────────
+  //
+  // One pair of rows per twin, on its success path: the panicking form and then the twin, with the
+  // same input. An id's operation is `{form}/{method}`, `{form}` being the name of the panicking
+  // method, so that the summary prints the two rows of a pair in adjacent columns. A twin's result
+  // is unwrapped with `expect`. A group times one handle type at the default budget, and every
+  // input holds `TWIN_LEN` elements: a shared heap window for `Vector` and `LocalVector`, and for
+  // `VectorMut` a heap buffer with room for as many again, so that no append grows it.
+  const TWIN_LEN: usize = 64;
+  const TWIN_AT: usize = TWIN_LEN / 2;
+  const TWIN_RANGE: Range<usize> = 1..TWIN_LEN - 1;
+  static TWIN_BYTES: [u8; TWIN_LEN] = CONTENTS;
+
+  fn twin_label<H>() -> String {
+    format!(
+      "n_{}_handle_{}",
+      <DefaultSize as Unsigned>::USIZE,
+      size_of::<H>()
+    )
+  }
+
+  fn twin(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    form: &str,
+    method: &str,
+    label: &str,
+    routine: impl FnMut(&mut Bencher<'_>),
+  ) {
+    bench(group, &format!("{form}/{method}"), label, TWIN_LEN, routine);
+  }
+
+  // The timed closure and every row's operation carry `#[inline(always)]`. Criterion calls the
+  // routine from two sites, so without the pin the compiler inlines a closure or leaves it out
+  // by its size, and a twin's closure, larger by its `expect` path, is left out before its
+  // panicking form's is. A pair then differs by one call, which a 4 ns row shows as tens of
+  // percent.
+  //
+  // Times `operation` on a borrowed source, as `range` does.
+  fn on_source<T: ?Sized, O>(b: &mut Bencher<'_>, source: &T, mut operation: impl FnMut(&T) -> O) {
+    b.iter_batched_ref(
+      || source,
+      #[inline(always)]
+      |source| black_box(Aligned(operation(black_box(*source)))),
+      BATCH,
+    );
+  }
+
+  // Times `operation` on a fresh input from `setup`. The input, like the output, drops after the
+  // timing, as in `consume`.
+  fn on_input<I, O>(
+    b: &mut Bencher<'_>,
+    setup: impl FnMut() -> I,
+    mut operation: impl FnMut(&mut I) -> O,
+  ) {
+    b.iter_batched_ref(
+      setup,
+      #[inline(always)]
+      |input| black_box(Aligned(operation(black_box(input)))),
+      BATCH,
+    );
+  }
+
+  fn vector_twins(c: &mut Criterion) {
+    let label = twin_label::<Vector<u8>>();
+    let bytes: &[u8] = &TWIN_BYTES;
+    let values = input(TWIN_LEN);
+    let pointer = values.as_ptr();
+    let source = Vector::<u8>::try_from_vec(values).expect("the default budget adopts a vector");
+    assert_eq!(source.as_slice().as_ptr(), pointer);
+    // The first clone shares the allocation, so that no row pays for it.
+    let peer = source.clone();
+    let subset = &source.as_slice()[TWIN_RANGE];
+    let mut group = c.benchmark_group("budgets_twins_vector");
+    twin(&mut group, "advance", "advance", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.advance(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "advance", "try_advance", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.try_advance(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(
+      &mut group,
+      "copy_from_slice",
+      "copy_from_slice",
+      &label,
+      |b| {
+        on_source(
+          b,
+          bytes,
+          #[inline(always)]
+          |values| Vector::<u8>::copy_from_slice(values),
+        );
+      },
+    );
+    twin(
+      &mut group,
+      "copy_from_slice",
+      "try_copy_from_slice",
+      &label,
+      |b| {
+        on_source(
+          b,
+          bytes,
+          #[inline(always)]
+          |values| {
+            Vector::<u8>::try_copy_from_slice(values).expect("shared storage holds the bytes")
+          },
+        );
+      },
+    );
+    twin(&mut group, "slice", "slice", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| source.slice(black_box(TWIN_RANGE.start)..black_box(TWIN_RANGE.end)),
+      );
+    });
+    twin(&mut group, "slice", "try_slice", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| {
+          source
+            .try_slice(black_box(TWIN_RANGE.start)..black_box(TWIN_RANGE.end))
+            .expect("in bounds")
+        },
+      );
+    });
+    twin(&mut group, "slice_ref", "slice_ref", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| source.slice_ref(black_box(subset)),
+      );
+    });
+    twin(&mut group, "slice_ref", "try_slice_ref", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| {
+          source
+            .try_slice_ref(black_box(subset))
+            .expect("inside the source")
+        },
+      );
+    });
+    twin(&mut group, "split_off", "split_off", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.split_off(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "split_off", "try_split_off", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.try_split_off(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(&mut group, "split_to", "split_to", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.split_to(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "split_to", "try_split_to", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.try_split_to(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    group.finish();
+    black_box(&peer);
+  }
+
+  // A heap buffer of `TWIN_LEN` bytes with room for as many again.
+  fn twin_buffer() -> VectorMut<u8> {
+    let mut values = Vec::with_capacity(2 * TWIN_LEN);
+    values.extend_from_slice(&TWIN_BYTES);
+    VectorMut::<u8>::try_from_vec(values).expect("the default budget adopts a vector")
+  }
+
+  // `twin_buffer` with the range to copy beside it. The bounds come from the batch, not from two
+  // `black_box` slots in the timed closure. Two adjacent slots are reloaded as one pair, and an
+  // Apple core stalls on a pair that straddles a 16-byte boundary behind its two stores, which
+  // made the two forms differ by where the compiler happened to put the slots.
+  fn twin_range_buffer() -> (VectorMut<u8>, Range<usize>) {
+    (twin_buffer(), black_box(0..TWIN_LEN))
+  }
+
+  fn vector_mut_twins(c: &mut Criterion) {
+    let label = twin_label::<VectorMut<u8>>();
+    let bytes: &[u8] = &TWIN_BYTES;
+    let buffer = twin_buffer();
+    assert_eq!(buffer.as_slice(), bytes);
+    assert!(buffer.capacity() >= 2 * TWIN_LEN);
+    drop(buffer);
+    let mut group = c.benchmark_group("budgets_twins_vector_mut");
+    twin(&mut group, "advance", "advance", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.advance(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "advance", "try_advance", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.try_advance(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(&mut group, "extend", "extend", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.extend(black_box(bytes).iter().copied()),
+      );
+    });
+    twin(&mut group, "extend", "try_extend", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| {
+          buffer
+            .try_extend(black_box(bytes).iter().copied())
+            .expect("room for the bytes")
+        },
+      );
+    });
+    twin(
+      &mut group,
+      "extend_from_slice",
+      "extend_from_slice",
+      &label,
+      |b| {
+        on_input(
+          b,
+          twin_buffer,
+          #[inline(always)]
+          |buffer| buffer.extend_from_slice(black_box(bytes)),
+        );
+      },
+    );
+    twin(
+      &mut group,
+      "extend_from_slice",
+      "try_extend_from_slice",
+      &label,
+      |b| {
+        on_input(
+          b,
+          twin_buffer,
+          #[inline(always)]
+          |buffer| {
+            buffer
+              .try_extend_from_slice(black_box(bytes))
+              .expect("room for the bytes")
+          },
+        );
+      },
+    );
+    twin(
+      &mut group,
+      "extend_from_within",
+      "extend_from_within",
+      &label,
+      |b| {
+        on_input(
+          b,
+          twin_range_buffer,
+          #[inline(always)]
+          |(buffer, range)| buffer.extend_from_within(range.clone()),
+        );
+      },
+    );
+    twin(
+      &mut group,
+      "extend_from_within",
+      "try_extend_from_within",
+      &label,
+      |b| {
+        on_input(
+          b,
+          twin_range_buffer,
+          #[inline(always)]
+          |(buffer, range)| {
+            buffer
+              .try_extend_from_within(range.clone())
+              .expect("room for the bytes")
+          },
+        );
+      },
+    );
+    twin(&mut group, "reserve", "reserve", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.reserve(black_box(TWIN_LEN)),
+      );
+    });
+    twin(&mut group, "reserve", "try_reserve", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| {
+          buffer
+            .try_reserve(black_box(TWIN_LEN))
+            .expect("room for the bytes")
+        },
+      );
+    });
+    twin(&mut group, "resize", "resize", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.resize(black_box(2 * TWIN_LEN), black_box(7)),
+      );
+    });
+    twin(&mut group, "resize", "try_resize", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| {
+          buffer
+            .try_resize(black_box(2 * TWIN_LEN), black_box(7))
+            .expect("room for the bytes")
+        },
+      );
+    });
+    twin(&mut group, "split_off", "split_off", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.split_off(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "split_off", "try_split_off", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.try_split_off(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(&mut group, "split_to", "split_to", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.split_to(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "split_to", "try_split_to", &label, |b| {
+      on_input(
+        b,
+        twin_buffer,
+        #[inline(always)]
+        |buffer| buffer.try_split_to(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(&mut group, "with_capacity", "with_capacity", &label, |b| {
+      on_input(
+        b,
+        || (),
+        #[inline(always)]
+        |_| VectorMut::<u8>::with_capacity(black_box(TWIN_LEN)),
+      );
+    });
+    twin(
+      &mut group,
+      "with_capacity",
+      "try_with_capacity",
+      &label,
+      |b| {
+        on_input(
+          b,
+          || (),
+          #[inline(always)]
+          |_| VectorMut::<u8>::try_with_capacity(black_box(TWIN_LEN)).expect("allocates"),
+        );
+      },
+    );
+    twin(&mut group, "zeroed", "zeroed", &label, |b| {
+      on_input(
+        b,
+        || (),
+        #[inline(always)]
+        |_| VectorMut::<u8>::zeroed(black_box(TWIN_LEN)),
+      );
+    });
+    twin(&mut group, "zeroed", "try_zeroed", &label, |b| {
+      on_input(
+        b,
+        || (),
+        #[inline(always)]
+        |_| VectorMut::<u8>::try_zeroed(black_box(TWIN_LEN)).expect("allocates"),
+      );
+    });
+    group.finish();
+  }
+
+  fn local_vector_twins(c: &mut Criterion) {
+    let label = twin_label::<LocalVector<u8>>();
+    let source = LocalVector::<u8>::from_rc(Rc::from(&TWIN_BYTES[..]));
+    assert_eq!(source.as_slice(), &TWIN_BYTES[..]);
+    let mut group = c.benchmark_group("budgets_twins_local_vector");
+    twin(&mut group, "advance", "advance", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.advance(black_box(TWIN_AT)),
+      );
+    });
+    twin(&mut group, "advance", "try_advance", &label, |b| {
+      on_input(
+        b,
+        || source.clone(),
+        #[inline(always)]
+        |handle| handle.try_advance(black_box(TWIN_AT)).expect("in bounds"),
+      );
+    });
+    twin(&mut group, "slice", "slice", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| source.slice(black_box(TWIN_RANGE.start)..black_box(TWIN_RANGE.end)),
+      );
+    });
+    twin(&mut group, "slice", "try_slice", &label, |b| {
+      on_source(
+        b,
+        &source,
+        #[inline(always)]
+        |source| {
+          source
+            .try_slice(black_box(TWIN_RANGE.start)..black_box(TWIN_RANGE.end))
+            .expect("in bounds")
+        },
+      );
+    });
+    group.finish();
+  }
+
   pub fn benchmarks(c: &mut Criterion) {
     macro_rules! each_budget {
       ($action:ident $(, $arg:ident)?) => {
@@ -323,6 +801,10 @@ mod ownership {
     }
     adoption::<0>(&mut group);
     group.finish();
+
+    vector_twins(c);
+    vector_mut_twins(c);
+    local_vector_twins(c);
   }
 }
 

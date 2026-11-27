@@ -138,14 +138,14 @@ mod measurement {
         "vector_default",
         kind,
         |values| DefaultVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
         DefaultVector::as_slice,
       );
       report(
         "vector_32",
         kind,
         |values| WideVector::try_from_vec(values).unwrap(),
-        |vector| vector.try_into_vec().ok().expect("unique vector"),
+        |vector| vector.try_into_vec().expect("unique vector"),
         WideVector::as_slice,
       );
       report("bytes", kind, Bytes::from, Vec::from, Bytes::as_ref);
