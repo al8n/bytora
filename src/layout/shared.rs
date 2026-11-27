@@ -890,6 +890,39 @@ impl<T, S: InlineSize> Slice<T, S> {
   #[cfg(smol_slice_atomic)]
   #[inline(always)]
   unsafe fn copy_retained_descriptor(&self, owner: *const ()) -> Self {
+    // On targets that inline the clone, rebuild a four-word descriptor from
+    // its fields as separate words. A sixteen-byte copy of the length and
+    // final words would be stored and reloaded as one value on its way to
+    // the destination, behind the retain. AArch64 keeps the copy: its clone
+    // returns through memory, and the caller reloads each sixteen-byte half
+    // as one value.
+    if cfg!(not(target_arch = "aarch64")) && S::HANDLE_BYTES == 4 * size_of::<usize>() {
+      // SAFETY: The caller retained this external window for the new handle.
+      return unsafe { self.rebuild_retained_descriptor(owner) };
+    }
+    // SAFETY: The caller retained this external window for the new handle.
+    unsafe { self.copy_retained_words(owner) }
+  }
+
+  // The caller must have retained this four-word external window. Its final
+  // word holds only the tag, so these fields reproduce every word that
+  // copy_retained_words copies.
+  #[cfg(smol_slice_atomic)]
+  #[inline(always)]
+  unsafe fn rebuild_retained_descriptor(&self, owner: *const ()) -> Self {
+    Self {
+      layout: Layout::external(
+        self.layout.data().cast(),
+        owner,
+        self.layout.external_len(),
+        self.layout.tag,
+      ),
+    }
+  }
+
+  #[cfg(smol_slice_atomic)]
+  #[inline(always)]
+  unsafe fn copy_retained_words(&self, owner: *const ()) -> Self {
     let word = size_of::<usize>();
     let src = ptr::from_ref(self).cast::<u8>();
     let mut copy = core::mem::MaybeUninit::<Self>::uninit();
