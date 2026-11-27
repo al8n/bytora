@@ -6,6 +6,8 @@ use core::{
 };
 use std::vec::Vec;
 
+use crate::error::TryReserveError;
+
 #[cfg(bytora_atomic)]
 use super::super::shared::Arc;
 
@@ -55,6 +57,58 @@ impl<T> Allocation<T> {
     buffer.reserve(additional);
     self.base = NonNull::new(buffer.as_mut_ptr().cast()).unwrap();
     self.capacity = buffer.capacity();
+  }
+
+  // grow's twin: on failure the allocation and its contents are untouched.
+  fn try_grow(&mut self, len: usize, additional: usize) -> Result<(), TryReserveError> {
+    // SAFETY: As in grow. On failure try_reserve leaves the Vec intact, and
+    // ManuallyDrop leaves ownership with self.
+    let mut buffer = ManuallyDrop::new(unsafe {
+      Vec::from_raw_parts(
+        self.base.as_ptr().cast::<MaybeUninit<T>>(),
+        len,
+        self.capacity,
+      )
+    });
+    let capacity = buffer.capacity();
+    buffer
+      .try_reserve(additional)
+      .map_err(|_| amortized_error::<T>(len, additional, capacity))?;
+    self.base = NonNull::new(buffer.as_mut_ptr().cast()).unwrap();
+    self.capacity = buffer.capacity();
+    Ok(())
+  }
+}
+
+// The most elements an allocation can hold: isize::MAX bytes, or any number of
+// zero-sized elements.
+const fn max_len<T>() -> usize {
+  if size_of::<T>() == 0 {
+    usize::MAX
+  } else {
+    isize::MAX as usize / size_of::<T>()
+  }
+}
+
+// What an exact request's refusal stands for. Past isize::MAX bytes it is an
+// overflow; otherwise the allocator failed. alloc's TryReserveError::kind is
+// unstable, so the request is classified the way RawVec classifies it.
+pub(super) fn exact_error<T>(required: usize) -> TryReserveError {
+  if required > max_len::<T>() {
+    TryReserveError::CapacityOverflow
+  } else {
+    TryReserveError::AllocError
+  }
+}
+
+// An amortized request asks for at least twice the capacity, so it overflows
+// where the requested length alone would not, as reserve's panic does.
+fn amortized_error<T>(len: usize, additional: usize, capacity: usize) -> TryReserveError {
+  match len.checked_add(additional) {
+    Some(required) if required.max(capacity.saturating_mul(2)) <= max_len::<T>() => {
+      TryReserveError::AllocError
+    }
+    _ => TryReserveError::CapacityOverflow,
   }
 }
 
@@ -278,6 +332,38 @@ impl<T> Window<T> {
       self.move_visible(&mut values);
       *self = Self::from_vec(values);
     }
+  }
+
+  // reserve's twin: an error where reserve panics or the allocation fails. On
+  // an error the window's elements are unchanged; a compaction it made first
+  // only moves them within their allocation.
+  pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+    if self.reclaim(additional, true) {
+      return Ok(());
+    }
+    let max = max_len::<T>();
+    let required = match self.len().checked_add(additional) {
+      Some(required) if required <= max => required,
+      _ => return Err(TryReserveError::CapacityOverflow),
+    };
+    if let Some(allocation) = self.buffer.exclusive() {
+      if additional > max - self.end {
+        let capacity = allocation.capacity;
+        self.compact(0, capacity);
+      }
+      let allocation = self.buffer.exclusive().unwrap();
+      allocation.try_grow(self.end, additional)?;
+      self.limit = allocation.capacity;
+    } else {
+      let capacity = required.max(self.capacity().saturating_mul(2).min(max));
+      let mut values = Vec::new();
+      values
+        .try_reserve_exact(capacity)
+        .map_err(|_| exact_error::<T>(capacity))?;
+      self.move_visible(&mut values);
+      *self = Self::from_vec(values);
+    }
+    Ok(())
   }
 
   fn move_visible(&mut self, dst: &mut Vec<T>) {

@@ -96,6 +96,10 @@ fn partial_orders_follow_partially_ordered_elements() {
 }
 
 #[test]
+#[allow(
+  clippy::mutable_key_type,
+  reason = "`Hash`, `Eq` and `Ord` read only the elements, never the owner word in the `UnsafeCell`"
+)]
 fn order_hash_and_borrow_follow_the_visible_elements() {
   use std::{
     collections::{BTreeSet, HashSet},

@@ -67,6 +67,34 @@ pub(crate) fn checked_range(range: impl RangeBounds<usize>, len: usize) -> Range
   start..end
 }
 
+// The ranges checked_range accepts, as a result. Each try_* twin of a ranged
+// method checks with this and then calls the panicking method, whose own check
+// can no longer fail, so the unsafe it guards stays behind that check.
+pub(crate) fn try_checked_range(
+  range: impl RangeBounds<usize>,
+  len: usize,
+) -> Result<Range<usize>, RangeOutOfBounds> {
+  let start = match range.start_bound() {
+    Bound::Included(&start) => Some(start),
+    Bound::Excluded(&start) => start.checked_add(1),
+    Bound::Unbounded => Some(0),
+  };
+  let end = match range.end_bound() {
+    Bound::Included(&end) => end.checked_add(1),
+    Bound::Excluded(&end) => Some(end),
+    Bound::Unbounded => Some(len),
+  };
+  match (start, end) {
+    (Some(start), Some(end)) if start <= end && end <= len => Ok(start..end),
+    // An endpoint past usize::MAX is reported as usize::MAX.
+    (start, end) => Err(RangeOutOfBounds::new(
+      start.unwrap_or(usize::MAX),
+      end.unwrap_or(usize::MAX),
+      len,
+    )),
+  }
+}
+
 impl<T, S: InlineSize> Vector<T, S> {
   /// The maximum number of inline elements. Each zero-sized element counts as
   /// one payload byte. Nonzero-sized elements requiring greater alignment than
@@ -97,7 +125,8 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// # Panics
   ///
   /// Panics if the range starts after its end, exceeds [`Self::len`], or
-  /// cannot be represented as a half-open range.
+  /// cannot be represented as a half-open range. [`Self::try_slice`] returns an
+  /// error instead.
   #[track_caller]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
     let len = self.len();
@@ -110,6 +139,13 @@ impl<T, S: InlineSize> Vector<T, S> {
     Self {
       layout: self.layout.slice_inline(range),
     }
+  }
+
+  /// Returns an independent view of a range of the remaining elements, or an
+  /// error where [`Self::slice`] panics.
+  pub fn try_slice(&self, range: impl RangeBounds<usize>) -> Result<Self, RangeOutOfBounds> {
+    let range = try_checked_range(range, self.len())?;
+    Ok(self.slice(range))
   }
 
   /// Returns the number of remaining elements.
@@ -126,13 +162,25 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `count` exceeds [`Self::len`].
+  /// Panics if `count` exceeds [`Self::len`]. [`Self::try_advance`] returns an
+  /// error instead.
   #[track_caller]
   pub fn advance(&mut self, count: usize) {
     if !self.layout.is_inline() {
       return self.advance_shared(count);
     }
     self.layout.advance(count);
+  }
+
+  /// Skips the first `count` remaining elements, or returns an error where
+  /// [`Self::advance`] panics.
+  pub fn try_advance(&mut self, count: usize) -> Result<(), OutOfBounds> {
+    let len = self.len();
+    if count > len {
+      return Err(OutOfBounds::new(count, len));
+    }
+    self.advance(count);
+    Ok(())
   }
 }
 
