@@ -8,6 +8,9 @@ use core::{
 };
 use typenum::Unsigned;
 
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+mod shared;
+
 /// The byte arrays used by the inline cursor and raw element storage.
 ///
 /// # Safety
@@ -107,6 +110,7 @@ const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
 // The two high length bytes live in the cursor and tag. Both pointers stay
 // typed when written to or read from the payload, including on big-endian targets.
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 struct ExternalPrefix {
   data: *const (),
   owner: *const (),
@@ -169,47 +173,33 @@ impl<T, S: InlineSize> Layout<T, S> {
     Some(layout)
   }
 
-  // An inert descriptor. Only inline layouts can be put into a public handle.
-  #[cfg_attr(not(test), expect(dead_code, reason = "reserved for external owners"))]
-  fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
-    if S::USIZE <= 8
-      || Self::PAYLOAD_BYTES < size_of::<ExternalPrefix>()
-      || len > isize::MAX as usize
-    {
-      return None;
-    }
-    let bytes = len.to_le_bytes();
-    let mut len_low = [0; LEN_LOW_BYTES];
-    len_low.copy_from_slice(&bytes[..LEN_LOW_BYTES]);
-    let mut cursor = S::Cursor::default();
-    cursor.as_mut()[0] = bytes[LEN_LOW_BYTES];
-    let mut payload = MaybeUninit::<S::Payload>::uninit();
-    // SAFETY: The packed prefix has alignment one and fits the checked payload.
-    unsafe {
-      payload
-        .as_mut_ptr()
-        .cast::<ExternalPrefix>()
-        .write(ExternalPrefix {
-          data: data.cast(),
-          owner,
-          len_low,
-        });
-    }
-    Some(Self {
-      _align: [],
-      payload,
-      cursor,
-      tag: NonZeroU8::new(EXTERNAL | bytes[LEN_LOW_BYTES + 1]).unwrap(),
-      _element: PhantomData,
-    })
+  pub(super) fn is_inline(&self) -> bool {
+    self.tag.get() < EXTERNAL
+  }
+
+  pub(super) fn clone_inline(&self) -> Self
+  where
+    T: Copy,
+  {
+    assert!(self.is_inline(), "expected inline storage");
+    // SAFETY: self is a valid, aligned layout. The inline tag excludes an external
+    // owner. Its cursor and tag are copyable, and T: Copy permits duplicating the
+    // elements. Reading the MaybeUninit payload as part of Self preserves both
+    // pointer provenance and uninitialized bytes, including element padding.
+    unsafe { ptr::read(self) }
+  }
+
+  fn external_prefix(&self) -> &ExternalPrefix {
+    assert!(!self.is_inline(), "expected external storage");
+    // SAFETY: The external tag is set only on a layout containing this packed prefix.
+    unsafe { &*self.payload.as_ptr().cast::<ExternalPrefix>() }
   }
 
   pub(super) fn len(&self) -> usize {
-    if self.tag.get() < EXTERNAL {
+    if self.is_inline() {
       return self.inline_range().len();
     }
-    // SAFETY: Only try_external sets the external tag, after writing the prefix.
-    let prefix = unsafe { &*self.payload.as_ptr().cast::<ExternalPrefix>() };
+    let prefix = self.external_prefix();
     let mut bytes = [0; size_of::<usize>()];
     bytes[..LEN_LOW_BYTES].copy_from_slice(&prefix.len_low);
     bytes[LEN_LOW_BYTES] = self.cursor.as_ref()[0];
@@ -268,6 +258,51 @@ impl<T, S: InlineSize> Layout<T, S> {
       [cursor] => *cursor = start as u8,
       [lo, hi, _] => [*lo, *hi] = (start as u16).to_le_bytes(),
       _ => unreachable!(),
+    }
+  }
+}
+
+// A bare Layout describes a window. Its enclosing Slice owns the strong reference.
+#[cfg(any(
+  test,
+  all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr")
+))]
+impl<T, S: InlineSize> Layout<T, S> {
+  fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
+    let bytes = len.to_le_bytes();
+    let mut low = [0; LEN_LOW_BYTES];
+    low.copy_from_slice(&bytes[..LEN_LOW_BYTES]);
+    let tag = NonZeroU8::new(EXTERNAL | bytes[LEN_LOW_BYTES + 1]).unwrap();
+    (low, bytes[LEN_LOW_BYTES], tag)
+  }
+
+  fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
+    if Self::PAYLOAD_BYTES < size_of::<ExternalPrefix>() || len > isize::MAX as usize {
+      return None;
+    }
+    let (len_low, high, tag) = Self::split_external_len(len);
+    let prefix = ExternalPrefix {
+      data: data.cast(),
+      owner,
+      len_low,
+    };
+    Some(Self::external(prefix, high, tag))
+  }
+
+  fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
+    assert!(tag.get() >= EXTERNAL, "expected external storage");
+    assert!(Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>());
+    let mut cursor = S::Cursor::default();
+    cursor.as_mut()[0] = high;
+    let mut payload = MaybeUninit::<S::Payload>::uninit();
+    // SAFETY: The packed prefix has alignment one and fits the checked payload.
+    unsafe { payload.as_mut_ptr().cast::<ExternalPrefix>().write(prefix) };
+    Self {
+      _align: [],
+      payload,
+      cursor,
+      tag,
+      _element: PhantomData,
     }
   }
 }
