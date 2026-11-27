@@ -208,6 +208,20 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     Self::wrap(layout)
   }
 
+  // An empty buffer with inline capacity only when this one has it, so that a copy of this
+  // buffer writes inline elements only under the Copy proof that gave this buffer its own.
+  fn empty_like(&self) -> Self {
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if self.window().is_some() {
+      return Self::unproven_empty();
+    }
+    if self.storage.layout().tag == EMPTY_WITHOUT_COPY {
+      Self::unproven_empty()
+    } else {
+      Self::blank()
+    }
+  }
+
   pub(crate) fn from_inline_layout(layout: Layout<T, S>) -> Self {
     if layout.len() == 0 {
       return Self::unproven_empty();
@@ -510,6 +524,16 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     }
   }
 
+  // Appends one element, growing the storage as `reserve` does.
+  #[track_caller]
+  fn push(&mut self, value: T) {
+    self.reserve(1);
+    let len = self.len();
+    self.spare_capacity_mut()[0].write(value);
+    // SAFETY: `reserve` left at least one spare slot, and the write above initialized the first.
+    unsafe { self.set_len(len + 1) };
+  }
+
   /// Changes the length, cloning `value` into newly initialized slots.
   /// Shrinking drops the removed elements.
   #[track_caller]
@@ -808,6 +832,78 @@ impl<T> VectorMut<T, typenum::U0> {
   /// Creates an allocation-free four-word buffer for any element type.
   pub const fn empty() -> Self {
     Self::blank()
+  }
+}
+
+impl<T, S: WritableSize<T>> Default for VectorMut<T, S> {
+  #[inline]
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// Clones the visible elements into a new buffer. An inline buffer clones into inline storage,
+/// and a heap buffer into a new allocation.
+impl<T: Clone, S: InlineSize> Clone for VectorMut<T, S> {
+  fn clone(&self) -> Self {
+    let mut clone = self.empty_like();
+    clone.extend(self.as_slice().iter().cloned());
+    clone
+  }
+}
+
+/// Appends the elements, growing the storage as `reserve` does.
+///
+/// # Panics
+///
+/// Panics where `reserve` panics: when the elements exceed the room of a buffer that cannot grow.
+/// The elements appended before the panic stay in the buffer.
+impl<T, S: InlineSize> Extend<T> for VectorMut<T, S> {
+  #[track_caller]
+  fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+    let iter = iter.into_iter();
+    self.reserve(iter.size_hint().0);
+    for value in iter {
+      self.push(value);
+    }
+  }
+}
+
+/// Appends copies of the elements, as the `Extend<T>` implementation does.
+impl<'a, T: Copy + 'a, S: InlineSize> Extend<&'a T> for VectorMut<T, S> {
+  #[track_caller]
+  fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+    self.extend(iter.into_iter().copied());
+  }
+}
+
+/// Appends the elements of each handle in turn, as `extend_from_slice` does.
+impl<T: Copy, S: InlineSize, R: InlineSize> Extend<Vector<T, R>> for VectorMut<T, S> {
+  #[track_caller]
+  fn extend<I: IntoIterator<Item = Vector<T, R>>>(&mut self, iter: I) {
+    for vector in iter {
+      self.extend_from_slice(vector.as_slice());
+    }
+  }
+}
+
+/// Collects the elements into a new buffer, as `new` and `extend` do.
+///
+/// # Panics
+///
+/// Panics where `extend` panics: when the elements exceed the room of a buffer that cannot grow.
+impl<T, S: WritableSize<T>> FromIterator<T> for VectorMut<T, S> {
+  fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+    let mut buffer = Self::new();
+    buffer.extend(iter);
+    buffer
+  }
+}
+
+/// Collects copies of the elements, as the `FromIterator<T>` implementation does.
+impl<'a, T: Copy + 'a, S: WritableSize<T>> FromIterator<&'a T> for VectorMut<T, S> {
+  fn from_iter<I: IntoIterator<Item = &'a T>>(iter: I) -> Self {
+    iter.into_iter().copied().collect()
   }
 }
 
