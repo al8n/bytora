@@ -44,6 +44,9 @@ fn raw_base<T>(state: *mut (), meta: usize) -> *mut T {
 }
 
 impl<T, S: InlineSize> Layout<T, S> {
+  // The longest vector that `fits_two_word_vec` accepts.
+  pub(crate) const TWO_WORD_MAX_LEN: usize = MAX_LEN;
+
   pub(crate) fn fits_two_word_vec(len: usize) -> bool {
     Self::TWO_WORD_VEC && vector::AVAILABLE && size_of::<T>() != 0 && len <= MAX_LEN
   }

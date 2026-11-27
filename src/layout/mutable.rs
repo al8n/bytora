@@ -1,5 +1,5 @@
 use super::{InlineSize, Layout};
-use crate::{Vector, VectorMut};
+use crate::{Vector, VectorMut, error::OutOfBounds};
 use core::{
   marker::PhantomData,
   mem::{self, MaybeUninit},
@@ -600,11 +600,36 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `at` exceeds the current length.
+  /// Panics if `at` exceeds the current length. [`Self::try_split_to`]
+  /// returns an error instead.
   #[must_use]
   #[track_caller]
   pub fn split_to(&mut self, at: usize) -> Self {
-    assert!(at <= self.len(), "split_to past end");
+    if at > self.len() {
+      split_to_past_end();
+    }
+    self.split_to_within(at)
+  }
+
+  /// Removes and returns the first `at` initialized elements, as
+  /// [`Self::split_to`] does.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`OutOfBounds`] if `at` exceeds the current length, and leaves
+  /// the buffer unchanged.
+  #[inline]
+  pub fn try_split_to(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let len = self.len();
+    if at > len {
+      return Err(OutOfBounds::new(at, len));
+    }
+    Ok(self.split_to_within(at))
+  }
+
+  // `at` is at most the current length, so it is within the capacity too.
+  #[inline]
+  fn split_to_within(&mut self, at: usize) -> Self {
     let right = self.split_off(at);
     mem::replace(self, right)
   }
@@ -944,4 +969,11 @@ impl<T> From<Vec<T>> for VectorMut<T, typenum::U0> {
       .ok()
       .expect("zero-budget mutable handle fits a vector")
   }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn split_to_past_end() -> ! {
+  panic!("split_to past end")
 }

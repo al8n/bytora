@@ -139,7 +139,9 @@ pointing into the original storage, even if the range is short or empty.
 accepted. For zero-sized elements, addresses cannot encode the element offset
 or reliably distinguish allocations, so a matching pointer and fitting length
 select a prefix. `split_off` and `split_to` partition the view; an empty side
-uses a new empty handle. `truncate(0)` and `clear()` release this handle's
+uses a new empty handle. `try_slice_ref`, `try_split_off` and `try_split_to`
+return `None` or an `OutOfBounds` error where those methods panic, and leave the
+handle unchanged. `truncate(0)` and `clear()` release this handle's
 ownership, even if an earlier empty `slice` retained it.
 `Vector::from_static` borrows a `&'static [T]` directly, even for short inputs.
 Constructing, slicing, cloning, and dropping static handles use no allocations or reference counts.
@@ -263,9 +265,9 @@ vector in `Err`.
 The default `Vector<u8>` keeps up to 14 bytes inline on 32-bit targets and 30
 bytes on 64-bit targets.
 `try_copy_from_slice` copies inline when possible and otherwise uses shared
-storage when available, returning `None` if the input cannot fit;
-`copy_from_slice` panics in that case. The sharing-enabled form requires
-`T: Copy + Send + Sync`; without shared ownership it requires `T: Copy`.
+storage when available, returning a `TryPutError` if the input cannot fit;
+`copy_from_slice` and `from_slice` panic in that case. The sharing-enabled form
+requires `T: Copy + Send + Sync`; without shared ownership it requires `T: Copy`.
 
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), any(target_has_atomic = "ptr", feature = "extra-platforms")))]

@@ -1,5 +1,8 @@
-use crate::{InlineSize, Layout, Vector};
-use core::{mem, ptr};
+use crate::{
+  InlineSize, Layout, Vector,
+  error::{OutOfBounds, TryPutError},
+};
+use core::{mem, ops::Range, ptr};
 
 impl<T, S: InlineSize> Vector<T, S> {
   /// Creates an empty vector without allocating, for any element type or size.
@@ -20,37 +23,51 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// # Panics
   ///
   /// Panics if a nonempty subset is outside this vector's current window.
+  /// [`Self::try_slice_ref`] returns `None` instead.
   #[track_caller]
   pub fn slice_ref(&self, subset: &[T]) -> Self {
     if subset.is_empty() {
       return Self::new();
     }
+    match self.subset_range(subset) {
+      Some(range) => self.slice(range),
+      None => subset_outside_vector(),
+    }
+  }
 
+  /// Returns the part of this vector corresponding to `subset`, as
+  /// [`Self::slice_ref`] does, or `None` where that method panics: for a
+  /// nonempty subset outside this vector's current window.
+  #[inline]
+  pub fn try_slice_ref(&self, subset: &[T]) -> Option<Self> {
+    if subset.is_empty() {
+      return Some(Self::new());
+    }
+    let range = self.subset_range(subset)?;
+    Some(self.slice(range))
+  }
+
+  // The range of a nonempty `subset` within the current window.
+  #[inline]
+  fn subset_range(&self, subset: &[T]) -> Option<Range<usize>> {
     let source = self.as_slice().as_ptr();
+    let len = self.len();
     if mem::size_of::<T>() == 0 {
-      assert!(
-        ptr::eq(source, subset.as_ptr()) && subset.len() <= self.len(),
-        "subset is outside this vector"
-      );
-      return self.slice(..subset.len());
+      let fits = ptr::eq(source, subset.as_ptr()) && subset.len() <= len;
+      return if fits { Some(0..subset.len()) } else { None };
     }
 
-    let byte_offset = subset
-      .as_ptr()
-      .addr()
-      .checked_sub(source.addr())
-      .expect("subset is outside this vector");
+    let byte_offset = subset.as_ptr().addr().checked_sub(source.addr())?;
     let element_size = mem::size_of::<T>();
-    assert!(
-      byte_offset % element_size == 0,
-      "subset is outside this vector"
-    );
+    if byte_offset % element_size != 0 {
+      return None;
+    }
     let start = byte_offset / element_size;
-    assert!(
-      start <= self.len() && subset.len() <= self.len() - start,
-      "subset is outside this vector"
-    );
-    self.slice(start..start + subset.len())
+    if start <= len && subset.len() <= len - start {
+      Some(start..start + subset.len())
+    } else {
+      None
+    }
   }
 
   /// Splits at `at`, returning the suffix and retaining the prefix in `self`.
@@ -60,12 +77,37 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `at` exceeds [`Self::len`].
+  /// Panics if `at` exceeds [`Self::len`]. [`Self::try_split_off`] returns an
+  /// error instead.
   #[must_use = "consider truncate if the suffix is not needed"]
   #[track_caller]
   pub fn split_off(&mut self, at: usize) -> Self {
     let len = self.len();
-    assert!(at <= len, "split index out of bounds");
+    if at > len {
+      split_index_out_of_bounds();
+    }
+    self.split_off_within(at, len)
+  }
+
+  /// Splits at `at` as [`Self::split_off`] does, returning the suffix and
+  /// retaining the prefix in `self`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`OutOfBounds`] if `at` exceeds [`Self::len`], and leaves `self`
+  /// unchanged.
+  #[inline]
+  pub fn try_split_off(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let len = self.len();
+    if at > len {
+      return Err(OutOfBounds::new(at, len));
+    }
+    Ok(self.split_off_within(at, len))
+  }
+
+  // `len` is the current length, and `at` is at most `len`.
+  #[inline]
+  fn split_off_within(&mut self, at: usize, len: usize) -> Self {
     if at == len {
       return Self::new();
     }
@@ -85,12 +127,37 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `at` exceeds [`Self::len`].
+  /// Panics if `at` exceeds [`Self::len`]. [`Self::try_split_to`] returns an
+  /// error instead.
   #[must_use = "consider advance if the prefix is not needed"]
   #[track_caller]
   pub fn split_to(&mut self, at: usize) -> Self {
     let len = self.len();
-    assert!(at <= len, "split index out of bounds");
+    if at > len {
+      split_index_out_of_bounds();
+    }
+    self.split_to_within(at, len)
+  }
+
+  /// Splits at `at` as [`Self::split_to`] does, returning the prefix and
+  /// retaining the suffix in `self`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`OutOfBounds`] if `at` exceeds [`Self::len`], and leaves `self`
+  /// unchanged.
+  #[inline]
+  pub fn try_split_to(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let len = self.len();
+    if at > len {
+      return Err(OutOfBounds::new(at, len));
+    }
+    Ok(self.split_to_within(at, len))
+  }
+
+  // `len` is the current length, and `at` is at most `len`.
+  #[inline]
+  fn split_to_within(&mut self, at: usize, len: usize) -> Self {
     if at == len {
       return mem::take(self);
     }
@@ -132,37 +199,73 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// Panics when the input does not fit inline and shared storage is
   /// unavailable, the handle is too small, or the length exceeds
-  /// `isize::MAX`. Use [`Self::try_copy_from_slice`] to check these limits.
+  /// `isize::MAX`. [`Self::try_copy_from_slice`] returns an error instead.
   #[cfg(bytora_atomic)]
   #[track_caller]
   pub fn copy_from_slice(values: &[T]) -> Self
   where
     T: Copy + Send + Sync,
   {
-    Self::try_copy_from_slice(values).expect("slice does not fit this handle")
+    match Self::copy_slice(values) {
+      Some(copy) => copy,
+      None => slice_does_not_fit(),
+    }
   }
 
   /// Copies elements into a new inline vector.
   ///
   /// # Panics
   ///
-  /// Panics when the input does not fit inline. Use
-  /// [`Self::try_copy_from_slice`] to check this limit.
+  /// Panics when the input does not fit inline. [`Self::try_copy_from_slice`]
+  /// returns an error instead.
   #[cfg(not(bytora_atomic))]
   #[track_caller]
   pub fn copy_from_slice(values: &[T]) -> Self
   where
     T: Copy,
   {
-    Self::try_copy_from_slice(values).expect("slice does not fit this handle")
+    match Self::try_from_slice(values) {
+      Some(copy) => copy,
+      None => slice_does_not_fit(),
+    }
   }
 
   /// Copies elements inline when possible, or into shared storage when needed.
   ///
-  /// Shared copies use the vector limits of [`Self::try_from_vec`]. Returns
-  /// `None` if neither the inline payload nor a vector can represent the input.
+  /// Shared copies use the vector limits of [`Self::try_from_vec`].
+  ///
+  /// # Errors
+  ///
+  /// Returns [`TryPutError`] where [`Self::copy_from_slice`] panics: when
+  /// neither the inline payload nor a vector can represent the input. Its
+  /// `available` is the longest input that this handle accepts.
   #[cfg(bytora_atomic)]
-  pub fn try_copy_from_slice(values: &[T]) -> Option<Self>
+  pub fn try_copy_from_slice(values: &[T]) -> Result<Self, TryPutError>
+  where
+    T: Copy + Send + Sync,
+  {
+    Self::copy_slice(values).ok_or_else(|| Self::copy_error(values.len()))
+  }
+
+  /// Copies elements inline.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`TryPutError`] where [`Self::copy_from_slice`] panics: when the
+  /// input does not fit inline. Its `available` is the inline capacity.
+  #[cfg(not(bytora_atomic))]
+  pub fn try_copy_from_slice(values: &[T]) -> Result<Self, TryPutError>
+  where
+    T: Copy,
+  {
+    Self::try_from_slice(values).ok_or_else(|| Self::copy_error(values.len()))
+  }
+
+  // The copy that both forms share. `None` where neither the inline payload
+  // nor a vector can represent the input.
+  #[cfg(bytora_atomic)]
+  #[inline]
+  fn copy_slice(values: &[T]) -> Option<Self>
   where
     T: Copy + Send + Sync,
   {
@@ -178,13 +281,61 @@ impl<T, S: InlineSize> Vector<T, S> {
     Self::try_from_vec(values.to_vec()).ok()
   }
 
-  /// Copies elements inline, or returns `None` if they do not fit.
+  // The error for a copy of `requested` elements that does not fit.
+  #[cold]
+  fn copy_error(requested: usize) -> TryPutError {
+    TryPutError {
+      requested,
+      available: Self::copy_limit(),
+    }
+  }
+
+  // The longest input that `copy_from_slice` accepts for this handle.
+  fn copy_limit() -> usize {
+    #[cfg(bytora_atomic)]
+    {
+      if S::HANDLE_BYTES >= 3 * mem::size_of::<usize>() {
+        return isize::MAX as usize;
+      }
+      if Layout::<T, S>::fits_two_word_vec(0) {
+        return Layout::<T, S>::TWO_WORD_MAX_LEN;
+      }
+    }
+    Self::INLINE_CAPACITY
+  }
+
+  /// Copies elements into a new vector, as [`Self::copy_from_slice`] does.
+  /// [`Self::try_from_slice`] copies inline only.
+  ///
+  /// # Panics
+  ///
+  /// Panics where [`Self::copy_from_slice`] panics.
+  /// [`Self::try_copy_from_slice`] returns an error instead.
+  #[cfg(bytora_atomic)]
+  #[inline]
+  #[track_caller]
+  pub fn from_slice(values: &[T]) -> Self
+  where
+    T: Copy + Send + Sync,
+  {
+    Self::copy_from_slice(values)
+  }
+
+  /// Copies elements into a new inline vector, as [`Self::copy_from_slice`]
+  /// does.
+  ///
+  /// # Panics
+  ///
+  /// Panics where [`Self::copy_from_slice`] panics.
+  /// [`Self::try_copy_from_slice`] returns an error instead.
   #[cfg(not(bytora_atomic))]
-  pub fn try_copy_from_slice(values: &[T]) -> Option<Self>
+  #[inline]
+  #[track_caller]
+  pub fn from_slice(values: &[T]) -> Self
   where
     T: Copy,
   {
-    Self::try_from_slice(values)
+    Self::copy_from_slice(values)
   }
 }
 
@@ -192,4 +343,25 @@ impl<T, S: InlineSize> Default for Vector<T, S> {
   fn default() -> Self {
     Self::new()
   }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn subset_outside_vector() -> ! {
+  panic!("subset is outside this vector")
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn split_index_out_of_bounds() -> ! {
+  panic!("split index out of bounds")
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn slice_does_not_fit() -> ! {
+  panic!("slice does not fit this handle")
 }
