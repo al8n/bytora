@@ -52,6 +52,11 @@ path = "benches/lazy_vec.rs"
 name = "lazy_vec"
 harness = false
 
+[[bench]]
+path = "benches/budgets.rs"
+name = "budgets"
+harness = false
+
 [profile.bench]
 opt-level = 3
 debug = false
