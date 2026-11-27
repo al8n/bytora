@@ -73,7 +73,7 @@ fn zero_budget_shares_the_original_atomics_across_threads() {
 
   let counters = vec![AtomicUsize::new(3), AtomicUsize::new(7)];
   let ptr = counters.as_ptr();
-  let values: Vector<AtomicUsize, U0> = VectorN::<AtomicUsize, 0>::try_from(counters).unwrap();
+  let values: Vector<AtomicUsize, U0> = VectorN::<AtomicUsize, 0>::from(counters);
   assert_eq!(values.as_slice().as_ptr(), ptr);
   let mut tail = values.clone();
   tail.advance(1);
@@ -101,7 +101,7 @@ fn zero_budget_keeps_all_owned_elements_until_the_last_empty_window_drops() {
   let drops = [const { AtomicUsize::new(0) }; 3];
   let owned: Vec<_> = drops.iter().map(CountDrop).collect();
   let ptr = owned.as_ptr();
-  let whole = VectorN::<_, 0>::try_from(owned).ok().unwrap();
+  let whole = VectorN::<_, 0>::from(owned);
   assert_eq!(whole.as_slice().as_ptr(), ptr);
   let mut tail = whole.slice(1..);
   assert_eq!(tail.as_slice().as_ptr(), ptr.wrapping_add(1));
@@ -121,16 +121,25 @@ fn zero_budget_keeps_all_owned_elements_until_the_last_empty_window_drops() {
 #[test]
 fn zero_budget_owned_vectors_respect_the_external_length_limit() {
   let max = isize::MAX as usize;
-  let mut largest = VectorN::<(), 0>::try_from(vec![(); max]).unwrap();
+  let mut largest = VectorN::<(), 0>::from(vec![(); max]);
   assert_eq!(largest.len(), max);
   largest.advance(max - 1);
   assert_eq!(largest.clone().as_slice(), &[()]);
   let oversized = vec![(); max + 1];
   let original = (oversized.as_ptr(), oversized.len(), oversized.capacity());
-  let returned = VectorN::<(), 0>::try_from(oversized).err().unwrap();
+  let returned = VectorN::<(), 0>::try_from_shared_vec(oversized)
+    .err()
+    .unwrap();
   assert_eq!(
     (returned.as_ptr(), returned.len(), returned.capacity()),
     original
+  );
+  let panic = std::panic::catch_unwind(|| VectorN::<(), 0>::from(vec![(); max + 1]))
+    .err()
+    .unwrap();
+  assert_eq!(
+    panic.downcast_ref::<&str>(),
+    Some(&"vector length exceeds isize::MAX")
   );
 }
 

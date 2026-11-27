@@ -512,7 +512,7 @@ fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
 }
 
 #[test]
-fn zero_budget_vectors_keep_allocations_and_use_static_unallocated_empties() {
+fn zero_budget_vectors_keep_allocations_and_use_inline_unallocated_empties() {
   fn copy<T: Copy + Send + Sync, S: InlineSize>(values: Vec<T>) -> Result<Vector<T, S>, Vec<T>> {
     Vector::try_from_vec(values)
   }
@@ -520,13 +520,14 @@ fn zero_budget_vectors_keep_allocations_and_use_static_unallocated_empties() {
   let ptr = short.as_ptr();
   let shared = copy::<_, typenum::U0>(short).unwrap();
   assert_eq!(shared.as_slice().as_ptr(), ptr);
-  let empty = VectorN::<std::string::String, 0>::try_from(Vec::new()).unwrap();
-  assert_eq!(empty.layout.tag, COMPACT_STATIC);
-  assert!(!empty.layout.uses_external_owner());
-  assert!(empty.try_into_vec().is_err());
+  // As with try_from_vec, an unallocated vector becomes the inline empty handle.
+  let empty = VectorN::<std::string::String, 0>::from(Vec::new());
+  assert!(empty.layout.is_inline());
+  assert!(empty.is_unique());
+  assert!(empty.try_into_vec().ok().unwrap().is_empty());
   let allocated = Vec::<std::string::String>::with_capacity(1);
   let (base, capacity) = (allocated.as_ptr(), allocated.capacity());
-  let empty = VectorN::<_, 0>::try_from(allocated).unwrap();
+  let empty = VectorN::<_, 0>::from(allocated);
   assert!(empty.is_empty());
   assert_eq!(empty.as_slice().as_ptr(), base);
   let recovered = empty.try_into_vec().ok().unwrap();
@@ -813,7 +814,7 @@ fn adopted_vectors_hold_a_marker_or_one_header_placed_by_their_spare_capacity() 
     values.resize(len, 7usize);
     let (base, capacity) = (values.as_ptr(), values.capacity());
     assert_eq!(capacity, len + spare);
-    let source = VectorN::<usize, 0>::try_from(values).unwrap();
+    let source = VectorN::<usize, 0>::from(values);
     assert_eq!(placed(&source, base, capacity), expected::<usize>(spare));
     assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
     let recovered = source.try_into_vec().ok().unwrap();
@@ -1750,7 +1751,7 @@ fn static_and_shared_copy_fallbacks_and_unique_mutable_window() {
 
   let input: Vec<u8> = (0..64).collect();
   let base = input.as_ptr();
-  let mut original = VectorN::<_, 0>::try_from(input).unwrap();
+  let mut original = VectorN::<_, 0>::from(input);
   original.advance(4);
   let mut window = original.slice(2..6);
   assert_eq!(window.clone().into_vec(), [6, 7, 8, 9]);
@@ -1887,7 +1888,7 @@ fn panic_during_extraction_releases_each_element_once() {
       drops,
       panic: i == panic_at,
     }));
-    let mut original = VectorN::<_, 0>::try_from(values).ok().unwrap();
+    let mut original = VectorN::<_, 0>::from(values);
     let middle = if share {
       let middle = original.slice(1..3);
       drop(original);

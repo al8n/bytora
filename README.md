@@ -283,12 +283,14 @@ assert_eq!(whole.len(), 32);
 `Vector<T, U0>` and `VectorN<T, 0>` have zero inline capacity for every `T`,
 including zero-sized types. `VectorN::<T, 0>::empty()` uses only `core` and
 accepts any element type. `try_from_static` borrows a static slice of `Sync`
-elements. With shared ownership available, `TryFrom<Vec<T>>`
+elements. With shared ownership available, `From<Vec<T>>`
 takes ownership of `Send + Sync` elements, including types that implement
-neither `Copy` nor `Clone`. It retains an empty vector's allocation when one
-exists. An empty vector without an allocation yields `Vector::empty()`. Clones
-and ranges keep the original vector's elements alive until the last handle
-drops, even when its window is empty.
+neither `Copy` nor `Clone`, at this budget and at the default one. It retains an
+empty vector's allocation when one exists. An empty vector without an allocation
+yields an empty handle that owns nothing, as `Vector::new()` does. A vector of
+zero-sized elements longer than `isize::MAX` panics; `try_from_shared_vec`
+returns it instead. Clones and ranges keep the original vector's elements alive
+until the last handle drops, even when its window is empty.
 
 ```rust
 # #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
@@ -296,7 +298,7 @@ drops, even when its window is empty.
 use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use bytora::VectorN;
 
-let counters = VectorN::<AtomicUsize, 0>::try_from(vec![AtomicUsize::new(0)]).unwrap();
+let counters = VectorN::<AtomicUsize, 0>::from(vec![AtomicUsize::new(0)]);
 let peer = counters.clone();
 peer.as_slice()[0].fetch_add(1, Relaxed);
 assert_eq!(counters.as_slice()[0].load(Relaxed), 1);

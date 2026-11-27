@@ -278,9 +278,7 @@ fn owned_split_edges_and_clear_release_exactly_the_expected_owner() {
     }
   }
   fn tracked(counter: &Arc<AtomicUsize>) -> VectorN<Dropper, 0> {
-    VectorN::<Dropper, 0>::try_from(vec![Dropper(counter.clone()), Dropper(counter.clone())])
-      .ok()
-      .unwrap()
+    VectorN::<Dropper, 0>::from(vec![Dropper(counter.clone()), Dropper(counter.clone())])
   }
 
   let drops = Arc::new(AtomicUsize::new(0));
