@@ -3,11 +3,10 @@ use smol_slice::SliceMutN;
 #[test]
 fn bounded_growth_split_and_reclaim_cover_inline_capacity() {
   type Tiny = SliceMutN<u8, { size_of::<usize>() }>;
-  const EMPTY: Tiny = Tiny::new();
   let capacity = Tiny::INLINE_CAPACITY;
   for len in 0..=capacity {
     for at in 0..=capacity {
-      let mut left = EMPTY;
+      let mut left = const { Tiny::new() };
       assert_eq!(left.capacity(), capacity);
       left.extend_from_slice(&b"rustbuf"[..len]);
       let mut right = left.split_off(at);

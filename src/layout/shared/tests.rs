@@ -118,6 +118,146 @@ fn zero_budget_copy_vectors_share_short_inputs_and_empty_vectors_need_no_owner()
 }
 
 #[test]
+fn unshared_vec_preserves_all_raw_parts_across_window_edits() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  struct Count<'a>(&'a AtomicUsize);
+  impl Drop for Count<'_> {
+    fn drop(&mut self) {
+      self.0.fetch_add(1, Relaxed);
+    }
+  }
+  for thaw in [false, true] {
+    let dropped = [const { AtomicUsize::new(0) }; 5];
+    let mut values = Vec::with_capacity(11);
+    values.extend(dropped.iter().map(Count));
+    let (base, cap) = (values.as_ptr(), values.capacity());
+    let mut source = SliceN::<_, 0>::try_from_shared_vec(values).ok().unwrap();
+    source.advance(1);
+    source.truncate(3);
+    source.advance(1);
+    assert_eq!(vector::raw(source.layout.owner()), vector::AVAILABLE);
+    assert!(source.is_unique());
+    assert_eq!(source.as_slice().as_ptr(), base.wrapping_add(2));
+    assert_eq!(dropped.each_ref().map(|d| d.load(Relaxed)), [0; 5]);
+    let visible = if thaw {
+      let mutable = source.try_into_mut().ok().unwrap();
+      assert_eq!(mutable.as_slice().as_ptr(), base.wrapping_add(2));
+      mutable.into_vec()
+    } else {
+      source.try_into_vec().ok().unwrap()
+    };
+    assert_eq!(
+      (visible.as_ptr(), visible.len(), visible.capacity()),
+      (base, 2, cap)
+    );
+    assert_eq!(dropped.each_ref().map(|d| d.load(Relaxed)), [1, 1, 0, 0, 1]);
+    drop(visible);
+    assert_eq!(dropped.each_ref().map(|d| d.load(Relaxed)), [1; 5]);
+  }
+}
+
+#[test]
+fn whole_raw_vec_round_trip_preserves_even_an_empty_allocation() {
+  for len in [0, 4, 12] {
+    let mut original = Vec::with_capacity(12);
+    original.extend(0u32..len);
+    let (base, capacity) = (original.as_ptr(), original.capacity());
+    let source = Slice::<u32>::try_from_shared_vec(original).unwrap();
+    if vector::AVAILABLE {
+      assert_eq!(
+        vector::full_spare(source.layout.owner()),
+        Some(capacity - len as usize)
+      );
+    }
+    let result = source.try_into_vec().ok().unwrap();
+    assert_eq!(
+      (result.as_ptr(), result.len(), result.capacity()),
+      (base, len as usize, capacity)
+    );
+  }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn concurrent_first_vec_shares_keep_one_owner_and_the_borrowed_window() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  use std::sync::Barrier;
+
+  struct Count<'a> {
+    drops: &'a AtomicUsize,
+    value: u8,
+  }
+  impl Drop for Count<'_> {
+    fn drop(&mut self) {
+      self.drops.fetch_add(1, Relaxed);
+    }
+  }
+
+  fn exercise<S: InlineSize>()
+  where
+    for<'a> Slice<Count<'a>, S>: Send + Sync,
+  {
+    let drops = AtomicUsize::new(0);
+    let input: Vec<_> = (0..10)
+      .map(|value| Count {
+        drops: &drops,
+        value,
+      })
+      .collect();
+    let (base, capacity) = (input.as_ptr(), input.capacity());
+    let mut source = Slice::<_, S>::try_from_shared_vec(input).ok().unwrap();
+    source.advance(1);
+    source.truncate(8);
+    assert_eq!(vector::raw(source.layout.owner()), vector::AVAILABLE);
+    let borrowed = source.as_slice();
+    let barrier = Barrier::new(4);
+    let peers = std::thread::scope(|threads| {
+      let handles: Vec<_> = (0..4)
+        .map(|i| {
+          let (source, barrier) = (&source, &barrier);
+          threads.spawn(move || {
+            barrier.wait();
+            match i {
+              0 => source.clone(),
+              1 => source.slice(2..5),
+              2 => {
+                let mut dest = Slice::new();
+                dest.clone_from(source);
+                dest
+              }
+              _ => source.slice(8..),
+            }
+          })
+        })
+        .collect();
+      handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>()
+    });
+    let winner = source.layout.owner();
+    assert!(!vector::raw(winner));
+    assert!(peers.iter().all(|p| p.layout.owner() == winner));
+    assert_eq!(borrowed[7].value, 8);
+    assert_eq!(peers[1].as_slice().as_ptr(), base.wrapping_add(3));
+    assert_eq!(peers[3].as_slice().as_ptr(), base.wrapping_add(9));
+    let source = source.try_into_vec().err().unwrap();
+    drop(peers);
+    let result = source.try_into_vec().ok().unwrap();
+    assert_eq!(
+      (result.as_ptr(), result.len(), result.capacity()),
+      (base, 8, capacity)
+    );
+    assert_eq!(drops.load(Relaxed), 2);
+    drop(result);
+    assert_eq!(drops.load(Relaxed), 10);
+  }
+
+  exercise::<crate::DefaultSize>();
+  exercise::<typenum::U8192>();
+}
+
+#[test]
 fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
   fn check<const BYTES: usize>()
   where
@@ -128,7 +268,8 @@ fn shared_clones_retain_one_owner_each_and_release_the_last_reference() {
     let base = input.as_ptr();
     let mut original = SliceN::<u8, BYTES>::try_from_vec(input).unwrap();
     assert_eq!(original.as_slice().as_ptr(), base);
-    let owner = original.layout.external_prefix().owner.cast::<Vec<u8>>();
+    assert_eq!(vector::raw(original.layout.owner()), vector::AVAILABLE);
+    let owner = original.layout.shared_owner().cast::<vector::Vector<u8>>();
     // SAFETY: Borrow the original handle's live Arc without consuming its strong count.
     let arc = ManuallyDrop::new(unsafe { Arc::from_raw(owner) });
     let weak = Arc::downgrade(&arc);
@@ -544,7 +685,7 @@ fn panic_during_extraction_releases_each_element_once() {
       assert!(!self.panic, "intentional element destructor panic");
     }
   }
-  for panic_at in [0, 3] {
+  for (panic_at, promote) in [(0, false), (0, true), (3, false), (3, true)] {
     let drops = [const { AtomicUsize::new(0) }; 4];
     let values = drops
       .iter()
@@ -554,9 +695,16 @@ fn panic_during_extraction_releases_each_element_once() {
         panic: i == panic_at,
       })
       .collect::<Vec<_>>();
-    let original = SliceN::<_, 0>::try_from(values).ok().unwrap();
-    let middle = original.slice(1..3);
-    drop(original);
+    let mut original = SliceN::<_, 0>::try_from(values).ok().unwrap();
+    let middle = if promote {
+      let middle = original.slice(1..3);
+      drop(original);
+      middle
+    } else {
+      original.advance(1);
+      original.truncate(2);
+      original
+    };
     let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| middle.try_into_vec()));
     assert!(failure.is_err());
     assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1; 4]);

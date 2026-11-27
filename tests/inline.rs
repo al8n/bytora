@@ -37,15 +37,15 @@ fn generic_sizes_work_with_both_handles() {
 fn zero_budget_has_no_inline_elements_and_an_aligned_const_empty_window() {
   #[repr(align(128))]
   struct Aligned(core::marker::PhantomData<core::cell::Cell<u8>>);
-  const EMPTY: Slice<Aligned, U0> = SliceN::<Aligned, 0>::empty();
+  let empty = const { SliceN::<Aligned, 0>::empty() };
   assert_eq!(SliceN::<Aligned, 0>::INLINE_CAPACITY, 0);
   assert_eq!(SliceN::<u8, 0>::INLINE_CAPACITY, 0);
   assert_eq!(SliceN::<(), 0>::INLINE_CAPACITY, 0);
   assert!(SliceN::<(), 0>::try_from_slice(&[()]).is_none());
   assert_eq!(size_of::<Slice<Aligned, U0>>(), 3 * size_of::<usize>());
   assert_eq!(size_of::<Option<SliceN<Aligned, 0>>>(), U0::HANDLE_BYTES);
-  assert!(EMPTY.clone().slice(..).is_empty());
-  assert!(EMPTY.as_slice().as_ptr().is_aligned());
+  assert!(empty.clone().slice(..).is_empty());
+  assert!(empty.as_slice().as_ptr().is_aligned());
 }
 
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
