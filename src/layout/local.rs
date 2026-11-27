@@ -143,21 +143,26 @@ impl<T, S: InlineSize> LocalVector<T, S> {
         if prefix <= COUNT_MASK && suffix <= COUNT_MASK {
           ptr::without_provenance(1 | (prefix << 1) | (suffix << (1 + COUNT_BITS)))
         } else {
-          // SAFETY: The old descriptor pins the original Rc. Keep its own
-          // reference intact until we can replace the descriptor, including
-          // if allocating the metadata for the new reference unwinds.
-          let retained = unsafe {
-            Rc::increment_strong_count(original);
-            Rc::from_raw(original)
-          };
-          let header = Rc::into_raw(Rc::new(Owner(retained))).cast();
-          *self = Self::window(data, header, range.len());
-          return;
+          return self.keep_range_indirect(data, original, range.len());
         }
       }
       Backing::Indirect(header) => header.cast(),
     };
     self.layout = Layout::external(data, owner, range.len(), NonZeroU8::new(EXTERNAL).unwrap());
+  }
+
+  // keep_range's rare arm, for a window whose hidden ends exceed the compact
+  // counts. It stays out of line so that advance and truncate inline as a few
+  // word edits.
+  #[cold]
+  #[inline(never)]
+  fn keep_range_indirect(&mut self, data: *const T, original: *const [T], len: usize) {
+    // indirect_owner takes the metadata owner's own reference to the original
+    // Rc. This handle's direct reference stays intact until the assignment
+    // replaces the descriptor and drops the old one, also when the allocation
+    // unwinds.
+    let header = Self::indirect_owner(original);
+    *self = Self::window(data, header, len);
   }
 
   /// Shares a subrange with an independent cursor. A range whose hidden
@@ -170,16 +175,68 @@ impl<T, S: InlineSize> LocalVector<T, S> {
   #[track_caller]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
     let range = checked_range(range, self.len());
-    let mut peer = self.clone();
-    peer.keep_range(range);
-    peer
+    self.slice_within(range)
   }
 
   /// Shares a subrange with an independent cursor, or returns an error where
   /// [`Self::slice`] panics.
   pub fn try_slice(&self, range: impl RangeBounds<usize>) -> Result<Self, RangeOutOfBounds> {
     let range = try_checked_range(range, self.len())?;
-    Ok(self.slice(range))
+    Ok(self.slice_within(range))
+  }
+
+  // The core both forms of slice share, after their own range check. It takes
+  // the new handle's reference and builds the handle from its words as its
+  // last step. Cloning the source and narrowing the clone held a whole handle
+  // in memory, and a handle that crosses a call or a Result through memory is
+  // read back by halves that cannot be forwarded from its stores.
+  //
+  // The range was checked against the current window.
+  #[inline(always)]
+  fn slice_within(&self, range: Range<usize>) -> Self {
+    let len = self.len();
+    let data = self.layout.data().cast::<T>().wrapping_add(range.start);
+    let owner: *const () = match self.backing() {
+      Backing::Direct {
+        original,
+        prefix,
+        suffix,
+      } => {
+        let prefix = prefix + range.start;
+        let suffix = suffix + (len - range.end);
+        if prefix <= COUNT_MASK && suffix <= COUNT_MASK {
+          // SAFETY: The source pins the original Rc. The new handle owns the
+          // reference taken here.
+          unsafe { Rc::increment_strong_count(original) };
+          ptr::without_provenance(1 | (prefix << 1) | (suffix << (1 + COUNT_BITS)))
+        } else {
+          Self::indirect_owner(original)
+        }
+      }
+      Backing::Indirect(header) => {
+        // SAFETY: The source pins the metadata owner. The new handle owns the
+        // reference taken here.
+        unsafe { Rc::increment_strong_count(header) };
+        header.cast()
+      }
+    };
+    Self::window(data, owner, range.len())
+  }
+
+  // A shared metadata owner for a window whose hidden ends exceed the compact
+  // counts. It returns the owner word, not a handle, so the caller builds the
+  // handle in registers.
+  #[cold]
+  #[inline(never)]
+  fn indirect_owner(original: *const [T]) -> *const () {
+    // SAFETY: The source pins the original Rc. The new metadata owner holds
+    // the reference taken here, and an unwind out of the allocation below
+    // releases it with `retained`.
+    let retained = unsafe {
+      Rc::increment_strong_count(original);
+      Rc::from_raw(original)
+    };
+    Rc::into_raw(Rc::new(Owner(retained))).cast()
   }
 
   /// Skips `count` elements at the front.
