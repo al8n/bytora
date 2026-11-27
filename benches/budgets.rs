@@ -287,7 +287,7 @@ mod ownership {
     }
   }
 
-  // ── The `try_*` twins against their panicking forms ─────────────────────────────────────────
+  // The `try_*` twins against their panicking forms.
   //
   // One pair of rows per twin, on its success path: the panicking form and then the twin, with the
   // same input. An id's operation is `{form}/{method}`, `{form}` being the name of the panicking
