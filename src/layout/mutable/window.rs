@@ -298,6 +298,7 @@ impl<T> Window<T> {
     true
   }
 
+  #[track_caller]
   pub(super) fn reserve(&mut self, additional: usize) {
     // Sliding a full buffer forward one element at a time must not move the
     // whole active range at each append. Rebase only once the freed prefix
@@ -413,6 +414,7 @@ impl<T> Window<T> {
     Some((unsafe { allocation.into_vec(end) }, start))
   }
 
+  #[track_caller]
   pub(super) fn split_off(&mut self, at: usize) -> Self {
     assert!(at <= self.capacity(), "split_off past capacity");
     let boundary = self.start + at;
