@@ -141,6 +141,21 @@ assert_eq!(field.as_slice().as_ptr(), HEADER.as_slice()[8..].as_ptr());
 assert!(SliceN::<u8, 8>::try_from_static(b"id").is_none());
 ```
 
+Cloning a static or heap-backed value constructs a descriptor without copying
+the elements. For a wide handle, reusing an existing destination with
+`clone_from` can let the compiler replace just that descriptor. An ordinary
+`clone` returns the whole handle, and subsequent moves can copy its full width.
+The generated code depends on the compiler and the caller.
+
+```rust
+use smol_slice::SliceN;
+
+let source = SliceN::<u8, 4096>::try_from_static(b"shared").unwrap();
+let mut destination = SliceN::<u8, 4096>::try_from_slice(&[]).unwrap();
+destination.clone_from(&source);
+assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
+```
+
 For an explicit handle size, `try_from_static` returns `None` if its budget is
 below three words or its length exceeds `isize::MAX` elements. The default
 `from_static` constructor panics on an oversized slice of zero-sized elements.

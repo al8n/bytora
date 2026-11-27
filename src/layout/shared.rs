@@ -1,6 +1,6 @@
-use super::{ExternalPrefix, InlineSize, Layout};
+use super::{COMPACT_STATIC, EXTERNAL, ExternalPrefix, InlineSize, Layout};
 use crate::Slice;
-use core::{ops::Range, ptr, slice};
+use core::{num::NonZeroU8, ops::Range, ptr, slice};
 #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 use std::{sync::Arc, vec::Vec};
 
@@ -36,6 +36,22 @@ unsafe fn vtable(owner: *const ()) -> Option<&'static StorageVtable> {
 }
 
 impl<T, S: InlineSize> Layout<T, S> {
+  fn subwindow_tag(&self, new_tag: NonZeroU8) -> NonZeroU8 {
+    if !Self::COMPACT_EXTERNAL || new_tag.get() != EXTERNAL {
+      return new_tag;
+    }
+    // An external source with a zero high length byte keeps its kind when it
+    // shrinks. Only a transition from a larger length needs to check the owner.
+    if self.tag.get() <= EXTERNAL {
+      return self.tag;
+    }
+    if ptr::eq(self.external_prefix().owner, STATIC_VTABLE.tagged_owner()) {
+      COMPACT_STATIC
+    } else {
+      new_tag
+    }
+  }
+
   fn external_prefix_mut(&mut self) -> &mut ExternalPrefix {
     assert!(!self.is_inline(), "expected external storage");
     // SAFETY: The external tag guarantees an initialized packed prefix. We
@@ -83,7 +99,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   {
     let owner = STATIC_VTABLE.tagged_owner();
     match Layout::try_external(values.as_ptr(), owner, values.len()) {
-      Some(layout) => Some(Self { layout }),
+      Some(mut layout) => {
+        layout.mark_static();
+        Some(Self { layout })
+      }
       None => None,
     }
   }
@@ -128,15 +147,21 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn slice_shared(&self, range: Range<usize>) -> Self {
     let window = &self.shared_slice()[range];
     let owner = self.layout.external_prefix().owner;
-    let layout = Layout::try_external(window.as_ptr(), owner, window.len())
+    let mut layout = Layout::try_external(window.as_ptr(), owner, window.len())
       .expect("a subrange fits its source descriptor");
-    // Only the static table makes the data immortal. Other tagged owners can
-    // have retain/release callbacks, and an untagged owner holds a shared Vec.
+    layout.tag = self.layout.subwindow_tag(layout.tag);
     #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
-    if !ptr::eq(owner, STATIC_VTABLE.tagged_owner()) {
-      // SAFETY: The source holds this external owner live. Its validated
-      // subwindow keeps the same owner and needs its own reference.
-      unsafe { Self::retain(owner) };
+    {
+      let retain = if Layout::<T, S>::COMPACT_EXTERNAL {
+        layout.uses_external_owner()
+      } else {
+        !ptr::eq(owner, STATIC_VTABLE.tagged_owner())
+      };
+      if retain {
+        // SAFETY: The source holds this external owner live. Its validated
+        // subwindow keeps the same owner and needs its own reference.
+        unsafe { Self::retain(owner) };
+      }
     }
     Self { layout }
   }
@@ -146,15 +171,13 @@ impl<T, S: InlineSize> Slice<T, S> {
     let len = self.len();
     assert!(count <= len, "advance past end");
     let (low, high, tag) = Layout::<T, S>::split_external_len(len - count);
+    let tag = self.layout.subwindow_tag(tag);
     let prefix = self.layout.external_prefix_mut();
     prefix.data = prefix.data.cast::<T>().wrapping_add(count).cast();
     prefix.len_low = low;
     self.layout.cursor.as_mut()[0] = high;
     self.layout.tag = tag;
   }
-
-  pub(crate) const EXTERNAL_FILLS_PAYLOAD: bool =
-    Layout::<T, S>::PAYLOAD_BYTES == size_of::<ExternalPrefix>();
 
   #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
   unsafe fn retain(owner: *const ()) {
@@ -172,7 +195,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
   }
 
-  // On AArch64 the call boundary keeps the three-word transfer together
+  // On AArch64 the call boundary keeps a compact handle's transfer together
   // across the conditional retain and the caller's subsequent drop.
   #[cfg_attr(
     all(
@@ -184,13 +207,13 @@ impl<T, S: InlineSize> Slice<T, S> {
   )]
   pub(crate) fn clone_compact(&self) -> Self {
     #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
-    if !self.layout.is_inline() {
+    if self.layout.uses_external_owner() {
       // SAFETY: This live external handle owns a reference to the backing storage.
       unsafe { Self::retain(self.layout.external_prefix().owner) };
     }
     // SAFETY: Only Copy elements can be constructed inline. A static window
-    // can be duplicated freely, and each heap handle has acquired its own strong
-    // reference. Reading Self preserves the window, provenance and padding.
+    // can be duplicated freely, and every managed owner has been retained.
+    // Reading Self preserves the window, pointer provenance and uninitialized bytes.
     unsafe { ptr::read(self) }
   }
 
@@ -210,7 +233,7 @@ impl<T, S: InlineSize> Slice<T, S> {
 impl<T, S: InlineSize> Drop for Slice<T, S> {
   #[inline]
   fn drop(&mut self) {
-    if !self.layout.is_inline() {
+    if self.layout.uses_external_owner() {
       let owner = self.layout.external_prefix().owner;
       // SAFETY: Each handle holds one reference to its original owner. Advancing
       // changes only the window. Release exactly the reference held by this handle.

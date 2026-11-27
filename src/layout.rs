@@ -92,6 +92,9 @@ const fn verify_size<S: InlineSize>(bytes: usize) {
   assert!(cursor == expected_cursor);
   assert!(payload + cursor + 1 == bytes);
   assert!(payload <= cursor_limit);
+  if Layout::<u8, S>::COMPACT_EXTERNAL {
+    assert!(cursor == 1 && payload + 1 < COMPACT_STATIC.get() as usize);
+  }
   assert!(Layout::<u8, S>::INLINE_CAPACITY == payload);
   assert!(core::mem::offset_of!(Layout<u8, S>, payload) == 0);
   assert!(core::mem::offset_of!(Layout<u8, S>, cursor) == payload);
@@ -105,6 +108,12 @@ const fn verify_size<S: InlineSize>(bytes: usize) {
 }
 
 const TINY_INLINE: u8 = 0x40;
+// An external-capable handle of at most 32 bytes uses tags 1..=31 for inline
+// endpoints. 0x40 identifies the real static owner when the high length byte
+// is zero. Tags 0x80..=0xff use the general owner and length encoding, even
+// for a static slice with a larger length. Both external forms keep the same
+// typed data and owner pointers. Tiny inline-only handles have a separate tag encoding.
+const COMPACT_STATIC: NonZeroU8 = NonZeroU8::new(0x40).unwrap();
 const EXTERNAL: u8 = 0x80;
 const LEN_LOW_BYTES: usize = size_of::<usize>() - 2;
 
@@ -132,6 +141,8 @@ pub(super) struct Layout<T, S: InlineSize> {
 
 impl<T, S: InlineSize> Layout<T, S> {
   const PAYLOAD_BYTES: usize = size_of::<S::Payload>();
+  const FITS_EXTERNAL: bool = Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>();
+  pub(super) const COMPACT_EXTERNAL: bool = Self::FITS_EXTERNAL && S::USIZE <= 32;
   pub(super) const INLINE_CAPACITY: usize = if size_of::<T>() == 0 {
     Self::PAYLOAD_BYTES
   } else if align_of::<T>() > align_of::<Self>() {
@@ -165,7 +176,18 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   pub(super) fn is_inline(&self) -> bool {
-    self.tag.get() < EXTERNAL
+    let first_external = if Self::COMPACT_EXTERNAL {
+      COMPACT_STATIC.get()
+    } else {
+      EXTERNAL
+    };
+    !Self::FITS_EXTERNAL || self.tag.get() < first_external
+  }
+
+  // Inline and compact static descriptors can be copied without an owner.
+  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+  fn uses_external_owner(&self) -> bool {
+    Self::FITS_EXTERNAL && self.tag.get() >= EXTERNAL
   }
 
   pub(super) fn clone_inline(&self) -> Self {
@@ -206,13 +228,17 @@ impl<T, S: InlineSize> Layout<T, S> {
     let mut bytes = [0; size_of::<usize>()];
     bytes[..LEN_LOW_BYTES].copy_from_slice(&prefix.len_low);
     bytes[LEN_LOW_BYTES] = self.cursor.as_ref()[0];
-    bytes[LEN_LOW_BYTES + 1] = self.tag.get() & !EXTERNAL;
+    bytes[LEN_LOW_BYTES + 1] = if Self::COMPACT_EXTERNAL && self.tag == COMPACT_STATIC {
+      0
+    } else {
+      self.tag.get() & !EXTERNAL
+    };
     usize::from_le_bytes(bytes)
   }
 
   fn inline_range(&self) -> Range<usize> {
     let tag = self.tag.get();
-    assert!(tag < EXTERNAL, "expected inline storage");
+    assert!(self.is_inline(), "expected inline storage");
     // Tiny tags contain both 3-bit cursors. Larger tags encode the high part
     // of end plus one, leaving zero for Option and the top bit for external.
     match self.cursor.as_ref() {
@@ -287,6 +313,13 @@ impl<T, S: InlineSize> Layout<T, S> {
 
 // A bare Layout describes a window. Its enclosing Slice manages the external owner.
 impl<T, S: InlineSize> Layout<T, S> {
+  // Only call this for an external descriptor with the immortal static owner.
+  const fn mark_static(&mut self) {
+    if Self::COMPACT_EXTERNAL && self.tag.get() == EXTERNAL {
+      self.tag = COMPACT_STATIC;
+    }
+  }
+
   const fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
     let bytes = len.to_le_bytes();
     let mut low = [0; LEN_LOW_BYTES];
@@ -300,7 +333,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 
   const fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
-    if Self::PAYLOAD_BYTES < size_of::<ExternalPrefix>() || len > isize::MAX as usize {
+    if !Self::FITS_EXTERNAL || len > isize::MAX as usize {
       return None;
     }
     let (len_low, high, tag) = Self::split_external_len(len);
@@ -314,7 +347,7 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   const fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
     assert!(tag.get() >= EXTERNAL, "expected external storage");
-    assert!(Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>());
+    assert!(Self::FITS_EXTERNAL);
     let mut cursor = S::ZERO_CURSOR;
     // SAFETY: A size that fits the prefix has a cursor of one or three bytes.
     // Repr guarantees a byte array. The raw write also works in const initializers.
