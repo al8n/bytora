@@ -3,30 +3,52 @@ use crate::SliceN;
 use core::mem::ManuallyDrop;
 use std::vec;
 
+// The inline array moves with this !Sync owner. Its projection is valid
+// only after the owner has reached its final allocation.
+struct ArrayOwner {
+  data: [u8; 12],
+  projected: core::cell::Cell<bool>,
+  drops: Arc<core::sync::atomic::AtomicUsize>,
+}
+
+impl ArrayOwner {
+  fn new(drops: &Arc<core::sync::atomic::AtomicUsize>) -> Self {
+    Self {
+      data: *b"custom owner",
+      projected: core::cell::Cell::new(false),
+      drops: Arc::clone(drops),
+    }
+  }
+}
+
+impl AsRef<[u8]> for ArrayOwner {
+  fn as_ref(&self) -> &[u8] {
+    assert!(!self.projected.replace(true), "projected owner twice");
+    &self.data
+  }
+}
+
+impl Drop for ArrayOwner {
+  fn drop(&mut self) {
+    self
+      .drops
+      .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+  }
+}
+
 #[test]
-fn tagged_owner_dispatches_its_storage_operations_for_each_handle() {
+fn opaque_owner_lives_until_the_final_window_and_clones_only_on_materialization() {
   use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-  static RETAINS: AtomicUsize = AtomicUsize::new(0);
-  static RELEASES: AtomicUsize = AtomicUsize::new(0);
-  static OPS: StorageVtable = StorageVtable {
-    retain: Some(|owner| {
-      assert_eq!(owner, OPS.tagged_owner());
-      RETAINS.fetch_add(1, Relaxed);
-    }),
-    release: Some(|owner| {
-      assert_eq!(owner, OPS.tagged_owner());
-      RELEASES.fetch_add(1, Relaxed);
-    }),
-  };
   fn check<const BYTES: usize>()
   where
     [u8; BYTES]: crate::AssocInlineSize,
   {
-    let data = b"static owner";
-    let original: SliceN<u8, BYTES> = Slice {
-      layout: Layout::try_external(data.as_ptr(), OPS.tagged_owner(), data.len()).unwrap(),
-    };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let original = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&drops))
+      .ok()
+      .unwrap();
+    let base = original.as_slice().as_ptr();
     let mut peer = original.clone();
     peer.advance(7);
     drop(original);
@@ -36,23 +58,36 @@ fn tagged_owner_dispatches_its_storage_operations_for_each_handle() {
     drop(peer);
     assert_eq!(last.as_slice(), b"owner");
     assert_eq!(range.as_slice(), b"ow");
-    assert_eq!(empty.as_slice().as_ptr(), data[9..].as_ptr());
+    assert_eq!(empty.as_slice().as_ptr(), base.wrapping_add(9));
+    assert_eq!(range.into_mut().as_slice(), b"ow");
+    drop(empty);
+    assert_eq!(drops.load(Relaxed), 0);
+    assert!(!last.is_unique());
+    let last = last.try_into_mut().err().unwrap();
+    let last = last.try_into_vec().err().unwrap();
+    assert_eq!(last.as_slice().as_ptr(), base.wrapping_add(7));
+    let copied = last.into_vec();
+    assert_eq!(copied, b"owner");
+    assert_eq!(drops.load(Relaxed), 1);
   }
   check::<{ 3 * size_of::<usize>() }>();
   check::<32>();
   check::<4104>();
-  {
-    static UNITS: [(); isize::MAX as usize] = [(); isize::MAX as usize];
-    let mut huge = Slice::<()> {
-      layout: Layout::try_external(UNITS.as_ptr(), OPS.tagged_owner(), UNITS.len()).unwrap(),
-    };
-    // Shrinking across the high length byte must retain the custom owner.
-    let short = huge.slice(UNITS.len() - 1..);
-    huge.advance(UNITS.len());
-    let _peer = short.clone();
-  }
-  assert_eq!(RETAINS.load(Relaxed), 14);
-  assert_eq!(RELEASES.load(Relaxed), 18);
+
+  let mut huge = Slice::<()>::from_owner(vec![(); isize::MAX as usize]);
+  let short = huge.slice(huge.len() - 1..);
+  huge.advance(huge.len());
+  assert!(!huge.is_unique());
+  assert_eq!(short.clone().as_slice(), &[()]);
+  assert!(short.try_into_mut().is_err());
+
+  let drops = Arc::new(AtomicUsize::new(0));
+  let returned = SliceN::<u8, 8>::try_from_owner(ArrayOwner::new(&drops))
+    .err()
+    .unwrap();
+  assert!(!returned.projected.get());
+  drop(returned);
+  assert_eq!(drops.load(Relaxed), 1);
 }
 
 #[test]
@@ -199,70 +234,34 @@ fn clone_from_preserves_windows_across_storage_kinds() {
 }
 
 #[test]
-fn clone_from_retains_new_owner_and_releases_old_owner() {
+fn clone_from_releases_the_old_owner_and_keeps_the_new_owner_live() {
   use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
-  static OLD_LIVE: AtomicUsize = AtomicUsize::new(0);
-  static NEW_LIVE: AtomicUsize = AtomicUsize::new(0);
-  static STEP: AtomicUsize = AtomicUsize::new(0);
-  static RETAIN_STEP: AtomicUsize = AtomicUsize::new(0);
-  static RELEASE_STEP: AtomicUsize = AtomicUsize::new(0);
-  static OLD_OPS: StorageVtable = StorageVtable {
-    retain: Some(|owner| {
-      assert_eq!(owner, OLD_OPS.tagged_owner());
-      OLD_LIVE.fetch_add(1, Relaxed);
-    }),
-    release: Some(|owner| {
-      assert_eq!(owner, OLD_OPS.tagged_owner());
-      RELEASE_STEP.store(STEP.fetch_add(1, Relaxed), Relaxed);
-      assert!(OLD_LIVE.fetch_sub(1, Relaxed) > 0);
-    }),
-  };
-  static NEW_OPS: StorageVtable = StorageVtable {
-    retain: Some(|owner| {
-      assert_eq!(owner, NEW_OPS.tagged_owner());
-      RETAIN_STEP.store(STEP.fetch_add(1, Relaxed), Relaxed);
-      NEW_LIVE.fetch_add(1, Relaxed);
-    }),
-    release: Some(|owner| {
-      assert_eq!(owner, NEW_OPS.tagged_owner());
-      assert!(NEW_LIVE.fetch_sub(1, Relaxed) > 0);
-    }),
-  };
-  static DATA: &[u8] = b"abcdefgh";
-
   fn check<const BYTES: usize>()
   where
     [u8; BYTES]: crate::AssocInlineSize,
   {
-    OLD_LIVE.store(1, Relaxed);
-    NEW_LIVE.store(1, Relaxed);
-    STEP.store(0, Relaxed);
-    let mut destination: SliceN<u8, BYTES> = Slice {
-      layout: Layout::try_external(DATA.as_ptr(), OLD_OPS.tagged_owner(), DATA.len()).unwrap(),
-    };
-    let mut source: SliceN<u8, BYTES> = Slice {
-      layout: Layout::try_external(DATA.as_ptr(), NEW_OPS.tagged_owner(), DATA.len()).unwrap(),
-    };
+    let old = Arc::new(AtomicUsize::new(0));
+    let new = Arc::new(AtomicUsize::new(0));
+    let mut destination = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&old))
+      .ok()
+      .unwrap();
+    let mut source = SliceN::<u8, BYTES>::try_from_owner(ArrayOwner::new(&new))
+      .ok()
+      .unwrap();
     source.advance(2);
     destination.clone_from(&source);
-    assert_eq!(OLD_LIVE.load(Relaxed), 0);
-    assert_eq!(NEW_LIVE.load(Relaxed), 2);
-    assert_eq!(RETAIN_STEP.load(Relaxed), 0);
-    assert_eq!(RELEASE_STEP.load(Relaxed), 1);
-    assert_eq!(destination.as_slice().as_ptr(), DATA[2..].as_ptr());
-
+    assert_eq!(old.load(Relaxed), 1);
+    assert_eq!(new.load(Relaxed), 0);
+    assert_eq!(destination.as_slice().as_ptr(), source.as_slice().as_ptr());
     let mut peer = source.clone();
     peer.advance(1);
     destination.clone_from(&peer);
-    assert_eq!(NEW_LIVE.load(Relaxed), 3);
     drop(source);
     drop(peer);
-    assert_eq!(NEW_LIVE.load(Relaxed), 1);
-    assert_eq!(destination.as_slice(), &DATA[3..]);
-    assert_eq!(destination.as_slice().as_ptr(), DATA[3..].as_ptr());
+    assert_eq!(new.load(Relaxed), 0);
+    assert_eq!(destination.as_slice(), b"tom owner");
     drop(destination);
-    assert_eq!(NEW_LIVE.load(Relaxed), 0);
+    assert_eq!(new.load(Relaxed), 1);
   }
 
   check::<24>();
@@ -296,6 +295,272 @@ fn shared_storage_supports_overaligned_elements_and_zero_sized_windows() {
   assert_eq!(short.as_slice(), &[(), ()]);
   let too_long = Slice::<()>::try_from_vec(vec![(); max + 1]).err().unwrap();
   assert_eq!(too_long.len(), max + 1);
+}
+
+#[test]
+fn zero_sized_frozen_windows_recover_logical_slots_and_rejoin() {
+  let mut head = crate::SliceMutN::<_, 0>::from(vec![(); 6]);
+  let tail = head.split_off(4);
+  let mut frozen = head.freeze();
+  frozen.advance(2);
+  let mut head = frozen.try_into_mut().ok().unwrap();
+  assert_eq!((head.len(), head.capacity()), (2, 2));
+  head.try_unsplit(tail).ok().unwrap();
+  assert_eq!(head.len(), 4);
+
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  static DROPS: AtomicUsize = AtomicUsize::new(0);
+  #[repr(align(64))]
+  struct Count;
+  impl Drop for Count {
+    fn drop(&mut self) {
+      DROPS.fetch_add(1, Relaxed);
+    }
+  }
+  let values: Vec<Count> = (0..6).map(|_| Count).collect();
+  let base = values.as_ptr();
+  let mut head = crate::SliceMutN::<_, 0>::from(values);
+  let tail = head.split_off(4);
+  let whole = head.freeze();
+  let mut nested = whole.slice(1..).slice(..3);
+  nested.advance(1);
+  assert_eq!(nested.clone().as_slice().as_ptr(), base);
+  drop(whole);
+  let mut head = nested.try_into_mut().ok().unwrap();
+  assert_eq!((head.len(), head.capacity()), (2, 2));
+  head.try_unsplit(tail).ok().unwrap();
+  assert_eq!(DROPS.load(Relaxed), 0);
+  let visible = head.into_vec();
+  assert_eq!(visible.len(), 4);
+  assert_eq!(DROPS.load(Relaxed), 2);
+  drop(visible);
+  assert_eq!(DROPS.load(Relaxed), 6);
+}
+
+#[test]
+fn zero_sized_vector_recovers_large_offsets_and_read_only_owners_keep_their_pointer() {
+  let max = isize::MAX as usize;
+  let original = SliceN::<(), 0>::try_from_shared_vec(vec![(); max]).unwrap();
+  let base = original.as_slice().as_ptr();
+  let mut last = original.slice(max - 4..).slice(1..);
+  last.advance(1);
+  assert_eq!(last.as_slice().as_ptr(), base);
+  drop(original);
+  let last = last.try_into_mut().ok().unwrap();
+  assert_eq!((last.len(), last.capacity()), (2, usize::MAX - (max - 2)));
+
+  #[repr(align(64))]
+  struct Aligned;
+  #[repr(C)]
+  struct Holder {
+    slots: [Aligned; 5],
+    byte: u8,
+  }
+  impl AsRef<[Aligned]> for Holder {
+    fn as_ref(&self) -> &[Aligned] {
+      &self.slots
+    }
+  }
+  static STATIC: Holder = Holder {
+    slots: [const { Aligned }; 5],
+    byte: 7,
+  };
+  let borrowed = Slice::from_static(&STATIC.slots);
+  assert_eq!(borrowed.as_slice().as_ptr(), STATIC.slots.as_ptr());
+  let opaque = Slice::from_owner(Holder {
+    slots: [const { Aligned }; 5],
+    byte: 3,
+  });
+  for original in [borrowed, opaque] {
+    let base = original.as_slice().as_ptr();
+    assert!(base.is_aligned());
+    let mut tail = original.slice(1..4);
+    tail.advance(2);
+    assert_eq!(tail.as_slice().as_ptr(), base);
+    assert_eq!(tail.len(), 1);
+    assert!(tail.try_into_mut().is_err());
+  }
+}
+
+#[test]
+fn unique_vector_extraction_preserves_allocation_and_drops_only_hidden_elements() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  struct Count<'a>(&'a AtomicUsize);
+  impl Drop for Count<'_> {
+    fn drop(&mut self) {
+      self.0.fetch_add(1, Relaxed);
+    }
+  }
+  let drops = [const { AtomicUsize::new(0) }; 5];
+  let mut values = Vec::with_capacity(12);
+  values.extend(drops.iter().map(Count));
+  let (base, capacity) = (values.as_ptr(), values.capacity());
+  let original = SliceN::<_, 0>::try_from(values).ok().unwrap();
+  let middle = original.slice(1..4);
+  assert!(!middle.is_unique());
+  let middle = middle.try_into_mut().err().unwrap();
+  let middle = middle.try_into_vec().err().unwrap();
+  drop(original);
+  assert!(middle.is_unique());
+  let values = middle.try_into_vec().ok().unwrap();
+  assert_eq!(
+    (values.as_ptr(), values.len(), values.capacity()),
+    (base, 3, capacity)
+  );
+  assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1, 0, 0, 0, 1]);
+  drop(values);
+  assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1; 5]);
+}
+
+#[test]
+fn static_and_shared_copy_fallbacks_and_unique_mutable_window() {
+  let borrowed = Slice::<u8>::from_static(b"static");
+  assert!(!borrowed.is_unique());
+  assert!(borrowed.clone().try_into_mut().is_err());
+  assert!(borrowed.clone().try_into_vec().is_err());
+  assert_eq!(borrowed.slice(1..4).into_mut().as_slice(), b"tat");
+  assert_eq!(borrowed.slice(2..5).into_vec(), b"ati");
+
+  let input: Vec<u8> = (0..64).collect();
+  let base = input.as_ptr();
+  let mut original = SliceN::<_, 0>::try_from(input).unwrap();
+  original.advance(4);
+  let mut window = original.slice(2..6);
+  assert_eq!(window.clone().into_vec(), [6, 7, 8, 9]);
+  let mut copy = original.clone().into_mut();
+  copy.as_mut_slice()[2] = 70;
+  assert_eq!(window.as_slice()[0], 6);
+  drop(original);
+  window.advance(1);
+  let mut unique = window.try_into_mut().ok().unwrap();
+  assert_eq!(unique.as_slice().as_ptr(), base.wrapping_add(7));
+  unique.as_mut_slice()[0] = 17;
+  assert_eq!(unique.into_vec(), [17, 8, 9]);
+}
+
+#[test]
+fn a_frozen_window_thaws_without_copying_while_its_mutable_sibling_is_live() {
+  struct Item<'a>(&'a str);
+  let local = std::string::String::from("scoped");
+  let mut input = Vec::with_capacity(8);
+  input.extend([Item("prefix"), Item(&local), Item("right")]);
+  let base = input.as_ptr();
+  let mut left = crate::SliceMutN::<_, 0>::from(input);
+  let mut right = left.split_off(2);
+  let frozen = left.freeze();
+  let mut tail = frozen.slice(1..);
+  assert!(!tail.is_unique());
+  tail = tail.try_into_mut().err().unwrap();
+  drop(frozen);
+  let mut thawed = tail.try_into_mut().ok().unwrap();
+  assert_eq!(thawed.as_slice().as_ptr(), base.wrapping_add(1));
+  assert_eq!(thawed.as_slice()[0].0, "scoped");
+  right.as_mut_slice()[0] = Item("separate");
+  thawed.as_mut_slice()[0] = Item("mine");
+  let moved = thawed.freeze().try_into_vec().ok().unwrap();
+  assert_eq!(moved.len(), 1);
+  assert_eq!(moved[0].0, "mine");
+  assert_eq!(right.as_slice()[0].0, "separate");
+}
+
+#[test]
+fn frozen_windows_can_shorten_element_lifetimes_before_recovering_ownership() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  struct Count<'a>(&'a AtomicUsize);
+  impl Drop for Count<'_> {
+    fn drop(&mut self) {
+      self.0.fetch_add(1, Relaxed);
+    }
+  }
+  static ORIGINAL_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+  fn freeze_static() -> SliceN<Count<'static>, 0> {
+    crate::SliceMutN::<_, 0>::from(vec![Count(&ORIGINAL_DROPS)]).freeze()
+  }
+  fn shorten<'a>(frozen: SliceN<Count<'static>, 0>, _: &'a AtomicUsize) -> SliceN<Count<'a>, 0> {
+    frozen
+  }
+
+  let frozen_for_mut = freeze_static();
+  let frozen_for_vec = freeze_static();
+  let local_drops = AtomicUsize::new(0);
+  let mut window = shorten(frozen_for_mut, &local_drops)
+    .try_into_mut()
+    .ok()
+    .unwrap();
+  window.as_mut_slice()[0] = Count(&local_drops);
+  let mut vec = shorten(frozen_for_vec, &local_drops)
+    .try_into_vec()
+    .ok()
+    .unwrap();
+  vec[0] = Count(&local_drops);
+  assert_eq!(ORIGINAL_DROPS.load(Relaxed), 2);
+  assert_eq!(local_drops.load(Relaxed), 0);
+  drop(window);
+  drop(vec);
+  assert_eq!(local_drops.load(Relaxed), 2);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn opaque_owner_cleans_up_a_panicking_projection_and_cross_thread_final_drop() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  struct Panics(ArrayOwner);
+  impl AsRef<[u8]> for Panics {
+    fn as_ref(&self) -> &[u8] {
+      let _ = self.0.as_ref();
+      panic!("intentional projection panic");
+    }
+  }
+  let drops = Arc::new(AtomicUsize::new(0));
+  let owner = Panics(ArrayOwner::new(&drops));
+  assert!(
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Slice::from_owner(owner))).is_err()
+  );
+  assert_eq!(drops.load(Relaxed), 1);
+  let slice = Slice::from_owner(ArrayOwner::new(&drops));
+  let tail = slice.slice(7..);
+  drop(slice);
+  std::thread::spawn(move || {
+    assert_eq!(tail.clone().as_slice(), b"owner");
+    assert!(tail.try_into_mut().is_err());
+  })
+  .join()
+  .unwrap();
+  assert_eq!(drops.load(Relaxed), 2);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn panic_during_extraction_releases_each_element_once() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+  struct Count<'a> {
+    drops: &'a AtomicUsize,
+    panic: bool,
+  }
+  impl Drop for Count<'_> {
+    fn drop(&mut self) {
+      self.drops.fetch_add(1, Relaxed);
+      assert!(!self.panic, "intentional element destructor panic");
+    }
+  }
+  for panic_at in [0, 3] {
+    let drops = [const { AtomicUsize::new(0) }; 4];
+    let values = drops
+      .iter()
+      .enumerate()
+      .map(|(i, drops)| Count {
+        drops,
+        panic: i == panic_at,
+      })
+      .collect::<Vec<_>>();
+    let original = SliceN::<_, 0>::try_from(values).ok().unwrap();
+    let middle = original.slice(1..3);
+    drop(original);
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| middle.try_into_vec()));
+    assert!(failure.is_err());
+    assert_eq!(drops.each_ref().map(|n| n.load(Relaxed)), [1; 4]);
+  }
 }
 
 #[cfg(feature = "std")]

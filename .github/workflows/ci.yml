@@ -202,6 +202,12 @@ jobs:
         run: cargo build --target ${{ matrix.target }} --no-default-features
       - name: cargo build --target ${{ matrix.target }} --no-default-features --features alloc
         run: cargo build --target ${{ matrix.target }} --no-default-features --features alloc
+      # Model privileged, single-core Cortex-M0 firmware for this compile check only.
+      - name: Check extra-platforms on single-core Cortex-M0
+        if: matrix.target == 'thumbv6m-none-eabi'
+        env:
+          RUSTFLAGS: --cfg portable_atomic_unsafe_assume_single_core
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features extra-platforms
 
   # Every other job runs `rustup update stable`, so without this one the declared MSRV is never
   # exercised and drifts upward unnoticed. The toolchain is READ from Cargo.toml: to move the
