@@ -831,31 +831,9 @@ impl<T, S: InlineSize> Vector<T, S> {
       && vector::AVAILABLE
       && size_of::<T>() != 0
     {
-      let (owner, kind) = if self.layout.uses_external_owner() {
-        let owner = self
-          .layout
-          .owner_slot()
-          .load(core::sync::atomic::Ordering::Acquire);
-        if owner.addr() & 0b11 != 0 {
-          // SAFETY: The acquire observes this window's raw or tagged owner,
-          // and the range is an ordered subrange of the visible length.
-          let owner = unsafe { self.retain_tagged_owner(owner, range.start, len - range.end, len) };
-          let kind = if Layout::<T, S>::PACKED_LEN {
-            // A long static window may now be short enough for its own tag.
-            Layout::<T, S>::external_kind(owner)
-          } else {
-            NonZeroU8::new(EXTERNAL).unwrap()
-          };
-          (owner, kind)
-        } else {
-          // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
-          unsafe { vector::VecHeader::<T>::retain(owner) };
-          (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
-        }
-      } else {
-        // A short static window has this tag in either descriptor size.
-        (STATIC_OWNER, COMPACT_STATIC)
-      };
+      // SAFETY: The source is a three- or four-word external descriptor for
+      // non-ZSTs, and the range is an ordered subrange of the visible length.
+      let (owner, kind) = unsafe { self.retain_window(range.start, len - range.end, len) };
       return Self {
         layout: Layout::external(data, owner, range.end - range.start, kind),
       };
@@ -876,6 +854,81 @@ impl<T, S: InlineSize> Vector<T, S> {
     };
     let layout = Layout::external(data, owner, range.end - range.start, kind);
     Self { layout }
+  }
+
+  /// Retains this window's owner for a subwindow that omits `front` elements
+  /// before it and `back` after it, and returns the new handle's owner word
+  /// and kind. Nothing here returns a handle, so each caller builds the
+  /// handle as words, last.
+  ///
+  /// # Safety
+  ///
+  /// The source must be a three- or four-word external descriptor for
+  /// non-ZSTs, `len` its visible length, and `front + back <= len`.
+  /// `vector::AVAILABLE` must hold: the owner slot's atomic load needs the
+  /// alignment it guarantees.
+  #[cfg(bytora_atomic)]
+  #[inline(always)]
+  unsafe fn retain_window(&self, front: usize, back: usize, len: usize) -> (*const (), NonZeroU8) {
+    if !self.layout.uses_external_owner() {
+      // A short static window has this tag in either descriptor size.
+      return (STATIC_OWNER, COMPACT_STATIC);
+    }
+    let owner = self
+      .layout
+      .owner_slot()
+      .load(core::sync::atomic::Ordering::Acquire);
+    if owner.addr() & 0b11 != 0 {
+      // SAFETY: The acquire observes this window's raw or tagged owner, and
+      // the caller's omissions fit within the visible length.
+      let owner = unsafe { self.retain_tagged_owner(owner, front, back, len) };
+      let kind = if Layout::<T, S>::PACKED_LEN {
+        // A long static window may now be short enough for its own tag.
+        Layout::<T, S>::external_kind(owner)
+      } else {
+        NonZeroU8::new(EXTERNAL).unwrap()
+      };
+      return (owner, kind);
+    }
+    // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
+    unsafe { vector::VecHeader::<T>::retain(owner) };
+    (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
+  }
+
+  /// Whether split_off builds its external arm as words: four-word handles
+  /// of 64-bit targets, for non-ZSTs, with atomics, the one class measured.
+  /// Every other class keeps `slice` and `truncate` behind one call.
+  #[cfg(bytora_atomic)]
+  pub(crate) const WORD_SPLIT: bool = S::HANDLE_BYTES == 4 * size_of::<usize>()
+    && size_of::<usize>() == 8
+    && vector::AVAILABLE
+    && size_of::<T>() != 0;
+
+  /// `slice(at..)` then `truncate(at)` on an external source, with the
+  /// suffix built from words last, for split_off's arm that stays in the
+  /// public method. The retain comes before the narrowing, as in `slice`
+  /// then `truncate`, so a promotion it publishes is seen by the narrowing.
+  /// Between the two the suffix's reference is held as a word; an
+  /// allocation in `truncate_shared` aborts on failure, and if it could
+  /// unwind the reference would leak, which is safe.
+  ///
+  /// # Safety
+  ///
+  /// [`Self::WORD_SPLIT`] must hold, the source must be external, `len` its
+  /// visible length, and `0 < at < len`.
+  #[cfg(bytora_atomic)]
+  #[inline(always)]
+  pub(crate) unsafe fn split_off_words(&mut self, at: usize, len: usize) -> Self {
+    debug_assert!(Self::WORD_SPLIT && !self.layout.is_inline() && len == self.len());
+    debug_assert!(0 < at && at < len);
+    let data = self.subwindow_data(at);
+    // SAFETY: The caller's, with nothing omitted at the back. WORD_SPLIT
+    // makes the source a four-word descriptor whose owner slot is atomic.
+    let (owner, kind) = unsafe { self.retain_window(at, 0, len) };
+    self.truncate_shared(at);
+    Self {
+      layout: Layout::external(data, owner, len - at, kind),
+    }
   }
 
   /// Retains a raw or tagged owner for a subwindow and returns the owner word
