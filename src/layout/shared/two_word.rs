@@ -125,7 +125,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   // exact path then loaded its pointer and length with one pair load whose
   // halves came from two different stores. It returns the header pointer
   // alone: returning the handle sent the exact path's handle through the
-  // call's return slot, a store and a reload, where both paths now build it
+  // call's return slot, a store and a reload, where both paths build it
   // in registers.
   #[inline(never)]
   fn two_word_spare(values: Vec<T>) -> *mut () {
