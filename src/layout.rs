@@ -62,17 +62,72 @@ pub trait AssocInlineSize {
   type Size: InlineSize;
 }
 
+// Sealed traits that mark the budgets on which a conversion cannot fail.
+// `class!` implements them for each budget by the class of its handle, and the
+// conversions in `traits` take them as bounds.
+pub(super) mod class {
+  /// A budget whose `VectorMut::freeze` cannot fail, so that its byte buffer
+  /// converts into a `Vector` with `From`.
+  pub trait InfallibleFreeze {}
+
+  /// A budget whose `VectorMut` can grow into a heap window, so that a byte
+  /// buffer converts from any slice with `From`.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  pub trait Growable {}
+}
+
+// Implements the class traits for a budget by the machine words of its handle,
+// which the assertion checks. A one-word payload cannot hold a heap window's
+// pointer, so the buffer never grows and `freeze` keeps it inline. Two words
+// hold a heap window, which freezes only as a unique vector prefix and only
+// with shared ownership. Three or more words freeze any heap window into an
+// external descriptor where shared ownership is available. With `alloc` or
+// `std` but without shared ownership, `freeze` refuses every heap window.
+macro_rules! class {
+  (one, $size:ty) => {
+    const _: () = assert!(<$size as InlineSize>::HANDLE_BYTES == size_of::<usize>());
+    impl class::InfallibleFreeze for $size {}
+  };
+  (two, $size:ty) => {
+    const _: () = assert!(<$size as InlineSize>::HANDLE_BYTES == 2 * size_of::<usize>());
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    impl class::Growable for $size {}
+  };
+  (wide, $size:ty) => {
+    const _: () = assert!(<$size as InlineSize>::HANDLE_BYTES >= 3 * size_of::<usize>());
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    impl class::Growable for $size {}
+    #[cfg(any(bytora_atomic, not(any(feature = "std", feature = "alloc"))))]
+    impl class::InfallibleFreeze for $size {}
+  };
+}
+
 // Stable Rust cannot subtract metadata from a generic array length. Select the
 // concrete arrays generated for the target and verify every supported size.
+// Eight bytes are one word on 64-bit targets and two on 32-bit targets, and
+// sixteen bytes are two words and four.
 macro_rules! size {
   (4, $size:ty, $cursor:literal) => {
     size!(4, $size, $cursor, Layout<T, $size>);
+    class!(one, $size);
   };
   (8, $size:ty, $cursor:literal) => {
     size!(8, $size, $cursor, mutable::EightBytes<T, $size>);
+    #[cfg(target_pointer_width = "64")]
+    class!(one, $size);
+    #[cfg(target_pointer_width = "32")]
+    class!(two, $size);
+  };
+  (16, $size:ty, $cursor:literal) => {
+    size!(16, $size, $cursor, mutable::Spill<T, $size>);
+    #[cfg(target_pointer_width = "64")]
+    class!(two, $size);
+    #[cfg(target_pointer_width = "32")]
+    class!(wide, $size);
   };
   ($bytes:literal, $size:ty, $cursor:literal) => {
     size!($bytes, $size, $cursor, mutable::Spill<T, $size>);
+    class!(wide, $size);
   };
   ($bytes:literal, $size:ty, $cursor:literal, $mutable:ty) => {
     // SAFETY: Both fields are byte arrays. verify_size checks their lengths
@@ -92,6 +147,7 @@ macro_rules! size {
   };
 }
 size!(0, typenum::U0, 1, mutable::Spill<T, typenum::U0>);
+class!(wide, typenum::U0);
 include!(concat!(env!("OUT_DIR"), "/sizes.rs"));
 
 #[allow(

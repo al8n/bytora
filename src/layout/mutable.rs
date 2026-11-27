@@ -380,6 +380,29 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     Layout::try_inline(values).map(Self::wrap)
   }
 
+  /// Copies `values` into a new buffer: inline when they fit, and otherwise
+  /// into a heap window where the buffer can grow. It allocates as
+  /// [`Self::try_with_capacity`] does and copies as
+  /// [`Self::try_extend_from_slice`] does. [`Self::try_from_slice`] copies
+  /// inline only.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`TryReserveError::Bounded`] when `values` exceed the inline
+  /// capacity of a buffer that cannot grow: with a one-word budget, or without
+  /// `alloc` and `std`. Its `requested` is their length and its `available`
+  /// the inline capacity. Returns [`TryReserveError::AllocError`] when the
+  /// allocator refuses the memory.
+  pub fn try_copy_from_slice(values: &[T]) -> Result<Self, TryReserveError>
+  where
+    T: Copy,
+    S: WritableSize<T>,
+  {
+    let mut buffer = Self::try_with_capacity(values.len())?;
+    buffer.try_extend_from_slice(values)?;
+    Ok(buffer)
+  }
+
   /// Borrows the remaining elements.
   pub fn as_slice(&self) -> &[T] {
     #[cfg(any(feature = "std", feature = "alloc"))]

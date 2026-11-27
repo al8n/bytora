@@ -192,6 +192,41 @@ fn try_copy_from_slice_errs_exactly_where_copy_from_slice_panics() {
   );
 }
 
+#[test]
+fn mutable_try_copy_from_slice_errs_where_the_buffer_cannot_grow() {
+  // Within the inline capacity, every budget copies.
+  type Tiny = VectorMutN<u8, { size_of::<usize>() }>;
+  assert_eq!(Tiny::try_copy_from_slice(b"ab").unwrap(), *b"ab");
+  assert_eq!(
+    VectorMutN::<u16, 24>::try_copy_from_slice(&[1, 2, 3]).unwrap(),
+    [1, 2, 3]
+  );
+
+  // Past it, a one-word buffer cannot grow, and the others grow with an allocator.
+  let long = [7u8; 64];
+  assert_eq!(
+    Tiny::try_copy_from_slice(&long).err(),
+    Some(TryReserveError::Bounded(TryPutError {
+      requested: 64,
+      available: Tiny::INLINE_CAPACITY,
+    }))
+  );
+  let copied = VectorMut::<u8>::try_copy_from_slice(&long);
+  if cfg!(any(feature = "std", feature = "alloc")) {
+    let mut extended = VectorMut::<u8>::new();
+    extended.extend_from_slice(&long);
+    assert_eq!(copied, Ok(extended));
+  } else {
+    assert_eq!(
+      copied.err(),
+      Some(TryReserveError::Bounded(TryPutError {
+        requested: 64,
+        available: VectorMut::<u8>::INLINE_CAPACITY,
+      }))
+    );
+  }
+}
+
 #[cfg(all(bytora_atomic, target_pointer_width = "32"))]
 #[test]
 fn two_word_copies_report_the_two_word_vector_limit() {

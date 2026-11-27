@@ -5,7 +5,6 @@ use bytora::{
   VectorN,
 };
 use core::cmp::Ordering::{self, Equal, Greater, Less};
-use std::panic::catch_unwind;
 
 // Checks `==` and `partial_cmp` in both directions between a handle and another value.
 macro_rules! assert_compares {
@@ -55,7 +54,7 @@ fn the_aliases_name_the_byte_handles() {
 #[test]
 fn byte_handles_compare_with_text() {
   let handle = Bytes::from_static(b"bcd");
-  let buffer = BytesMut::from("bcd");
+  let buffer = BytesMut::try_from_slice(b"bcd").unwrap();
   for (text, order) in [
     ("bcd", Equal),
     ("bce", Less),
@@ -87,7 +86,7 @@ fn hex_formatting_matches_bytes() {
   const DATA: &[u8] = b"\x00\x0f\xa0\xff ok";
   let oracle = bytes::Bytes::from_static(DATA);
   let handle = Bytes::from_static(DATA);
-  let buffer = BytesMut::from(DATA);
+  let buffer = BytesMut::try_from_slice(DATA).unwrap();
   assert_eq!(format!("{handle:x}"), "000fa0ff206f6b");
   for (ours, theirs) in [
     (format!("{handle:x}"), format!("{oracle:x}")),
@@ -111,25 +110,71 @@ fn static_bytes_and_text_convert_without_copying() {
   assert_eq!(raw, text);
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
 #[test]
-fn buffers_copy_bytes_and_text_and_freeze_into_handles() {
+fn buffers_copy_bytes_and_text() {
   let buffer = BytesMut::from(&b"abc"[..]);
   assert_eq!(buffer, *b"abc");
   let text = BytesMut::from("abc");
   assert_eq!(text, buffer);
-  let frozen = Bytes::from(buffer);
-  assert_eq!(frozen, *b"abc");
 
-  // A buffer that cannot grow panics on bytes past its inline capacity.
-  type Tiny = BytesMutN<{ size_of::<usize>() }>;
+  // Past the inline capacity, the buffers that have the conversion grow.
   let long = [7u8; 64];
-  assert!(catch_unwind(|| Tiny::from(&long[..])).is_err());
-  let copied = catch_unwind(|| BytesMut::from(&long[..]));
-  if cfg!(any(feature = "std", feature = "alloc")) {
-    assert_eq!(copied.unwrap(), long);
-  } else {
-    assert!(copied.is_err());
-  }
+  assert_eq!(BytesMut::from(&long[..]), long);
+  assert_eq!(
+    BytesMutN::<{ 2 * size_of::<usize>() }>::from(&long[..]),
+    long
+  );
+}
+
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+#[test]
+fn without_an_allocator_buffers_try_to_copy_bytes_and_text() {
+  use bytora::TryPutError;
+
+  let buffer = BytesMut::try_from(&b"abc"[..]).unwrap();
+  assert_eq!(buffer, *b"abc");
+  assert_eq!(BytesMut::try_from("abc"), Ok(buffer));
+  let full = [1u8; BytesMut::INLINE_CAPACITY];
+  assert_eq!(BytesMut::try_from(&full[..]).unwrap(), full);
+
+  // Past the inline capacity, every budget returns the error.
+  let long = [7u8; 64];
+  assert_eq!(
+    BytesMut::try_from(&long[..]),
+    Err(TryPutError {
+      requested: 64,
+      available: BytesMut::INLINE_CAPACITY,
+    })
+  );
+  type Tiny = BytesMutN<{ size_of::<usize>() }>;
+  assert_eq!(
+    Tiny::try_from(&long[..]),
+    Err(TryPutError {
+      requested: 64,
+      available: Tiny::INLINE_CAPACITY,
+    })
+  );
+  assert_eq!(Tiny::try_from("ab").unwrap(), *b"ab");
+}
+
+#[test]
+fn one_word_buffers_freeze_into_handles() {
+  // A one-word buffer never leaves its inline storage.
+  const ONE_WORD: usize = size_of::<usize>();
+  let buffer = BytesMutN::<ONE_WORD>::try_from_slice(b"ab").unwrap();
+  assert_eq!(BytesN::<ONE_WORD>::from(buffer), *b"ab");
+}
+
+// With `alloc` or `std` but without shared ownership, a buffer of three or more
+// words can hold a heap window that `freeze` refuses, and has no conversion.
+#[cfg(any(bytora_atomic, not(any(feature = "std", feature = "alloc"))))]
+#[test]
+fn buffers_freeze_into_handles() {
+  let frozen = Bytes::from(BytesMut::try_from_slice(b"abc").unwrap());
+  assert_eq!(frozen, *b"abc");
+  let wide = BytesN::<24>::from(BytesMutN::<24>::try_from_slice(b"abc").unwrap());
+  assert_eq!(wide, *b"abc");
 }
 
 #[cfg(bytora_atomic)]
