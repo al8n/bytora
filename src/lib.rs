@@ -129,7 +129,44 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// cannot be represented as a half-open range. [`Self::try_slice`] returns an
   /// error instead.
   #[track_caller]
+  #[allow(
+    clippy::needless_return,
+    reason = "each target's tail is a cfg-selected return"
+  )]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
+    let len = self.len();
+    let range = checked_range(range, len);
+    if !self.layout.is_inline() {
+      // SAFETY: The tag selects external storage and checked_range validated
+      // both endpoints against this immutable window's length.
+      return unsafe { self.slice_shared(range, len) };
+    }
+    // On x86-64 the inline arm is one out-of-line call that returns the
+    // handle, so that the external arm's words are not joined, in registers,
+    // with a 16-byte copy of the inline payload: they would be stored as one
+    // 16-byte value behind the owner's locked increment, which the EPYC 7763
+    // does not forward (bytora #4). Other targets inline it.
+    #[cfg(target_arch = "x86_64")]
+    return self.slice_inline_arm(range);
+    #[cfg(not(target_arch = "x86_64"))]
+    return Self {
+      layout: self.layout.slice_inline(range),
+    };
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[inline(never)]
+  fn slice_inline_arm(&self, range: Range<usize>) -> Self {
+    Self {
+      layout: self.layout.slice_inline(range),
+    }
+  }
+
+  // The other targets' `slice` body, for split_to_within on x86-64, so that
+  // the core keeps the code it was measured with there.
+  #[cfg(target_arch = "x86_64")]
+  #[track_caller]
+  pub(crate) fn slice_whole(&self, range: impl RangeBounds<usize>) -> Self {
     let len = self.len();
     let range = checked_range(range, len);
     if !self.layout.is_inline() {
