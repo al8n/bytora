@@ -1,7 +1,39 @@
 use super::{ExternalPrefix, InlineSize, Layout};
 use crate::Slice;
 use core::{ptr, slice};
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 use std::{sync::Arc, vec::Vec};
+
+// An untagged owner is an Arc<Vec<T>> data pointer, aligned to at least two
+// bytes. A tagged owner points one byte into a storage operations table.
+#[repr(C, align(2))]
+struct StorageVtable {
+  // A present callback receives this table's tagged owner pointer.
+  retain: Option<unsafe fn(*const ())>,
+  release: Option<unsafe fn(*const ())>,
+}
+
+impl StorageVtable {
+  const fn tagged_owner(&'static self) -> *const () {
+    ptr::from_ref(self).wrapping_byte_add(1).cast()
+  }
+}
+
+static STATIC_VTABLE: StorageVtable = StorageVtable {
+  retain: None,
+  release: None,
+};
+
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+unsafe fn vtable(owner: *const ()) -> Option<&'static StorageVtable> {
+  if owner.addr() & 1 == 0 {
+    None
+  } else {
+    // SAFETY: The caller supplies the owner of a live Slice. Tagged owners
+    // are created by StorageVtable::tagged_owner from a static table.
+    Some(unsafe { &*owner.wrapping_byte_sub(1).cast::<StorageVtable>() })
+  }
+}
 
 impl<T, S: InlineSize> Layout<T, S> {
   fn external_prefix_mut(&mut self) -> &mut ExternalPrefix {
@@ -12,7 +44,50 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 }
 
+impl<T> Slice<T> {
+  /// Borrows a static slice in the default three-word handle. Construction and
+  /// cloning leave the elements in place and require no allocation or reference counts.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the slice has more than `isize::MAX` elements. Only a slice of
+  /// zero-sized elements can exceed this limit.
+  #[track_caller]
+  pub const fn from_static(values: &'static [T]) -> Self
+  where
+    T: Sync,
+  {
+    Self::try_from_static(values).expect("static slice length exceeds isize::MAX")
+  }
+}
+
 impl<T, S: InlineSize> Slice<T, S> {
+  /// Borrows a static slice without copying, including when its elements would
+  /// fit inline. Returns `None` if the handle is smaller than three machine
+  /// words or the slice has more than `isize::MAX` elements.
+  ///
+  /// This constructor works with just `core`. The elements can be shared
+  /// across threads and need only implement `Sync`.
+  ///
+  /// ```compile_fail
+  /// use core::cell::Cell;
+  /// use smol_slice::Slice;
+  ///
+  /// fn handle(cells: &'static [Cell<u8>]) -> Slice<Cell<u8>> {
+  ///     Slice::from_static(cells)
+  /// }
+  /// ```
+  pub const fn try_from_static(values: &'static [T]) -> Option<Self>
+  where
+    T: Sync,
+  {
+    let owner = STATIC_VTABLE.tagged_owner();
+    match Layout::try_external(values.as_ptr(), owner, values.len()) {
+      Some(layout) => Some(Self { layout }),
+      None => None,
+    }
+  }
+
   /// Takes a vector, copying it inline when it fits. Otherwise the handle keeps
   /// the vector's buffer and allocates one reference-counted owner. Cloning a
   /// shared handle increments its reference count and preserves its window.
@@ -22,10 +97,12 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// The shared constructor requires `Send + Sync` because clones can share
   /// their elements across threads. It is available with `alloc` or `std` on
   /// targets with pointer-width atomics.
+  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
   pub fn try_from_vec(values: Vec<T>) -> Result<Self, Vec<T>>
   where
     T: Copy + Send + Sync,
   {
+    const { assert!(align_of::<Vec<T>>() >= 2) };
     if let Some(inline) = Self::try_from_slice(&values) {
       return Ok(inline);
     }
@@ -41,9 +118,9 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   pub(crate) fn shared_slice(&self) -> &[T] {
     let data = self.layout.external_prefix().data.cast::<T>();
-    // SAFETY: Each shared Slice holds a strong Arc<Vec<T>> for the entire borrow.
-    // The buffer is immutable. data and len describe a checked window of that
-    // vector, including a non-null, aligned pointer for empty or ZST windows.
+    // SAFETY: The storage is borrowed for 'static or kept alive by our strong
+    // reference. data and len describe a checked window of the original slice,
+    // including a non-null, aligned pointer for empty or ZST windows.
     unsafe { slice::from_raw_parts(data, self.len()) }
   }
 
@@ -59,27 +136,84 @@ impl<T, S: InlineSize> Slice<T, S> {
     self.layout.tag = tag;
   }
 
+  pub(crate) const EXTERNAL_FILLS_PAYLOAD: bool =
+    Layout::<T, S>::PAYLOAD_BYTES == size_of::<ExternalPrefix>();
+
+  #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+  unsafe fn retain(owner: *const ()) {
+    // SAFETY: The caller supplies the owner of a live Slice. A vtable operates
+    // on its tagged owner. An untagged owner came directly from Arc::into_raw.
+    unsafe {
+      match vtable(owner) {
+        Some(ops) => {
+          if let Some(retain) = ops.retain {
+            retain(owner);
+          }
+        }
+        None => Arc::<Vec<T>>::increment_strong_count(owner.cast()),
+      }
+    }
+  }
+
+  // On AArch64 the call boundary keeps the three-word transfer together
+  // across the conditional retain and the caller's subsequent drop.
+  #[cfg_attr(
+    all(
+      target_arch = "aarch64",
+      any(feature = "std", feature = "alloc"),
+      target_has_atomic = "ptr"
+    ),
+    inline(never)
+  )]
+  pub(crate) fn clone_compact(&self) -> Self {
+    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+    if !self.layout.is_inline() {
+      // SAFETY: This live external handle owns a reference to the backing storage.
+      unsafe { Self::retain(self.layout.external_prefix().owner) };
+    }
+    // SAFETY: Only Copy elements can be constructed inline. A static window
+    // can be duplicated freely, and each heap handle has acquired its own strong
+    // reference. Reading Self preserves the window, provenance and padding.
+    unsafe { ptr::read(self) }
+  }
+
   pub(crate) fn clone_shared(&self) -> Self {
     let prefix = *self.layout.external_prefix();
     let layout = Layout::external(prefix, self.layout.cursor.as_ref()[0], self.layout.tag);
-    // SAFETY: try_from_vec stored the pointer returned by Arc::into_raw. The
-    // source Slice holds a strong reference. Give the new handle its own.
-    unsafe { Arc::<Vec<T>>::increment_strong_count(prefix.owner.cast()) };
+    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+    // SAFETY: The source handle keeps this window and its owner live.
+    unsafe {
+      Self::retain(prefix.owner)
+    };
     Self { layout }
   }
 }
 
+#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 impl<T, S: InlineSize> Drop for Slice<T, S> {
   #[inline]
   fn drop(&mut self) {
     if !self.layout.is_inline() {
-      let owner = self.layout.external_prefix().owner.cast();
-      // SAFETY: Each shared handle owns exactly one strong reference to this
-      // Arc<Vec<T>>. Advancing changes only the data window and retains the owner.
-      unsafe { Arc::<Vec<T>>::decrement_strong_count(owner) };
+      let owner = self.layout.external_prefix().owner;
+      // SAFETY: Each handle holds one reference to its original owner. Advancing
+      // changes only the window. Release exactly the reference held by this handle.
+      unsafe {
+        match vtable(owner) {
+          Some(ops) => {
+            if let Some(release) = ops.release {
+              release(owner);
+            }
+          }
+          None => Arc::<Vec<T>>::decrement_strong_count(owner.cast()),
+        }
+      }
     }
   }
 }
 
-#[cfg(test)]
+#[cfg(all(
+  test,
+  any(feature = "std", feature = "alloc"),
+  target_has_atomic = "ptr"
+))]
 mod tests;

@@ -8,7 +8,6 @@ use core::{
 };
 use typenum::Unsigned;
 
-#[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
 mod shared;
 
 /// The byte arrays used by the inline cursor and raw element storage.
@@ -21,7 +20,8 @@ mod shared;
 #[doc(hidden)]
 unsafe trait Repr {
   type Payload;
-  type Cursor: Default + AsRef<[u8]> + AsMut<[u8]>;
+  type Cursor: Copy + AsRef<[u8]> + AsMut<[u8]>;
+  const ZERO_CURSOR: Self::Cursor;
 }
 
 /// A type-level byte size for a [`Slice`](crate::Slice) or [`SliceMut`](crate::SliceMut).
@@ -55,6 +55,7 @@ macro_rules! size {
     unsafe impl Repr for $size {
       type Payload = [u8; $bytes - $cursor - 1];
       type Cursor = [u8; $cursor];
+      const ZERO_CURSOR: Self::Cursor = [0; $cursor];
     }
     impl AssocInlineSize for [u8; $bytes] {
       type Size = $size;
@@ -147,7 +148,7 @@ impl<T, S: InlineSize> Layout<T, S> {
     if len > Self::INLINE_CAPACITY {
       return None;
     }
-    let mut cursor = S::Cursor::default();
+    let mut cursor = S::ZERO_CURSOR;
     let tag = match cursor.as_mut() {
       [] => TINY_INLINE | len as u8,
       [_] => len as u8 + 1,
@@ -177,14 +178,11 @@ impl<T, S: InlineSize> Layout<T, S> {
     self.tag.get() < EXTERNAL
   }
 
-  pub(super) fn clone_inline(&self) -> Self
-  where
-    T: Copy,
-  {
+  pub(super) fn clone_inline(&self) -> Self {
     assert!(self.is_inline(), "expected inline storage");
     // SAFETY: self is a valid, aligned layout. The inline tag excludes an external
-    // owner. Its cursor and tag are copyable, and T: Copy permits duplicating the
-    // elements. Reading the MaybeUninit payload as part of Self preserves both
+    // owner. Only try_inline constructs inline layouts, and it requires T: Copy.
+    // Reading the MaybeUninit payload as part of Self preserves both
     // pointer provenance and uninitialized bytes, including element padding.
     unsafe { ptr::read(self) }
   }
@@ -262,21 +260,21 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 }
 
-// A bare Layout describes a window. Its enclosing Slice owns the strong reference.
-#[cfg(any(
-  test,
-  all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr")
-))]
+// A bare Layout describes a window. Its enclosing Slice manages the external owner.
 impl<T, S: InlineSize> Layout<T, S> {
-  fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
+  const fn split_external_len(len: usize) -> ([u8; LEN_LOW_BYTES], u8, NonZeroU8) {
     let bytes = len.to_le_bytes();
     let mut low = [0; LEN_LOW_BYTES];
-    low.copy_from_slice(&bytes[..LEN_LOW_BYTES]);
+    let mut i = 0;
+    while i < LEN_LOW_BYTES {
+      low[i] = bytes[i];
+      i += 1;
+    }
     let tag = NonZeroU8::new(EXTERNAL | bytes[LEN_LOW_BYTES + 1]).unwrap();
     (low, bytes[LEN_LOW_BYTES], tag)
   }
 
-  fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
+  const fn try_external(data: *const T, owner: *const (), len: usize) -> Option<Self> {
     if Self::PAYLOAD_BYTES < size_of::<ExternalPrefix>() || len > isize::MAX as usize {
       return None;
     }
@@ -289,11 +287,13 @@ impl<T, S: InlineSize> Layout<T, S> {
     Some(Self::external(prefix, high, tag))
   }
 
-  fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
+  const fn external(prefix: ExternalPrefix, high: u8, tag: NonZeroU8) -> Self {
     assert!(tag.get() >= EXTERNAL, "expected external storage");
     assert!(Self::PAYLOAD_BYTES >= size_of::<ExternalPrefix>());
-    let mut cursor = S::Cursor::default();
-    cursor.as_mut()[0] = high;
+    let mut cursor = S::ZERO_CURSOR;
+    // SAFETY: A size that fits the prefix has a cursor of one or three bytes.
+    // Repr guarantees a byte array. The raw write also works in const initializers.
+    unsafe { ptr::from_mut(&mut cursor).cast::<u8>().write(high) };
     let mut payload = MaybeUninit::<S::Payload>::uninit();
     // SAFETY: The packed prefix has alignment one and fits the checked payload.
     unsafe { payload.as_mut_ptr().cast::<ExternalPrefix>().write(prefix) };

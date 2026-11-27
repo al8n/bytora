@@ -1,9 +1,103 @@
-use super::{AssocInlineSize, MAX_HANDLE_BYTES, SliceMutN, SliceN};
+use super::{AssocInlineSize, MAX_HANDLE_BYTES, Slice, SliceMutN, SliceN};
 use core::{hint::black_box, ptr};
 
 #[test]
 fn mutable_inline_handles_need_no_drop_glue() {
   assert!(!core::mem::needs_drop::<SliceMutN<u8, 24>>());
+}
+
+#[test]
+fn static_windows_keep_the_original_pointer_for_every_handle_width() {
+  static DATA: [u8; 513] = [17; 513];
+  static DEFAULT: Slice<u8> = Slice::from_static(&DATA);
+  const TINY: Option<SliceN<u8, 8>> = SliceN::<u8, 8>::try_from_static(b"x");
+  assert!(TINY.is_none());
+
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: AssocInlineSize,
+  {
+    for data in [&DATA[..0], &DATA[1..2], &DATA[1..]] {
+      let mut first = SliceN::<u8, BYTES>::try_from_static(data).unwrap();
+      assert_eq!(first.as_slice().as_ptr(), data.as_ptr());
+      first.advance(data.len() / 2);
+      let mut other = black_box(Some(first.clone())).unwrap();
+      let tail = &data[data.len() / 2..];
+      assert_eq!(first.as_slice(), tail);
+      assert_eq!(other.as_slice().as_ptr(), tail.as_ptr());
+      other.advance(other.len());
+      assert!(other.is_empty());
+      assert_eq!(
+        other.clone().as_slice().as_ptr(),
+        data[data.len()..].as_ptr()
+      );
+      assert_eq!(first.len(), tail.len());
+    }
+  }
+  check::<{ 3 * size_of::<usize>() }>();
+  check::<4104>();
+  assert_eq!(DEFAULT.clone().as_slice().as_ptr(), DATA.as_ptr());
+}
+
+#[test]
+fn static_storage_supports_noncopy_and_overaligned_elements() {
+  #[repr(align(64))]
+  struct Aligned(u8);
+  impl Drop for Aligned {
+    fn drop(&mut self) {
+      panic!("static elements must stay in place");
+    }
+  }
+  static DATA: [Aligned; 2] = [Aligned(3), Aligned(5)];
+  static HANDLE: Slice<Aligned> = Slice::from_static(&DATA);
+  let mut peer = HANDLE.clone();
+  peer.advance(1);
+  let last = peer.clone();
+  assert_eq!(last.as_slice()[0].0, 5);
+  assert!(ptr::eq(&last.as_slice()[0], &DATA[1]));
+  assert_eq!(HANDLE.len(), 2);
+}
+
+#[test]
+fn static_zero_sized_windows_cover_the_external_length_limit() {
+  #[repr(align(64))]
+  #[derive(Clone, Copy)]
+  struct Aligned;
+  const MAX: usize = isize::MAX as usize;
+  static VALUES: [Aligned; MAX + 1] = [Aligned; MAX + 1];
+  assert!(Slice::<Aligned>::try_from_static(&VALUES).is_none());
+  let mut values = Slice::from_static(&VALUES[..MAX]);
+  assert_eq!(values.len(), MAX);
+  values.advance(MAX - 1);
+  let last = values.clone();
+  values.advance(1);
+  assert_eq!(last.as_slice().len(), 1);
+  assert!(values.as_slice().is_empty());
+  assert_eq!(last.as_slice().as_ptr(), VALUES.as_ptr());
+}
+
+#[test]
+#[should_panic(expected = "static slice length exceeds isize::MAX")]
+fn default_static_rejects_oversized_zero_sized_slices() {
+  let _ = Slice::from_static(&[(); usize::MAX]);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn static_noncopy_elements_can_be_shared_across_threads() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+  static VALUES: [AtomicUsize; 1] = [AtomicUsize::new(0)];
+  let handle = Slice::from_static(&VALUES);
+  let worker = handle.clone();
+  std::thread::spawn(move || worker.as_slice()[0].store(7, Relaxed))
+    .join()
+    .unwrap();
+  assert_eq!(handle.as_slice()[0].load(Relaxed), 7);
+
+  // MutexGuard is Sync but cannot be sent to its non-owning thread for release.
+  let borrowed = Slice::<std::sync::MutexGuard<'static, ()>>::from_static(&[]);
+  assert!(borrowed.clone().is_empty());
 }
 
 #[test]

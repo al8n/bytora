@@ -23,12 +23,12 @@ use typenum::U12 as DefaultSize;
 #[cfg(target_pointer_width = "64")]
 use typenum::U24 as DefaultSize;
 
-/// An owned slice with inline storage for `Copy` elements and optional shared storage.
+/// A slice with inline storage for `Copy` elements, static borrows, and optional heap storage.
 ///
 /// `S` is the exact size in bytes of the handle and its `Option`. It defaults
 /// to three machine words, the size of a `Vec<T>`. Use [`SliceN`] for a numeric byte count.
-/// An inline clone copies the whole handle. A heap-backed clone shares its
-/// allocation. Each clone has an independent cursor.
+/// An inline clone copies the whole handle. Static and heap-backed clones
+/// share their elements. Each clone has an independent cursor.
 #[repr(transparent)]
 pub struct Slice<T, S: InlineSize = DefaultSize> {
   layout: Layout<T, S>,
@@ -53,7 +53,6 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   /// Borrows the remaining elements.
   pub fn as_slice(&self) -> &[T] {
-    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
     if !self.layout.is_inline() {
       return self.shared_slice();
     }
@@ -77,7 +76,6 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Panics if `count` exceeds [`Self::len`].
   #[track_caller]
   pub fn advance(&mut self, count: usize) {
-    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
     if !self.layout.is_inline() {
       return self.advance_shared(count);
     }
@@ -85,10 +83,14 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 }
 
-impl<T: Copy, S: InlineSize> Clone for Slice<T, S> {
+// Only the inline constructor copies elements, and it requires T: Copy.
+// Cloning an external window duplicates its descriptor regardless of T.
+impl<T, S: InlineSize> Clone for Slice<T, S> {
   #[inline]
   fn clone(&self) -> Self {
-    #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+    if Self::EXTERNAL_FILLS_PAYLOAD {
+      return self.clone_compact();
+    }
     if !self.layout.is_inline() {
       return self.clone_shared();
     }

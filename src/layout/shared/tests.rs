@@ -4,6 +4,43 @@ use core::mem::ManuallyDrop;
 use std::vec;
 
 #[test]
+fn tagged_owner_dispatches_its_storage_operations_for_each_handle() {
+  use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+  static RETAINS: AtomicUsize = AtomicUsize::new(0);
+  static RELEASES: AtomicUsize = AtomicUsize::new(0);
+  static OPS: StorageVtable = StorageVtable {
+    retain: Some(|owner| {
+      assert_eq!(owner, OPS.tagged_owner());
+      RETAINS.fetch_add(1, Relaxed);
+    }),
+    release: Some(|owner| {
+      assert_eq!(owner, OPS.tagged_owner());
+      RELEASES.fetch_add(1, Relaxed);
+    }),
+  };
+  fn check<const BYTES: usize>()
+  where
+    [u8; BYTES]: crate::AssocInlineSize,
+  {
+    let data = b"static owner";
+    let original: SliceN<u8, BYTES> = Slice {
+      layout: Layout::try_external(data.as_ptr(), OPS.tagged_owner(), data.len()).unwrap(),
+    };
+    let mut peer = original.clone();
+    peer.advance(7);
+    drop(original);
+    let last = peer.clone();
+    drop(peer);
+    assert_eq!(last.as_slice(), b"owner");
+  }
+  check::<{ 3 * size_of::<usize>() }>();
+  check::<4104>();
+  assert_eq!(RETAINS.load(Relaxed), 4);
+  assert_eq!(RELEASES.load(Relaxed), 6);
+}
+
+#[test]
 fn vector_construction_uses_inline_capacity_and_returns_unusable_input() {
   let short = vec![3u8; SliceN::<u8, 8>::INLINE_CAPACITY];
   let inline = SliceN::<u8, 8>::try_from_vec(short).unwrap();
