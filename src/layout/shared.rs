@@ -1022,9 +1022,12 @@ impl<T, S: InlineSize> Vector<T, S> {
 
   /// Clones a handle that holds an external owner reference.
   ///
-  /// Out of line on AArch64, where its outline-atomic call would otherwise
-  /// make clone_descriptor save registers ahead of the tag test on every
-  /// clone. Inlined everywhere else, as the arm was before.
+  /// Out of line on AArch64, so that clone_descriptor's plain path is a leaf
+  /// that saves no register before its tag test. Inlined, this arm gave that
+  /// path a frame on Linux, for its outline-atomic call, and on Windows, for
+  /// the refcount overflow call. macOS's atomics are inline and its plain
+  /// path was a leaf either way; the attribute keeps one shape on every
+  /// AArch64 target. Inlined everywhere else, as the arm was before.
   ///
   /// # Safety
   ///
@@ -1033,6 +1036,10 @@ impl<T, S: InlineSize> Vector<T, S> {
   #[cfg_attr(target_arch = "aarch64", inline(never))]
   #[cfg_attr(not(target_arch = "aarch64"), inline(always))]
   unsafe fn clone_owned(&self) -> Self {
+    // SAFETY: This restates the caller's obligation. Out of line, the
+    // function cannot see the caller's tag test, so without it every owned
+    // clone tested the tag again before reaching the owner.
+    unsafe { core::hint::assert_unchecked(self.layout.uses_external_owner()) };
     let owner = if vector::AVAILABLE {
       self
         .layout

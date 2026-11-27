@@ -101,7 +101,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   pub(super) fn two_word_vec<const INLINE_EMPTY: bool>(mut values: Vec<T>) -> Self {
     let len = values.len();
     if values.capacity() != len {
-      return Self::two_words(vector::place_header(values).1.cast_mut(), window(0, len));
+      return Self::two_words(Self::two_word_spare(values), window(0, len));
     }
     let base = values.as_mut_ptr().cast::<()>();
     let adjustment = usize::from(base.addr() & 1 == 0);
@@ -118,6 +118,18 @@ impl<T, S: InlineSize> Layout<T, S> {
     let layout = Self::two_words(state, meta);
     core::mem::forget(values);
     layout
+  }
+
+  // A vector with spare capacity places its header out of line. Inlined into
+  // two_word_vec, the placement kept a second stack copy of the Vec, and the
+  // exact path then loaded its pointer and length with one pair load whose
+  // halves came from two different stores. It returns the header pointer
+  // alone: returning the handle sent the exact path's handle through the
+  // call's return slot, a store and a reload, where both paths now build it
+  // in registers.
+  #[inline(never)]
+  fn two_word_spare(values: Vec<T>) -> *mut () {
+    vector::place_header(values).1.cast_mut()
   }
 
   fn two_word_header(state: *mut (), meta: usize, strong: usize) -> VecHeader<T> {
@@ -413,6 +425,19 @@ mod tests {
                 // A box lies outside every byte of the vector's allocation.
                 assert!(offset >= capacity * size_of::<T>());
               }
+            }
+            // A clone and a range share the window, and the source is the
+            // vector's only owner again once both are gone.
+            {
+              let peer = source.clone();
+              let range = source.slice(..);
+              assert!(!source.is_unique() && !peer.is_unique());
+              assert_eq!((peer.as_slice().as_ptr(), peer.len()), (base, len));
+              assert_eq!((range.as_slice().as_ptr(), range.len()), (base, len));
+              drop(peer);
+              drop(range);
+              assert!(source.is_unique());
+              assert_eq!((source.as_slice().as_ptr(), source.len()), (base, len));
             }
             if !recover {
               continue;
