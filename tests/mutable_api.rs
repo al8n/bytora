@@ -1,4 +1,4 @@
-use bytora::VectorMutN;
+use bytora::{VectorMut, VectorMutN, WritableSize, typenum};
 
 #[test]
 fn bounded_growth_split_and_reclaim_cover_inline_capacity() {
@@ -439,4 +439,46 @@ fn independently_coerced_siblings_drop_new_values_through_each_windows_current_t
       (2, TypeId::of::<StaticBorrow>()),
     ]
   );
+}
+
+// The constructors write their handles as words. In each cursor encoding, no
+// cursor byte in a one-word handle, one up to 128 bytes and three beyond, they
+// decode as the byte-built buffers with the same elements do.
+#[test]
+fn word_built_constructors_match_byte_built_buffers() {
+  fn check<S: WritableSize<u8>>() {
+    let inline = VectorMut::<u8, S>::INLINE_CAPACITY;
+    for len in 0..=inline + 1 {
+      let Ok(zeroed) = VectorMut::<u8, S>::try_zeroed(len) else {
+        // Past the inline capacity a buffer needs a heap window, which takes
+        // an allocator and a handle of at least two words.
+        assert_eq!(len, inline + 1);
+        if cfg!(any(feature = "std", feature = "alloc")) {
+          assert_eq!(size_of::<VectorMut<u8, S>>(), size_of::<usize>());
+        }
+        continue;
+      };
+      let mut built = VectorMut::<u8, S>::new();
+      built.extend_from_slice(&vec![0; len]);
+      for handle in [zeroed, VectorMut::<u8, S>::zeroed(len)] {
+        assert_eq!(handle.as_slice(), built.as_slice());
+        assert_eq!(handle.capacity(), built.capacity());
+      }
+      let reserved = [
+        VectorMut::<u8, S>::with_capacity(len),
+        VectorMut::<u8, S>::try_with_capacity(len).unwrap(),
+      ];
+      for handle in reserved {
+        assert!(handle.is_empty());
+        assert!(handle.capacity() >= len);
+      }
+    }
+  }
+  check::<typenum::U0>();
+  check::<typenum::U8>();
+  check::<typenum::U16>();
+  check::<typenum::U24>();
+  check::<typenum::U32>();
+  check::<typenum::U40>();
+  check::<typenum::U136>();
 }

@@ -252,6 +252,51 @@ impl<T, S: InlineSize> Layout<T, S> {
     }
   }
 
+  // empty_inline's handle, written as one last word. empty_inline writes the
+  // cursor and the tag as bytes, and a returned handle whose other paths are
+  // built as words then leaves in pieces. Every other word stays
+  // uninitialized.
+  #[inline(always)]
+  pub(super) fn empty_words() -> Self {
+    // SAFETY: The empty range has no elements.
+    unsafe { Self::inline_words(Self::inline_cursor(0..0), false) }
+  }
+
+  // An inline handle with `cursor` and `tag` in its last word. verify_size
+  // checks that the cursor is shorter than a word and directly precedes the
+  // tag, the handle's last byte, so that word holds both. Its other bytes are
+  // payload, written as zero. With `zeroed`, every other word is zero too;
+  // otherwise it stays uninitialized.
+  //
+  // SAFETY: The cursor and tag must come from inline_cursor for a range within
+  // the inline capacity. That range must be empty, or `zeroed` must be set
+  // and a zero byte pattern must be a valid T for each element in it.
+  #[inline(always)]
+  unsafe fn inline_words((cursor, tag): (S::Cursor, NonZeroU8), zeroed: bool) -> Self {
+    let last = S::HANDLE_BYTES / size_of::<usize>() - 1;
+    let mut bytes = [0; size_of::<usize>()];
+    let tag_byte = size_of::<usize>() - 1;
+    let cursor = cursor.as_ref();
+    bytes[tag_byte - cursor.len()..tag_byte].copy_from_slice(cursor);
+    bytes[tag_byte] = tag.get();
+    let mut layout = MaybeUninit::<Self>::uninit();
+    let words = layout.as_mut_ptr().cast::<usize>();
+    // SAFETY: verify_size checks that the handle is usize-aligned and a whole
+    // number of words.
+    unsafe {
+      if zeroed {
+        for index in 0..last {
+          words.add(index).write(0);
+        }
+      }
+      words.add(last).write(usize::from_ne_bytes(bytes));
+    }
+    // SAFETY: The last word initialized the cursor and a nonzero tag. Any
+    // other byte is payload, which may stay uninitialized outside the
+    // caller's range, and the caller's range is empty or zeroed.
+    unsafe { layout.assume_init() }
+  }
+
   pub(super) fn try_inline(values: &[T]) -> Option<Self>
   where
     T: Copy,
@@ -489,6 +534,17 @@ unsafe fn copy_tiny(src: *const u8, dst: *mut u8, bytes: usize) {
     } else if bytes == 1 {
       ptr::copy_nonoverlapping(src, dst, 1);
     }
+  }
+}
+
+impl<S: InlineSize> Layout<u8, S> {
+  // An inline handle of `len` zero bytes, written as words. `len` must be
+  // within the inline capacity.
+  #[inline(always)]
+  fn zeroed_words(len: usize) -> Self {
+    assert!(len <= Self::INLINE_CAPACITY);
+    // SAFETY: Zero is a valid byte.
+    unsafe { Self::inline_words(Self::inline_cursor(0..len), true) }
   }
 }
 

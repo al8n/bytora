@@ -329,9 +329,24 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   where
     S: WritableSize<T>,
   {
-    let mut result = Self::new();
-    result.reserve(capacity);
-    result
+    // The arms of reserve on a new buffer. Each one ends in the handle's
+    // words, and no arm returns a handle from a call, which would make the
+    // result a temporary in memory for every arm.
+    if capacity <= Self::INLINE_CAPACITY {
+      return Self::wrap(Layout::empty_words());
+    }
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if Layout::<T, S>::FITS_WINDOW {
+      // The twin's allocator, so that both forms cost the same. Where it
+      // refuses, the fallback allocates as reserve does and panics or aborts
+      // as it does.
+      let window = match try_window_with_capacity(capacity) {
+        Some(window) => window,
+        None => window_with_capacity(capacity),
+      };
+      return Self::from_window_ptr(window);
+    }
+    capacity_refused()
   }
 
   /// Creates an empty buffer with space for at least `capacity` elements, or
@@ -340,9 +355,21 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   where
     S: WritableSize<T>,
   {
-    let mut result = Self::new();
-    result.try_reserve(capacity)?;
-    Ok(result)
+    // The arms of with_capacity, each returning the result itself.
+    if capacity <= Self::INLINE_CAPACITY {
+      return Ok(Self::wrap(Layout::empty_words()));
+    }
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if Layout::<T, S>::FITS_WINDOW {
+      return match try_window_with_capacity(capacity) {
+        Some(window) => Ok(Self::from_window_ptr(window)),
+        None => Err(window::exact_error::<T>(capacity)),
+      };
+    }
+    Err(TryReserveError::Bounded(TryPutError {
+      requested: capacity,
+      available: Self::INLINE_CAPACITY,
+    }))
   }
 
   /// Copies `values` inline, returning `None` when they exceed the inline capacity.
@@ -552,7 +579,7 @@ impl<T, S: InlineSize> VectorMut<T, S> {
       unsafe { self.adopt_inline_into(values, len) };
       return;
     }
-    panic!("requested capacity exceeds bounded inline storage");
+    capacity_refused()
   }
 
   /// Ensures space for `additional` elements after the current length, or
@@ -1172,33 +1199,38 @@ impl<S: InlineSize> VectorMut<u8, S> {
   /// instead, allocation failure included.
   #[track_caller]
   pub fn zeroed(len: usize) -> Self {
-    let mut result = Self::blank();
-    result.reserve(len);
-    // SAFETY: The buffer is empty, and reserve provided len u8 slots.
-    unsafe { result.fill_zeros(len) };
-    result
+    // The arms of with_capacity, with the zeros written in each.
+    if len <= Self::INLINE_CAPACITY {
+      return Self::wrap(Layout::<u8, S>::zeroed_words(len));
+    }
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if Layout::<u8, S>::FITS_WINDOW {
+      let window = match try_zeroed_window(len) {
+        Some(window) => window,
+        None => zeroed_window(len),
+      };
+      return Self::from_window_ptr(window);
+    }
+    capacity_refused()
   }
 
   /// Creates a buffer of `len` initialized zero bytes, or returns an error
   /// where [`Self::zeroed`] panics or the allocation fails.
   pub fn try_zeroed(len: usize) -> Result<Self, TryReserveError> {
-    let mut result = Self::blank();
-    result.try_reserve(len)?;
-    // SAFETY: The buffer is empty, and try_reserve provided len u8 slots.
-    unsafe { result.fill_zeros(len) };
-    Ok(result)
-  }
-
-  // Writes `len` zero bytes and makes them the buffer's elements.
-  //
-  // SAFETY: The buffer must be empty, with at least `len` spare slots.
-  #[inline(always)]
-  unsafe fn fill_zeros(&mut self, len: usize) {
-    // SAFETY: The caller provides len spare u8 slots, and all-zero is a valid byte.
-    unsafe {
-      self.spare_capacity_mut().as_mut_ptr().write_bytes(0, len);
-      self.set_len(len);
+    if len <= Self::INLINE_CAPACITY {
+      return Ok(Self::wrap(Layout::<u8, S>::zeroed_words(len)));
     }
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if Layout::<u8, S>::FITS_WINDOW {
+      return match try_zeroed_window(len) {
+        Some(window) => Ok(Self::from_window_ptr(window)),
+        None => Err(window::exact_error::<u8>(len)),
+      };
+    }
+    Err(TryReserveError::Bounded(TryPutError {
+      requested: len,
+      available: Self::INLINE_CAPACITY,
+    }))
   }
 }
 
@@ -1327,6 +1359,77 @@ impl<T> From<Vec<T>> for VectorMut<T, typenum::U0> {
 #[track_caller]
 fn split_to_past_end() -> ! {
   panic!("split_to past end")
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn capacity_refused() -> ! {
+  panic!("requested capacity exceeds bounded inline storage")
+}
+
+// An empty vector with room for exactly `capacity` elements, or None where
+// the allocation fails or its size overflows. The constructors' one allocator,
+// shared by each panicking form and its twin. It asks the global allocator
+// directly, as Vec::with_capacity does: try_reserve_exact takes Vec's general
+// growth path, an out-of-line finish_grow that cost the twins 3 to 10
+// percent. Layout::array refuses exactly the lengths that exact_error calls
+// an overflow, and a zero-sized T needs no allocation, as in Vec.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(always)]
+fn try_vec_with_capacity<T>(capacity: usize) -> Option<Vec<T>> {
+  if size_of::<T>() == 0 || capacity == 0 {
+    return Some(Vec::new());
+  }
+  let layout = std::alloc::Layout::array::<T>(capacity).ok()?;
+  // SAFETY: The layout's size is nonzero: T has a size and capacity is positive.
+  let data = NonNull::new(unsafe { std::alloc::alloc(layout) })?;
+  // SAFETY: The global allocator returned `data` for exactly `capacity`
+  // elements of T, aligned for T. The vector takes it with none initialized.
+  Some(unsafe { Vec::from_raw_parts(data.as_ptr().cast::<T>(), 0, capacity) })
+}
+
+// The window of a new buffer with room for `capacity` elements, returned in a
+// register.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(never)]
+fn try_window_with_capacity<T>(capacity: usize) -> Option<NonNull<Window<T>>> {
+  let values = try_vec_with_capacity(capacity)?;
+  Some(boxed(|| Window::from_vec(values)))
+}
+
+// with_capacity's window after try_window_with_capacity refused: allocated as
+// reserve allocates, so a refusal panics or aborts as reserve's does, with the
+// caller's location.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn window_with_capacity<T>(capacity: usize) -> NonNull<Window<T>> {
+  let values = Vec::with_capacity(capacity);
+  boxed(|| Window::from_vec(values))
+}
+
+// The window of `len` zero bytes, returned in a register. Resizing within the
+// reserved capacity cannot reallocate.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(never)]
+fn try_zeroed_window(len: usize) -> Option<NonNull<Window<u8>>> {
+  let mut values = try_vec_with_capacity::<u8>(len)?;
+  values.resize(len, 0);
+  Some(boxed(|| Window::from_vec(values)))
+}
+
+// zeroed's window after try_zeroed_window refused, as window_with_capacity:
+// `vec!` fails as `Vec::with_capacity` does, with a capacity overflow panic
+// or the allocation-failure handler.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn zeroed_window(len: usize) -> NonNull<Window<u8>> {
+  let values: Vec<u8> = std::vec![0; len];
+  boxed(|| Window::from_vec(values))
 }
 
 // Boxes the window that `make_window` returns, and leaks the box to the handle
