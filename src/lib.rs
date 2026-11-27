@@ -19,10 +19,17 @@ pub use layout::local::{LocalVector, LocalVectorN};
 pub use layout::mutable::WritableSize;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
 pub use typenum;
+
+/// The default budget of the handles: four machine words, the size of `bytes::Bytes`.
+///
+/// It is [`typenum::U32`] on 64-bit targets and [`typenum::U16`] on 32-bit targets.
 #[cfg(target_pointer_width = "32")]
-use typenum::U16 as DefaultSize;
+pub type DefaultSize = typenum::U16;
+/// The default budget of the handles: four machine words, the size of `bytes::Bytes`.
+///
+/// It is [`typenum::U32`] on 64-bit targets and [`typenum::U16`] on 32-bit targets.
 #[cfg(target_pointer_width = "64")]
-use typenum::U32 as DefaultSize;
+pub type DefaultSize = typenum::U32;
 
 /// A vector with inline storage for `Copy` elements, static borrows, and optional heap storage.
 ///
@@ -177,6 +184,24 @@ pub type VectorMut<T, S = DefaultSize> =
 
 /// A [`VectorMut`] with byte budget `N`. Zero disables inline elements.
 pub type VectorMutN<T, const N: usize> = VectorMut<T, <[u8; N] as AssocInlineSize>::Size>;
+
+/// An immutable byte handle: a [`Vector`] of `u8` with the [`DefaultSize`] budget.
+///
+/// The alias has no budget parameter, so `Bytes::new()` needs no type annotation.
+/// [`BytesN`] names the other budgets.
+pub type Bytes = Vector<u8>;
+
+/// A [`Bytes`] with byte budget `N`. Zero disables inline elements.
+pub type BytesN<const N: usize> = VectorN<u8, N>;
+
+/// A mutable byte buffer: a [`VectorMut`] of `u8` with the [`DefaultSize`] budget.
+///
+/// The alias has no budget parameter, so `BytesMut::new()` and `BytesMut::with_capacity(n)` need
+/// no type annotation. [`BytesMutN`] names the other budgets.
+pub type BytesMut = VectorMut<u8>;
+
+/// A [`BytesMut`] with byte budget `N`. Zero disables inline elements.
+pub type BytesMutN<const N: usize> = VectorMutN<u8, N>;
 
 const _: () = {
   assert!(size_of::<Vector<u32>>() == 4 * size_of::<usize>());
