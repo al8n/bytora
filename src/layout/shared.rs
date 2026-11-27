@@ -264,20 +264,70 @@ impl<T> Vector<T, typenum::U0> {
 /// Shares a vector's buffer with zero inline capacity. An allocated input
 /// keeps its original pointer and capacity, even when its length is zero.
 /// Clones and ranges share the elements. An empty vector without an
-/// allocation yields [`Vector::empty`].
-///
-/// Returns the original vector if it contains more than `isize::MAX` elements.
+/// allocation yields an empty handle that owns nothing, as [`Vector::new`] does.
 /// `Send + Sync` allows the owning handles to be cloned and used across threads.
+///
+/// # Panics
+///
+/// Panics if a vector of zero-sized elements is longer than `isize::MAX`.
+/// [`Vector::try_from_shared_vec`] returns such a vector instead.
 #[cfg(bytora_atomic)]
-impl<T: Send + Sync> TryFrom<Vec<T>> for Vector<T, typenum::U0> {
-  type Error = Vec<T>;
-
-  fn try_from(values: Vec<T>) -> Result<Self, Self::Error> {
-    if values.capacity() == 0 || (size_of::<T>() == 0 && values.is_empty()) {
-      return Ok(Self::empty());
-    }
-    Self::try_from_shared_vec(values)
+impl<T: Send + Sync> From<Vec<T>> for Vector<T, typenum::U0> {
+  #[inline]
+  #[track_caller]
+  fn from(values: Vec<T>) -> Self {
+    Self::adopt_four_word_vec(values)
   }
+}
+
+/// Shares a vector's buffer in the default handle without copying, even when the
+/// elements would fit inline. An allocated input keeps its original pointer and
+/// capacity, even when its length is zero. Clones and ranges share the elements.
+/// An empty vector without an allocation yields an empty handle that owns
+/// nothing, as [`Vector::new`] does. `Send + Sync` allows the owning handles to
+/// be cloned and used across threads.
+///
+/// # Panics
+///
+/// Panics if a vector of zero-sized elements is longer than `isize::MAX`.
+/// [`Vector::try_from_shared_vec`] returns such a vector instead.
+#[cfg(bytora_atomic)]
+impl<T: Send + Sync> From<Vec<T>> for Vector<T> {
+  #[inline]
+  #[track_caller]
+  fn from(values: Vec<T>) -> Self {
+    Self::adopt_four_word_vec(values)
+  }
+}
+
+#[cfg(bytora_atomic)]
+impl<T: Send + Sync, S: InlineSize> Vector<T, S> {
+  // The conversion from `Vec<T>` at the two four-word budgets. Non-zero-sized
+  // elements take the adoption path of `try_from_vec`, which needs no Copy.
+  #[inline]
+  #[track_caller]
+  fn adopt_four_word_vec(values: Vec<T>) -> Self {
+    if vector::AVAILABLE && size_of::<T>() != 0 {
+      return Self {
+        layout: Layout::adopt_wide_vec(values),
+      };
+    }
+    if values.capacity() == 0 || (size_of::<T>() == 0 && values.is_empty()) {
+      return Self::new();
+    }
+    match Self::try_from_shared_vec(values) {
+      Ok(vector) => vector,
+      Err(_) => vector_too_long(),
+    }
+  }
+}
+
+#[cfg(bytora_atomic)]
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn vector_too_long() -> ! {
+  panic!("vector length exceeds isize::MAX")
 }
 
 #[cfg(bytora_atomic)]

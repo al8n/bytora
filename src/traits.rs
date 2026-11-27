@@ -327,6 +327,15 @@ impl From<&'static str> for Vector<u8> {
   }
 }
 
+/// Keeps the string's allocation, as the conversion from `Vec<u8>` does.
+#[cfg(bytora_atomic)]
+impl From<String> for Vector<u8> {
+  #[inline]
+  fn from(text: String) -> Self {
+    Self::from(text.into_bytes())
+  }
+}
+
 /// Freezes the buffer, as its `freeze` method does.
 ///
 /// # Panics

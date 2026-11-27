@@ -78,16 +78,17 @@ mod ownership {
     }
   }
 
-  // `N = 0`'s own constructor, `TryFrom<Vec<T>>`, which reaches `adopt_vec` through
-  // `try_from_shared_vec`. `Bytes` has no fallible or shared-vector constructor: its nearest
-  // equivalent is `Bytes::from(Vec<u8>)`, the same body as its `from_vec`.
+  // `N = 0`'s own constructor, `From<Vec<T>>`, which reaches `adopt_wide_vec` as `try_from_vec`
+  // does. The row keeps the name it had when the constructor was `TryFrom<Vec<T>>`. `Bytes` has no
+  // fallible or shared-vector constructor: its nearest equivalent is `Bytes::from(Vec<u8>)`, the
+  // same body as its `from_vec`.
   trait Adopt: Handle {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
   }
 
   impl Adopt for Vector<u8, bytora::typenum::U0> {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
-      <Self as TryFrom<Vec<u8>>>::try_from(values)
+      Ok(Self::from(values))
     }
   }
 

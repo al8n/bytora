@@ -13,10 +13,11 @@
 //! a criterion row. The setup is per iteration, inside the loop:
 //!
 //! - `from_vec`: the setup builds the input `Vec`; the routine adopts or copies it.
-//! - `try_from_vec`: as `from_vec`, through `TryFrom<Vec<u8>>` (`try_from_shared_vec`, then
-//!   `adopt_vec`), the constructor that only `N = 0` has. `Bytes` has no fallible or shared-vector
-//!   constructor, so its nearest equivalent is `Bytes::from(Vec<u8>)`, the same body as its
-//!   `from_vec`; the two `bytes` rows are a control for each other.
+//! - `try_from_vec`: as `from_vec`, through `N = 0`'s `From<Vec<u8>>`, which reaches
+//!   `adopt_wide_vec` as `from_vec` does. The case keeps the name it had when that constructor was
+//!   `TryFrom<Vec<u8>>`. `Bytes` has no fallible or shared-vector constructor, so its nearest
+//!   equivalent is `Bytes::from(Vec<u8>)`, the same body as its `from_vec`; the two `bytes` rows
+//!   are a control for each other.
 //! - `consume`: the setup builds the handle from a `Vec`; the routine turns it back into a `Vec`.
 //! - `warmed_clone`, `range`: nothing per iteration; the source handle, already cloned once so that
 //!   its owner exists, is built before the loop.
@@ -100,14 +101,14 @@ mod driver {
     }
   }
 
-  /// The constructor of `N = 0`, which is `Bytes`' shape: `TryFrom<Vec<T>>`.
+  /// The constructor of `N = 0`, which is `Bytes`' shape: `From<Vec<T>>`.
   trait Adopt: Handle {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>>;
   }
 
   impl Adopt for Vector<u8, typenum::U0> {
     fn try_from_vec(values: Vec<u8>) -> Result<Self, Vec<u8>> {
-      <Self as TryFrom<Vec<u8>>>::try_from(values)
+      Ok(Self::from(values))
     }
   }
 
