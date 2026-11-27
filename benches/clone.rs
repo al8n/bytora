@@ -2,6 +2,7 @@ use bytes::{Buf, Bytes};
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
+use smol_bytes::{Bytes as SmolBytes, compact::Bytes as CompactSmolBytes};
 use smol_slice::{InlineSize, Slice, SliceN};
 use std::{
   hint::black_box,
@@ -17,6 +18,15 @@ const LARGE_HANDLE: usize = 4096;
 const LARGE_PAYLOAD: usize = 64 * 1024;
 const BATCH_SIZE: usize = 64;
 const SMALL_LENGTHS: [usize; 13] = [0, 1, 7, 8, 14, 15, 16, 22, 23, 24, 30, 31, 32];
+
+const _: () = {
+  assert!(size_of::<SliceN<u8, 32>>() == 32);
+  assert!(size_of::<SliceN<u8, 64>>() == 64);
+  assert!(size_of::<SmolBytes>() == 64);
+  assert!(size_of::<CompactSmolBytes>() == 64);
+};
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<Bytes>() == 32);
 
 const fn payload() -> [u8; LARGE_PAYLOAD] {
   let mut bytes = [0; LARGE_PAYLOAD];
@@ -147,6 +157,9 @@ fn inline<S: InlineSize>(
   if size_of::<Slice<u8, S>>() <= MATCHED_HANDLE {
     lengths.extend(SMALL_LENGTHS);
   }
+  if size_of::<Slice<u8, S>>() == 64 {
+    lengths.extend([30, 62]);
+  }
   for len in unique_lengths(lengths) {
     if len > capacity {
       continue;
@@ -232,7 +245,11 @@ fn slice_heap<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
   }
 }
 
-fn slice_wide<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+fn slice_wide<S: InlineSize>(
+  group: &mut BenchmarkGroup<'_, WallTime>,
+  method: CloneMethod,
+  include_full: bool,
+) {
   let handle_size = size_of::<Slice<u8, S>>();
   let source = Slice::<u8, S>::try_from_static(&PAYLOAD).unwrap();
   {
@@ -240,8 +257,10 @@ fn slice_wide<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>, method: C
     assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
     assert_eq!(cloned.as_slice().as_ptr(), PAYLOAD.as_ptr());
   }
-  let id = format!("slice_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
-  bench_clone_case(group, id, &source, method, empty_slice::<S>);
+  if include_full {
+    let id = format!("slice_static/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+    bench_clone_case(group, id, &source, method, empty_slice::<S>);
+  }
   let mut advanced = source.clone();
   advanced.advance(LARGE_PAYLOAD - SHORT);
   {
@@ -269,8 +288,10 @@ fn slice_wide<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>, method: C
       assert_eq!(cloned.as_slice(), &PAYLOAD[..]);
       assert_eq!(cloned.as_slice().as_ptr(), data);
     }
-    let id = format!("slice_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
-    bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+    if include_full {
+      let id = format!("slice_heap_shared/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+      bench_clone_case(group, id, &shared, method, empty_slice::<S>);
+    }
 
     shared.advance(LARGE_PAYLOAD - SHORT);
     {
@@ -417,6 +438,156 @@ fn bytes_wide_advanced(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMe
   black_box(&owner);
 }
 
+fn smol_bytes_preflight<T: Clone + AsRef<[u8]>>(
+  source: &T,
+  method: CloneMethod,
+  empty: fn() -> T,
+  is_inline: fn(&T) -> bool,
+  contents: &[u8],
+  backing: Option<*const u8>,
+) {
+  let cloned = clone_preflight(source, method, empty);
+  assert_eq!(source.as_ref(), contents);
+  assert_eq!(cloned.as_ref(), contents);
+  assert_eq!(is_inline(source), backing.is_none());
+  assert_eq!(is_inline(&cloned), backing.is_none());
+  if let Some(pointer) = backing {
+    assert_eq!(source.as_ref().as_ptr(), pointer);
+    assert_eq!(cloned.as_ref().as_ptr(), pointer);
+  } else {
+    assert_ne!(source.as_ref().as_ptr(), cloned.as_ref().as_ptr());
+  }
+}
+
+fn smol_bytes_wide<T: Clone + Buf + AsRef<[u8]> + From<Vec<u8>>>(
+  group: &mut BenchmarkGroup<'_, WallTime>,
+  method: CloneMethod,
+  compact: bool,
+  from_static: fn(&'static [u8]) -> T,
+  is_inline: fn(&T) -> bool,
+  empty: fn() -> T,
+) {
+  let handle_size = size_of::<T>();
+  let strategy = if compact { "compact" } else { "shared" };
+  if !compact {
+    for len in [SHORT, 30, 62] {
+      let source = from_static(&PAYLOAD[..len]);
+      smol_bytes_preflight(&source, method, empty, is_inline, &PAYLOAD[..len], None);
+      let id = format!("smol_bytes_{strategy}_inline/handle_{handle_size}/len_{len}");
+      bench_clone_case(group, id, &source, method, empty);
+    }
+  }
+
+  // Long static data remains zero-copy, despite being stored in the heap variant.
+  let static_source = from_static(&PAYLOAD);
+  let values = PAYLOAD.to_vec();
+  let data = values.as_ptr();
+  let owner = T::from(values);
+  // Use the first clone as the measured source, after promotion to shared storage.
+  let shared = owner.clone();
+  for (source, data, origin) in [
+    (&static_source, PAYLOAD.as_ptr(), "static"),
+    (&shared, data, "heap"),
+  ] {
+    smol_bytes_preflight(source, method, empty, is_inline, &PAYLOAD, Some(data));
+    let full_kind = if origin == "heap" {
+      "heap_shared"
+    } else {
+      origin
+    };
+    let id = format!("smol_bytes_{strategy}_{full_kind}/handle_{handle_size}/len_{LARGE_PAYLOAD}");
+    bench_clone_case(group, id, source, method, empty);
+
+    let mut advanced = source.clone();
+    advanced.advance(LARGE_PAYLOAD - SHORT);
+    let pointer = data.wrapping_add(LARGE_PAYLOAD - SHORT);
+    if compact {
+      assert_ne!(advanced.as_ref().as_ptr(), pointer);
+    }
+    smol_bytes_preflight(
+      &advanced,
+      method,
+      empty,
+      is_inline,
+      &PAYLOAD[..SHORT],
+      (!compact).then_some(pointer),
+    );
+    let kind = if compact {
+      format!("inline_after_{origin}_advanced")
+    } else {
+      format!("{full_kind}_advanced")
+    };
+    let id =
+      format!("smol_bytes_{strategy}_{kind}/handle_{handle_size}/from_{LARGE_PAYLOAD}/len_{SHORT}");
+    bench_clone_case(group, id, &advanced, method, empty);
+  }
+  black_box(&owner);
+}
+
+fn smol_bytes_wide_benches(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+  smol_bytes_wide(
+    group,
+    method,
+    false,
+    SmolBytes::from_static,
+    SmolBytes::is_inline,
+    SmolBytes::new,
+  );
+  smol_bytes_wide(
+    group,
+    method,
+    true,
+    CompactSmolBytes::from_static,
+    CompactSmolBytes::is_inline,
+    CompactSmolBytes::new,
+  );
+}
+
+fn slice_inline_clone_from<S: InlineSize>(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Slice<u8, S>>();
+  for len in [SHORT, 30, 62] {
+    if len > Slice::<u8, S>::INLINE_CAPACITY {
+      continue;
+    }
+    let source = Slice::<u8, S>::try_from_slice(&PAYLOAD[..len]).unwrap();
+    let cloned = clone_preflight(&source, CloneMethod::From, empty_slice::<S>);
+    assert_eq!(source.as_slice(), &PAYLOAD[..len]);
+    assert_eq!(cloned.as_slice(), &PAYLOAD[..len]);
+    assert_ne!(cloned.as_slice().as_ptr(), source.as_slice().as_ptr());
+    let id = format!("slice_inline/handle_{handle_size}/len_{len}");
+    bench_clone_case(group, id, &source, CloneMethod::From, empty_slice::<S>);
+  }
+}
+
+fn bytes_short_clone_from(group: &mut BenchmarkGroup<'_, WallTime>) {
+  let handle_size = size_of::<Bytes>();
+  for len in [SHORT, 30, 62] {
+    let owner = Bytes::copy_from_slice(&PAYLOAD[..len]);
+    let shared = owner.clone();
+    let cloned = clone_preflight(&shared, CloneMethod::From, Bytes::new);
+    assert_eq!(shared.as_ref(), &PAYLOAD[..len]);
+    assert_eq!(cloned.as_ref(), &PAYLOAD[..len]);
+    assert_eq!(shared.as_ptr(), owner.as_ptr());
+    assert_eq!(cloned.as_ptr(), owner.as_ptr());
+    let id = format!("bytes_heap_shared/handle_{handle_size}/len_{len}");
+    bench_clone_case(group, id, &shared, CloneMethod::From, Bytes::new);
+    black_box(&owner);
+  }
+}
+
+fn array_copy<const N: usize>(group: &mut BenchmarkGroup<'_, WallTime>, method: CloneMethod) {
+  let source = std::array::from_fn::<_, N, _>(|index| PAYLOAD[index]);
+  let cloned = clone_preflight(&source, method, || [0; N]);
+  assert_eq!(cloned, source);
+  bench_clone_case(
+    group,
+    format!("array_copy/handle_{N}"),
+    &source,
+    method,
+    || [0; N],
+  );
+}
+
 fn clone_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone");
   inline(&mut group, SliceN::<u8, 8>::try_from_slice);
@@ -444,9 +615,11 @@ fn clone_benches(c: &mut Criterion) {
   slice_static::<typenum::U32>(&mut group);
   #[cfg(target_pointer_width = "32")]
   slice_static::<typenum::U12>(&mut group);
-  slice_wide::<typenum::U64>(&mut group, CloneMethod::Push);
-  slice_wide::<typenum::U128>(&mut group, CloneMethod::Push);
-  slice_wide::<typenum::U4096>(&mut group, CloneMethod::Push);
+  // Full 32-byte cases were already registered above; add only advanced windows.
+  slice_wide::<typenum::U32>(&mut group, CloneMethod::Push, false);
+  slice_wide::<typenum::U64>(&mut group, CloneMethod::Push, true);
+  slice_wide::<typenum::U128>(&mut group, CloneMethod::Push, true);
+  slice_wide::<typenum::U4096>(&mut group, CloneMethod::Push, true);
 
   let lengths = [
     SHORT,
@@ -457,6 +630,7 @@ fn clone_benches(c: &mut Criterion) {
     SliceN::<u8, 128>::INLINE_CAPACITY,
     SliceN::<u8, 256>::INLINE_CAPACITY,
     SliceN::<u8, LARGE_HANDLE>::INLINE_CAPACITY,
+    62,
     LARGE_PAYLOAD,
   ]
   .into_iter()
@@ -476,6 +650,9 @@ fn clone_benches(c: &mut Criterion) {
     bytes_advanced(&mut group, len);
   }
   bytes_wide_advanced(&mut group, CloneMethod::Push);
+  smol_bytes_wide_benches(&mut group, CloneMethod::Push);
+  array_copy::<32>(&mut group, CloneMethod::Push);
+  array_copy::<64>(&mut group, CloneMethod::Push);
   group.finish();
 }
 
@@ -486,13 +663,19 @@ fn empty_slice<S: InlineSize>() -> Slice<u8, S> {
 fn clone_from_benches(c: &mut Criterion) {
   let mut group = c.benchmark_group("clone_from");
   // Compact handles serve as controls for the wider handles.
-  slice_wide::<typenum::U24>(&mut group, CloneMethod::From);
-  slice_wide::<typenum::U32>(&mut group, CloneMethod::From);
-  slice_wide::<typenum::U64>(&mut group, CloneMethod::From);
-  slice_wide::<typenum::U128>(&mut group, CloneMethod::From);
-  slice_wide::<typenum::U4096>(&mut group, CloneMethod::From);
+  slice_wide::<typenum::U24>(&mut group, CloneMethod::From, true);
+  slice_wide::<typenum::U32>(&mut group, CloneMethod::From, true);
+  slice_wide::<typenum::U64>(&mut group, CloneMethod::From, true);
+  slice_wide::<typenum::U128>(&mut group, CloneMethod::From, true);
+  slice_wide::<typenum::U4096>(&mut group, CloneMethod::From, true);
   bytes_wide_baselines(&mut group, CloneMethod::From);
   bytes_wide_advanced(&mut group, CloneMethod::From);
+  slice_inline_clone_from::<typenum::U32>(&mut group);
+  slice_inline_clone_from::<typenum::U64>(&mut group);
+  bytes_short_clone_from(&mut group);
+  smol_bytes_wide_benches(&mut group, CloneMethod::From);
+  array_copy::<32>(&mut group, CloneMethod::From);
+  array_copy::<64>(&mut group, CloneMethod::From);
   group.finish();
 }
 
