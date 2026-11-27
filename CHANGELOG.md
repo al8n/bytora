@@ -24,9 +24,14 @@ request, and `release.yml` publishes the released section as the GitHub Release 
   for bytes, and `IntoIterator` by reference. `VectorMut` adds `DerefMut`,
   `AsMut`, `BorrowMut`, `Default`, `Clone`, `Extend` and `FromIterator`, and
   `Vector` adds `FromIterator`. The conversions of `bytes` are added: from static
-  slices and text without copying, from `String`, from `VectorMut<u8>` into
-  `Vector<u8>`, from `VectorMut` into `Vec`, and from `&[u8]` and `&str` into
-  `VectorMut<u8>`.
+  slices and text without copying, from `String`, from `VectorMut` into `Vec`,
+  from `VectorMut<u8>` into `Vector<u8>` on the budgets whose `freeze` cannot
+  fail, which leaves out the two-word budget, and from `&[u8]` and `&str` into
+  `VectorMut<u8>` with `alloc` or `std` on the budgets that can grow, which
+  leaves out the one-word budget. Without either feature, `VectorMut<u8>`
+  implements `TryFrom<&[u8]>` and `TryFrom<&str>` instead, with `TryPutError`.
+  `VectorMut::try_copy_from_slice` copies a slice into a new buffer, growing it
+  where it can, and returns an error where it cannot.
 - `From<Vec<T>>` replaces `TryFrom<Vec<T>>` for `Vector<T, U0>`, and the default
   budget has it too. It adopts the vector as `try_from_vec` does, so an
   unallocated empty vector now gives an inline empty handle. A vector of

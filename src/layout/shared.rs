@@ -269,7 +269,8 @@ impl<T> Vector<T, typenum::U0> {
 ///
 /// # Panics
 ///
-/// Panics if a vector of zero-sized elements is longer than `isize::MAX`.
+/// Panics if a vector of zero-sized elements is longer than `isize::MAX`, as
+/// the conversions of the standard library panic on a capacity overflow.
 /// [`Vector::try_from_shared_vec`] returns such a vector instead.
 #[cfg(bytora_atomic)]
 impl<T: Send + Sync> From<Vec<T>> for Vector<T, typenum::U0> {
@@ -289,7 +290,8 @@ impl<T: Send + Sync> From<Vec<T>> for Vector<T, typenum::U0> {
 ///
 /// # Panics
 ///
-/// Panics if a vector of zero-sized elements is longer than `isize::MAX`.
+/// Panics if a vector of zero-sized elements is longer than `isize::MAX`, as
+/// the conversions of the standard library panic on a capacity overflow.
 /// [`Vector::try_from_shared_vec`] returns such a vector instead.
 #[cfg(bytora_atomic)]
 impl<T: Send + Sync> From<Vec<T>> for Vector<T> {

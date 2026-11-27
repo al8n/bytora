@@ -2,7 +2,9 @@
 //!
 //! Comparison, ordering and hashing follow the visible elements, as `[T]` does.
 
-use crate::{InlineSize, Vector, VectorMut, WritableSize};
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+use crate::TryPutError;
+use crate::{InlineSize, Vector, VectorMut, WritableSize, layout::class};
 use core::{
   borrow::{Borrow, BorrowMut},
   cmp::Ordering,
@@ -354,13 +356,31 @@ impl From<String> for Vector<u8> {
   }
 }
 
-/// Freezes the buffer, as its `freeze` method does.
+/// Freezes the buffer, as its `freeze` method does, on each budget whose `freeze` cannot fail.
 ///
-/// # Panics
+/// Those are the one-word budget, whose buffer never leaves its inline storage, and the budgets of
+/// three or more words, the default and zero budgets among them, wherever every heap window
+/// freezes: with shared ownership, which native pointer-width atomics or `extra-platforms`
+/// provide, and without `alloc` and `std`, where no buffer has a heap window. The two-word budget,
+/// `BytesN<16>` on 64-bit targets, freezes a heap window only as a unique vector prefix, so it has
+/// no such conversion, and nor have the wider budgets with `alloc` or `std` but without shared
+/// ownership. On every budget `try_freeze` freezes the buffer, or returns one it cannot freeze.
 ///
-/// Panics where `freeze` panics: for a heap buffer that the immutable handle cannot represent.
-/// `try_freeze` returns such a buffer instead.
-impl<S: WritableSize<u8>> From<VectorMut<u8, S>> for Vector<u8, S> {
+/// ```
+/// use bytora::{BytesMutN, BytesN};
+///
+/// const FOUR_WORDS: usize = 4 * size_of::<usize>();
+/// let frozen = BytesN::<FOUR_WORDS>::from(BytesMutN::<FOUR_WORDS>::new());
+/// assert!(frozen.is_empty());
+/// ```
+///
+/// ```compile_fail
+/// use bytora::{BytesMutN, BytesN};
+///
+/// const TWO_WORDS: usize = 2 * size_of::<usize>();
+/// let frozen = BytesN::<TWO_WORDS>::from(BytesMutN::<TWO_WORDS>::new());
+/// ```
+impl<S: WritableSize<u8> + class::InfallibleFreeze> From<VectorMut<u8, S>> for Vector<u8, S> {
   #[inline]
   #[track_caller]
   fn from(buffer: VectorMut<u8, S>) -> Self {
@@ -377,13 +397,31 @@ impl<T, S: InlineSize> From<VectorMut<T, S>> for Vec<T> {
   }
 }
 
-/// Copies the bytes into a new buffer, inline when they fit.
+/// Copies the bytes into a new buffer, inline when they fit and into a heap window otherwise.
 ///
-/// # Panics
+/// With `alloc` or `std`, every budget whose buffer can grow has this conversion: all but the
+/// one-word budget, which cannot hold a heap window. That budget has neither this conversion nor
+/// `TryFrom<&[u8]>`, and `try_copy_from_slice` returns an error past its inline capacity. Without
+/// `alloc` and `std` no buffer grows, and every budget has `TryFrom<&[u8]>` in place of this
+/// conversion. Where the allocator refuses the memory, this conversion panics or aborts as the
+/// conversions of `Vec` do, and `try_copy_from_slice` returns the refusal.
 ///
-/// Panics when the bytes exceed the inline capacity and the buffer cannot grow: with a one-word
-/// budget, or without `alloc` and `std`.
-impl<S: WritableSize<u8>> From<&[u8]> for VectorMut<u8, S> {
+/// ```
+/// use bytora::BytesMutN;
+///
+/// const FOUR_WORDS: usize = 4 * size_of::<usize>();
+/// let buffer = BytesMutN::<FOUR_WORDS>::from(&b"bytes"[..]);
+/// assert_eq!(buffer, *b"bytes");
+/// ```
+///
+/// ```compile_fail
+/// use bytora::BytesMutN;
+///
+/// const ONE_WORD: usize = size_of::<usize>();
+/// let buffer = BytesMutN::<ONE_WORD>::from(&b"bytes"[..]);
+/// ```
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<S: WritableSize<u8> + class::Growable> From<&[u8]> for VectorMut<u8, S> {
   #[track_caller]
   fn from(bytes: &[u8]) -> Self {
     let mut buffer = Self::new();
@@ -392,16 +430,45 @@ impl<S: WritableSize<u8>> From<&[u8]> for VectorMut<u8, S> {
   }
 }
 
-/// Copies the bytes of the text into a new buffer, as the conversion from `&[u8]` does.
-///
-/// # Panics
-///
-/// Panics where the conversion from `&[u8]` panics.
-impl<S: WritableSize<u8>> From<&str> for VectorMut<u8, S> {
+/// Copies the bytes of the text into a new buffer, as the conversion from `&[u8]` does, on the
+/// same budgets.
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<S: WritableSize<u8> + class::Growable> From<&str> for VectorMut<u8, S> {
   #[inline]
   #[track_caller]
   fn from(text: &str) -> Self {
     Self::from(text.as_bytes())
+  }
+}
+
+/// Copies the bytes into a new buffer's inline storage, as `try_copy_from_slice` does, or returns
+/// a [`TryPutError`] when they exceed the inline capacity: its `requested` is their length and its
+/// `available` the inline capacity.
+///
+/// Without `alloc` and `std` no buffer can grow, so every budget has this conversion in place of
+/// `From<&[u8]>`, which only the budgets that can grow have, with either feature.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+impl<S: WritableSize<u8>> TryFrom<&[u8]> for VectorMut<u8, S> {
+  type Error = TryPutError;
+
+  fn try_from(bytes: &[u8]) -> Result<Self, TryPutError> {
+    // Without an allocator a new buffer has only its inline storage, and the
+    // room there is the one error.
+    Self::try_copy_from_slice(bytes).map_err(|_| TryPutError {
+      requested: bytes.len(),
+      available: Self::INLINE_CAPACITY,
+    })
+  }
+}
+
+/// Copies the bytes of the text into a new buffer, as the conversion from `&[u8]` does.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+impl<S: WritableSize<u8>> TryFrom<&str> for VectorMut<u8, S> {
+  type Error = TryPutError;
+
+  #[inline]
+  fn try_from(text: &str) -> Result<Self, TryPutError> {
+    Self::try_from(text.as_bytes())
   }
 }
 
