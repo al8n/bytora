@@ -337,14 +337,9 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     }
     #[cfg(any(feature = "std", feature = "alloc"))]
     if Layout::<T, S>::FITS_WINDOW {
-      // The twin's allocator, so that both forms cost the same. Where it
-      // refuses, this form panics or aborts as Vec::with_capacity does, on
-      // that first refusal, as the twin errs on it.
-      let window = match try_window_with_capacity(capacity) {
-        Some(window) => window,
-        None => allocation_refused::<T>(capacity),
-      };
-      return Self::from_window_ptr(window);
+      // Out of line as the twin's allocator is, so that both forms cost the
+      // same, and ending at the first refusal, where the twin errs.
+      return Self::from_window_ptr(window_with_capacity(capacity));
     }
     capacity_refused()
   }
@@ -1258,11 +1253,7 @@ impl<S: InlineSize> VectorMut<u8, S> {
     }
     #[cfg(any(feature = "std", feature = "alloc"))]
     if Layout::<u8, S>::FITS_WINDOW {
-      let window = match try_zeroed_window(len) {
-        Some(window) => window,
-        None => allocation_refused::<u8>(len),
-      };
-      return Self::from_window_ptr(window);
+      return Self::from_window_ptr(zeroed_window(len));
     }
     capacity_refused()
   }
@@ -1451,21 +1442,46 @@ fn try_window_with_capacity<T>(capacity: usize) -> Option<NonNull<Window<T>>> {
   try_boxed(|| Window::from_vec(values))
 }
 
-// The end of with_capacity and zeroed where the twins' allocator refused:
-// the capacity-overflow panic, or the allocation-failure handler, as
-// Vec::with_capacity ends, with no second attempt. The allocator does not say
-// which of its two allocations was refused, so the handler is given the
-// elements' layout, or the window's where the elements need no allocation:
-// a refused window box is reported with the elements' layout, whichever is
-// larger.
+// with_capacity's window: allocated as try_window_with_capacity allocates it,
+// and ended at the first refusal as Vec::with_capacity and Box::new end. A
+// capacity overflow panics, and a refused allocation, the elements' or the
+// window box's, calls the allocation-failure handler with its own layout.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(never)]
+#[track_caller]
+fn window_with_capacity<T>(capacity: usize) -> NonNull<Window<T>> {
+  let values = match try_vec_with_capacity(capacity) {
+    Some(values) => values,
+    None => elements_refused::<T>(capacity),
+  };
+  boxed(|| Window::from_vec(values))
+}
+
+// zeroed's window, as window_with_capacity is with_capacity's. Resizing within
+// the reserved capacity cannot reallocate.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[inline(never)]
+#[track_caller]
+fn zeroed_window(len: usize) -> NonNull<Window<u8>> {
+  let mut values = match try_vec_with_capacity::<u8>(len) {
+    Some(values) => values,
+    None => elements_refused::<u8>(len),
+  };
+  values.resize(len, 0);
+  boxed(|| Window::from_vec(values))
+}
+
+// try_vec_with_capacity's refusal in a panicking constructor: a length past
+// the limit panics, as Vec::with_capacity does, and otherwise the allocator
+// refused exactly this layout, which never has size zero: a zero-sized
+// request needs no allocation and is never refused.
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cold]
 #[inline(never)]
 #[track_caller]
-fn allocation_refused<T>(capacity: usize) -> ! {
+fn elements_refused<T>(capacity: usize) -> ! {
   match std::alloc::Layout::array::<T>(capacity) {
-    Ok(layout) if layout.size() != 0 => std::alloc::handle_alloc_error(layout),
-    Ok(_) => std::alloc::handle_alloc_error(std::alloc::Layout::new::<Window<T>>()),
+    Ok(layout) => std::alloc::handle_alloc_error(layout),
     Err(_) => panic!("capacity overflow"),
   }
 }
