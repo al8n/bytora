@@ -14,6 +14,8 @@ mod layout;
 mod slice;
 use core::ops::{Bound, Range, RangeBounds};
 use layout::Layout;
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use layout::local::{LocalSlice, LocalSliceN};
 pub use layout::mutable::WritableSize;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
 pub use typenum;

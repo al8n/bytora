@@ -1,5 +1,3 @@
-#[cfg(smol_slice_atomic)]
-use super::COMPACT_VEC;
 #[cfg(any(feature = "std", feature = "alloc"))]
 use super::mutable::Window;
 use super::{COMPACT_STATIC, EXTERNAL, ExternalPrefix, InlineSize, Layout};
@@ -7,11 +5,15 @@ use crate::{Slice, SliceMut};
 use core::{mem::ManuallyDrop, num::NonZeroU8, ops::Range, ptr, slice};
 #[cfg(all(smol_slice_atomic, feature = "extra-platforms"))]
 pub(super) use portable_atomic_util::Arc;
+#[cfg(smol_slice_atomic)]
+use std::boxed::Box;
 #[cfg(all(smol_slice_atomic, not(feature = "extra-platforms")))]
 pub(super) use std::sync::Arc;
 #[cfg(any(feature = "std", feature = "alloc"))]
 use std::vec::Vec;
 
+#[cfg(smol_slice_atomic)]
+mod arc;
 #[cfg(smol_slice_atomic)]
 mod owner;
 #[cfg(smol_slice_atomic)]
@@ -23,27 +25,25 @@ const STATIC_OWNER: *const () = ptr::without_provenance(1);
 
 impl<T, S: InlineSize> Layout<T, S> {
   const fn try_static(data: *const T, len: usize) -> Option<Self> {
-    let Some(mut layout) = Self::try_external(data, STATIC_OWNER, len) else {
+    if !Self::FITS_EXTERNAL || len > isize::MAX as usize {
       return None;
-    };
-    if Self::COMPACT_EXTERNAL && layout.tag.get() == EXTERNAL {
-      layout.tag = COMPACT_STATIC;
     }
-    Some(layout)
+    let kind = if Self::COMPACT_EXTERNAL {
+      COMPACT_STATIC
+    } else {
+      NonZeroU8::new(EXTERNAL).unwrap()
+    };
+    Some(Self::external(data, STATIC_OWNER, len, kind))
   }
 
-  fn subwindow_tag(new_tag: NonZeroU8, owner: *const ()) -> NonZeroU8 {
-    if !Self::COMPACT_EXTERNAL || new_tag.get() != EXTERNAL {
-      return new_tag;
-    }
-    #[cfg(smol_slice_atomic)]
-    if vector::raw(owner) {
-      return COMPACT_VEC;
+  fn external_kind(owner: *const ()) -> NonZeroU8 {
+    if !Self::COMPACT_EXTERNAL {
+      return NonZeroU8::new(EXTERNAL).unwrap();
     }
     if ptr::eq(owner, STATIC_OWNER) {
       COMPACT_STATIC
     } else {
-      new_tag
+      NonZeroU8::new(EXTERNAL).unwrap()
     }
   }
 
@@ -61,36 +61,70 @@ impl<T, S: InlineSize> Layout<T, S> {
 
   fn owner(&self) -> *const () {
     #[cfg(smol_slice_atomic)]
-    if vector::AVAILABLE
-      && (!Self::COMPACT_EXTERNAL || self.tag == COMPACT_VEC || self.tag.get() > EXTERNAL)
-    {
+    if vector::AVAILABLE && self.uses_external_owner() {
       return self
         .owner_slot()
         .load(core::sync::atomic::Ordering::Acquire);
     }
-    // SAFETY: These compact tags describe a static or already shared backing.
-    // Without shared heap storage every external descriptor is immutable.
+    // SAFETY: A compact static descriptor is immutable. Platforms without
+    // raw Vec owners never update the slot through a shared reference.
     unsafe { (*self.external_ptr()).owner }
   }
 
-  fn shared_owner(&self) -> *const () {
+  #[cfg(not(smol_slice_atomic))]
+  fn retain_owner(&self, _front: usize, _back: usize) -> *const () {
+    self.owner()
+  }
+
+  #[cfg(smol_slice_atomic)]
+  fn retain_owner(&self, front: usize, back: usize) -> *const () {
     let owner = self.owner();
-    #[cfg(smol_slice_atomic)]
     if vector::raw(owner) {
       // SAFETY: The borrowed descriptor pins the vector, and its geometry
-      // and window stay immutable until all concurrent clones have returned.
+      // and window remain immutable. Promotion also retains this new peer.
       return unsafe { vector::promote::<T>(self.owner_slot(), owner, self.data(), self.len()) };
     }
-    owner
+    // SAFETY: The source holds a live reference for this owner.
+    unsafe {
+      if owner::retain_direct::<T>(owner) {
+        return owner;
+      }
+      if arc::is_arc(owner) {
+        let (data, len) = (self.data(), self.external_len());
+        if let Some(narrowed) = arc::narrow(owner, front, back) {
+          arc::retain::<T>(owner, data, len);
+          return narrowed;
+        }
+        return arc::managed_copy::<T>(owner, data, len);
+      }
+      (owner::managed_operations::<T>(owner).clone)(owner);
+      owner
+    }
   }
 
   fn narrow_owner(&mut self, _front: usize, _back: usize) -> *const () {
     let owner = self.external_prefix_mut().owner;
     #[cfg(smol_slice_atomic)]
     if vector::raw(owner) {
-      let owner = vector::narrow(owner, _front, _back).unwrap_or_else(|| self.shared_owner());
+      let owner = vector::narrow(owner, _front, _back)
+        .unwrap_or_else(|| vector::box_raw::<T>(owner, self.data(), self.len()));
       self.external_prefix_mut().owner = owner;
       return owner;
+    }
+    #[cfg(smol_slice_atomic)]
+    if arc::is_arc(owner) {
+      let narrowed = arc::narrow(owner, _front, _back).unwrap_or_else(|| {
+        let (data, len) = (self.data(), self.external_len());
+        // SAFETY: The new managed owner retains the original Arc before this
+        // handle relinquishes its reference. Its elements stay live throughout.
+        unsafe {
+          let managed = arc::managed_copy::<T>(owner, data, len);
+          arc::release::<T>(owner, data, len);
+          managed
+        }
+      });
+      self.external_prefix_mut().owner = narrowed;
+      return narrowed;
     }
     owner
   }
@@ -115,9 +149,10 @@ impl<T> Slice<T, typenum::U0> {
   }
 }
 
-/// Shares a vector's buffer with zero inline capacity. A nonempty input keeps
-/// its original data pointer. Clones and ranges share those elements.
-/// An empty vector yields [`Slice::empty`] without allocating a shared owner.
+/// Shares a vector's buffer with zero inline capacity. An allocated input
+/// keeps its original pointer and capacity, even when its length is zero.
+/// Clones and ranges share the elements. An empty vector without an
+/// allocation yields [`Slice::empty`].
 ///
 /// Returns the original vector if it contains more than `isize::MAX` elements.
 /// `Send + Sync` allows the owning handles to be cloned and used across threads.
@@ -126,10 +161,19 @@ impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
   type Error = Vec<T>;
 
   fn try_from(values: Vec<T>) -> Result<Self, Self::Error> {
-    if values.is_empty() {
+    if values.capacity() == 0 || (size_of::<T>() == 0 && values.is_empty()) {
       return Ok(Self::empty());
     }
     Self::try_from_shared_vec(values)
+  }
+}
+
+#[cfg(smol_slice_atomic)]
+impl<T: Send + Sync, S: InlineSize> TryFrom<Box<[T]>> for Slice<T, S> {
+  type Error = Box<[T]>;
+
+  fn try_from(values: Box<[T]>) -> Result<Self, Self::Error> {
+    Self::try_from_boxed_slice(values)
   }
 }
 
@@ -185,7 +229,8 @@ impl<T> Slice<T> {
 impl<T, S: InlineSize> Slice<T, S> {
   /// Reports whether the current window can become mutable without copying.
   /// An inline handle owns its elements. A vector or frozen mutable window
-  /// must have a single immutable owner. Static and custom owners are read-only.
+  /// must have a single immutable owner. Static slices, Arc slices and custom
+  /// owners grant shared access only.
   /// Concurrent clones can change the result immediately.
   pub fn is_unique(&self) -> bool {
     if self.layout.is_inline() {
@@ -210,27 +255,22 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   #[cfg(smol_slice_atomic)]
-  fn try_take<R>(
-    mut self,
+  unsafe fn take_external<R>(
+    owner: *const (),
+    data: *const (),
+    len: usize,
     select: impl FnOnce(&owner::StorageVtable<T>) -> owner::Take<R>,
-  ) -> Result<R, Self> {
-    let prefix = self.layout.external_prefix_mut();
-    let (owner, data, len) = (prefix.owner, prefix.data, self.len());
-    // SAFETY: This handle owns the reference corresponding to this table.
+  ) -> Option<R> {
+    // SAFETY: The caller transfers the reference corresponding to this table.
     let operation = select(unsafe { owner::operations(owner) });
-    let this = ManuallyDrop::new(self);
-    // SAFETY: Suppress our release before transferring the strong reference.
-    // A failing callback returns that reference untouched. A succeeding or
-    // unwinding callback owns it, including when dropping skipped elements panics.
-    match unsafe { operation(owner, data, len) } {
-      Some(result) => Ok(result),
-      None => Err(ManuallyDrop::into_inner(this)),
-    }
+    // SAFETY: The source's destructor is suppressed. Only a failing callback
+    // leaves the reference untouched, including if a skipped element's Drop panics.
+    unsafe { operation(owner, data, len) }
   }
 
   /// Takes exclusive access to the current window without copying its elements.
   /// Returns the original handle if another immutable view shares the backing
-  /// or the storage was supplied by a static slice or custom owner.
+  /// or the storage was supplied by a static slice, Arc slice or custom owner.
   ///
   /// Thawing an empty inline slice, including one created by [`Self::new`],
   /// gives the mutable handle zero capacity. Growing that handle requires a
@@ -241,7 +281,16 @@ impl<T, S: InlineSize> Slice<T, S> {
       return Ok(self.into_inline_mut());
     }
     #[cfg(smol_slice_atomic)]
-    return self.try_take(|ops| ops.into_mut).map(SliceMut::from_window);
+    {
+      let mut this = ManuallyDrop::new(self);
+      let prefix = this.layout.external_prefix_mut();
+      let (owner, data, len) = (prefix.owner, prefix.data, this.layout.external_len());
+      // SAFETY: The reference is restored only if the take callback returns None.
+      match unsafe { Self::take_external(owner, data, len, |ops| ops.into_mut) } {
+        Some(window) => Ok(SliceMut::from_window(window)),
+        None => Err(ManuallyDrop::into_inner(this)),
+      }
+    }
     #[cfg(not(smol_slice_atomic))]
     Err(self)
   }
@@ -263,28 +312,66 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// disjoint segment whose allocation is still shared, can require a new vector.
   /// Returns the original handle if its elements cannot be moved.
   #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline]
   pub fn try_into_vec(self) -> Result<Vec<T>, Self> {
-    if self.layout.is_inline() {
-      return Ok(self.into_inline_mut().into_vec());
-    }
+    let mut this = ManuallyDrop::new(self);
     #[cfg(smol_slice_atomic)]
-    {
-      let mut this = self;
-      let owner = this.layout.external_prefix_mut().owner;
-      if let Some(spare) = vector::full_spare(owner) {
-        let len = this.len();
-        let capacity = len + spare;
-        let data = this.layout.data().cast_mut().cast();
-        core::mem::forget(this);
-        // SAFETY: The raw marker proves the handle still owns the allocation.
-        // A full window starts at its original pointer and retains all of the
-        // initialized elements. The spare field restores the exact capacity.
-        return Ok(unsafe { Vec::from_raw_parts(data, len, capacity) });
-      }
-      this.try_take(|ops| ops.into_vec)
-    }
+    let full_len = if vector::AVAILABLE && this.layout.uses_external_owner() {
+      // SAFETY: The consuming handle has exclusive access to its owner slot.
+      vector::full_len(unsafe { (*this.layout.external_ptr()).owner })
+    } else {
+      None
+    };
     #[cfg(not(smol_slice_atomic))]
-    Err(self)
+    let full_len = None;
+    let (data, len, capacity) = if let Some(len) = full_len {
+      (this.layout.data().cast_mut().cast(), len, len)
+    } else {
+      // SAFETY: Only failure below reads the original handle again. On success
+      // or unwind the ManuallyDrop suppresses its destructor.
+      let Some(values) = (unsafe { Self::take_backing_vec(&mut this) }) else {
+        return Err(ManuallyDrop::into_inner(this));
+      };
+      let mut values = ManuallyDrop::new(values);
+      (values.as_mut_ptr(), values.len(), values.capacity())
+    };
+    // SAFETY: A full raw marker carries the original length and has matching
+    // capacity. For other backings the recovered vector supplies all three parts.
+    Ok(unsafe { Vec::from_raw_parts(data, len, capacity) })
+  }
+
+  /// # Safety
+  ///
+  /// The caller must own a live descriptor and may use it again only after `None`.
+  /// Success transfers ownership and unwinding may already have dropped elements.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(never)]
+  unsafe fn take_backing_vec(this: &mut ManuallyDrop<Self>) -> Option<Vec<T>> {
+    #[cfg(smol_slice_atomic)]
+    if this.layout.uses_external_owner() {
+      let owner = this.layout.external_prefix_mut().owner;
+      let (data, len) = (this.layout.data(), this.layout.external_len());
+      if owner.addr() & 1 == 0 && !vector::raw(owner) {
+        // SAFETY: Even non-raw owners are real vector headers, and the
+        // caller suppresses this handle's destructor on success or unwind.
+        return unsafe { owner::direct_into_vec(owner, data, len) };
+      }
+      // SAFETY: The caller suppressed Drop. The callback owns a successful take
+      // or unwind, while a failed take leaves the original reference untouched.
+      return unsafe { Self::take_external(owner, data, len, |ops| ops.into_vec) };
+    }
+    if this.layout.is_inline() {
+      // SAFETY: The caller has suppressed Drop and forgets this slot on success.
+      Some(unsafe { ManuallyDrop::take(this) }.take_inline_vec())
+    } else {
+      None
+    }
+  }
+
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(never)]
+  fn take_inline_vec(self) -> Vec<T> {
+    self.into_inline_mut().into_vec()
   }
 
   /// Moves the current elements into a vector, cloning the visible window
@@ -324,9 +411,11 @@ impl<T, S: InlineSize> Slice<T, S> {
     }
   }
 
-  /// Takes a vector, copying it inline when it fits. Otherwise the handle keeps
-  /// the vector's buffer. Eligible vectors allocate a reference-counted owner
-  /// on their first clone or range. Later clones increment its reference count.
+  /// Takes a vector. A handle of at least three words keeps its allocation,
+  /// including its pointer and capacity, even when the vector is short or
+  /// empty. An empty vector without an allocation yields an empty inline
+  /// handle. Zero-sized elements use inline storage when their count fits.
+  /// Smaller handles copy fitting elements inline.
   ///
   /// Returns the original vector if shared storage is needed and the handle is
   /// smaller than three machine words or the length exceeds `isize::MAX`.
@@ -334,44 +423,90 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// their elements across threads. It is available with `alloc` or `std` on
   /// targets with pointer-width atomics, or with the `extra-platforms` feature.
   #[cfg(smol_slice_atomic)]
+  #[inline]
   pub fn try_from_vec(values: Vec<T>) -> Result<Self, Vec<T>>
   where
     T: Copy + Send + Sync,
   {
-    if let Some(inline) = Self::try_from_slice(&values) {
-      return Ok(inline);
+    if Layout::<T, S>::FITS_EXTERNAL {
+      if size_of::<T>() != 0 {
+        let empty = values.capacity() == 0;
+        if !vector::AVAILABLE && empty {
+          return Ok(Self::new());
+        }
+        let mut layout = Self::adopt_vec(values);
+        if empty {
+          // An exact, zero-capacity non-ZST Vec owns no allocation. Its zero
+          // length also initializes the inline cursor to zero at every size.
+          layout.tag = NonZeroU8::MIN;
+        }
+        return Ok(Self { layout });
+      }
+      if values.len() > Self::INLINE_CAPACITY {
+        return Self::try_from_shared_vec(values);
+      }
     }
-    Self::try_from_shared_vec(values)
+    Self::try_from_slice(&values).ok_or(values)
+  }
+
+  /// Takes ownership of a boxed slice without copying its elements, including
+  /// short and empty slices. An exclusively owned window can recover the
+  /// original allocation through [`Self::try_into_vec`].
+  ///
+  /// Returns the original box if the handle is smaller than three words or
+  /// the slice has more than `isize::MAX` elements.
+  #[cfg(smol_slice_atomic)]
+  pub fn try_from_boxed_slice(values: Box<[T]>) -> Result<Self, Box<[T]>>
+  where
+    T: Send + Sync,
+  {
+    if !Layout::<T, S>::FITS_EXTERNAL || values.len() > isize::MAX as usize {
+      return Err(values);
+    }
+    Self::try_from_shared_vec(values.into_vec()).map_err(Vec::into_boxed_slice)
   }
 
   /// Keeps a vector's allocation in shared storage for any `Send + Sync`
   /// element type, including borrowed and non-`Clone` elements. This keeps
-  /// the allocation even if the elements would fit inline. Non-zero-sized
-  /// vectors defer their shared owner while their spare capacity and the
-  /// hidden ends of their window fit in the descriptor. Zero-sized vectors
-  /// keep an owner that records their original pointer and logical offsets.
+  /// the allocation even if the elements would fit inline. On eligible targets,
+  /// exact-capacity vectors of non-zero-sized elements defer allocating an owner
+  /// until first shared or until their hidden ends outgrow the descriptor.
+  /// Vectors with spare capacity store their owner in the aligned tail of the
+  /// allocation when it fits, or allocate a separate owner at construction.
+  /// Zero-sized vectors keep an owner that records their original pointer and
+  /// logical offsets.
   ///
   /// Returns the original vector if this handle is smaller than three words
   /// or the length exceeds `isize::MAX`.
   #[cfg(smol_slice_atomic)]
-  pub fn try_from_shared_vec(mut values: Vec<T>) -> Result<Self, Vec<T>>
+  #[inline]
+  pub fn try_from_shared_vec(values: Vec<T>) -> Result<Self, Vec<T>>
   where
     T: Send + Sync,
   {
     const { assert!(align_of::<vector::Vector<T>>() >= 2) };
-    let data = owner::initial_data(values.as_mut_ptr());
-    let Some(mut layout) = Layout::try_external(data, ptr::null(), values.len()) else {
+    let len = values.len();
+    // A non-ZST Vec's allocation already limits its length to isize::MAX.
+    if !Layout::<T, S>::FITS_EXTERNAL || (size_of::<T>() == 0 && len > isize::MAX as usize) {
       return Err(values);
-    };
-    if let Some(raw) = vector::initial(&values) {
-      layout.tag = Layout::<T, S>::subwindow_tag(layout.tag, raw);
-      layout.external_prefix_mut().owner = raw;
-      core::mem::forget(values);
-    } else {
-      layout.external_prefix_mut().owner =
-        Arc::into_raw(Arc::new(vector::Vector::from_vec(values))).cast();
     }
-    Ok(Self { layout })
+    Ok(Self {
+      layout: Self::adopt_vec(values),
+    })
+  }
+
+  #[cfg(smol_slice_atomic)]
+  #[inline(always)]
+  fn adopt_vec(mut values: Vec<T>) -> Layout<T, S> {
+    let len = values.len();
+    let data = owner::initial_data(values.as_mut_ptr());
+    let owner = if vector::AVAILABLE && size_of::<T>() != 0 && values.capacity() == len {
+      core::mem::forget(values);
+      vector::full_owner(len)
+    } else {
+      vector::from_vec(values)
+    };
+    Layout::external(data, owner, len, NonZeroU8::new(EXTERNAL).unwrap())
   }
 
   #[cfg(smol_slice_atomic)]
@@ -413,27 +548,19 @@ impl<T, S: InlineSize> Slice<T, S> {
 
   #[track_caller]
   pub(crate) fn slice_shared(&self, range: Range<usize>) -> Self {
+    let len = self.len();
     assert!(
-      range.start <= range.end && range.end <= self.len(),
+      range.start <= range.end && range.end <= len,
       "slice range out of bounds"
     );
-    let owner = self.layout.shared_owner();
-    let mut layout = Layout::try_external(self.subwindow_data(range.start), owner, range.len())
-      .expect("a subrange fits its source descriptor");
-    layout.tag = Layout::<T, S>::subwindow_tag(layout.tag, owner);
-    #[cfg(smol_slice_atomic)]
-    {
-      let retain = if Layout::<T, S>::COMPACT_EXTERNAL {
-        layout.uses_external_owner()
-      } else {
-        !ptr::eq(owner, STATIC_OWNER)
-      };
-      if retain {
-        // SAFETY: The source holds this external owner live. Its validated
-        // subwindow keeps the same owner and needs its own reference.
-        unsafe { Self::retain(owner) };
-      }
-    }
+    let data = self.subwindow_data(range.start);
+    let owner = self.layout.retain_owner(range.start, len - range.end);
+    let layout = Layout::external(
+      data,
+      owner,
+      range.len(),
+      Layout::<T, S>::external_kind(owner),
+    );
     Self { layout }
   }
 
@@ -441,64 +568,34 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn advance_shared(&mut self, count: usize) {
     let len = self.len();
     assert!(count <= len, "advance past end");
-    let (low, high, tag) = Layout::<T, S>::split_external_len(len - count);
     let data = self.subwindow_data(count);
     let owner = self.layout.narrow_owner(count, 0);
-    let tag = Layout::<T, S>::subwindow_tag(tag, owner);
-    let prefix = self.layout.external_prefix_mut();
-    prefix.data = data.cast();
-    prefix.len_low = low;
-    self.layout.cursor.as_mut()[0] = high;
-    self.layout.tag = tag;
+    self.layout.external_prefix_mut().data = data.cast();
+    self
+      .layout
+      .set_external_len(len - count, Layout::<T, S>::external_kind(owner));
   }
 
   pub(crate) fn truncate_shared(&mut self, len: usize) {
     debug_assert!(len <= self.len());
-    let (low, high, tag) = Layout::<T, S>::split_external_len(len);
     let owner = self.layout.narrow_owner(0, self.len() - len);
-    let tag = Layout::<T, S>::subwindow_tag(tag, owner);
-    self.layout.external_prefix_mut().len_low = low;
-    self.layout.cursor.as_mut()[0] = high;
-    self.layout.tag = tag;
-  }
-
-  #[cfg(smol_slice_atomic)]
-  unsafe fn retain(owner: *const ()) {
-    // SAFETY: The source holds this strong reference live and passes it to
-    // the clone operation for the backing that produced it.
-    unsafe {
-      if !owner::retain_direct::<T>(owner) {
-        (owner::managed_operations::<T>(owner).clone)(owner);
-      }
-    }
-  }
-
-  #[cfg(smol_slice_atomic)]
-  #[inline(never)]
-  unsafe fn clone_compact_managed(&self, owner: *const ()) -> Self {
-    // Keeping the indirect call and the following copy together lets the
-    // compact fast path tail-call this branch without saving its registers.
-    // SAFETY: The caller supplies this handle's tagged managed owner. After
-    // retaining it, both descriptors may own a reference to the same window.
-    unsafe {
-      (owner::managed_operations::<T>(owner).clone)(owner);
-      ptr::read(self)
-    }
+    self
+      .layout
+      .set_external_len(len, Layout::<T, S>::external_kind(owner));
   }
 
   #[cfg(smol_slice_atomic)]
   #[inline(always)]
-  unsafe fn clone_compact_vec(&self, owner: *const ()) -> Self {
+  unsafe fn copy_compact_vec(&self, owner: *const ()) -> Self {
     let word = size_of::<*const ()>();
     let src = ptr::from_ref(self).cast::<u8>();
     let mut copy = core::mem::MaybeUninit::<Self>::uninit();
     let dst = copy.as_mut_ptr().cast::<u8>();
-    // SAFETY: The compact Vec tag identifies a descriptor of at least three
-    // words. The acquired owner is its published Arc. Copy the immutable data
-    // word and all bytes beyond the owner, preserving padding and provenance.
-    // The atomic slot itself is never read a second time.
+    // SAFETY: The caller retained this compact external descriptor's vector
+    // header. Copy the immutable data word and bytes beyond its owner,
+    // preserving the tag, padding, and provenance. Only the atomic load
+    // accesses the original owner slot, including during concurrent promotion.
     unsafe {
-      Arc::<vector::Vector<T>>::increment_strong_count(owner.cast());
       ptr::copy_nonoverlapping(src, dst, word);
       dst.add(word).cast::<*const ()>().write_unaligned(owner);
       ptr::copy_nonoverlapping(
@@ -506,37 +603,35 @@ impl<T, S: InlineSize> Slice<T, S> {
         dst.add(2 * word),
         size_of::<Self>() - 2 * word,
       );
-      let mut peer = copy.assume_init();
-      peer.layout.tag = NonZeroU8::new(EXTERNAL).unwrap();
-      peer
+      copy.assume_init()
     }
   }
 
   #[cfg(smol_slice_atomic)]
-  #[cold]
   #[inline(never)]
-  unsafe fn first_compact_vec_clone(&self, raw: *const ()) -> Self {
-    // SAFETY: The compact Vec source's data and window stay fixed for the
-    // whole borrow. A competing clone can only publish the same backing.
-    let owner = unsafe {
-      vector::promote::<T>(
-        self.layout.owner_slot(),
-        raw,
-        self.layout.data(),
-        self.len(),
-      )
-    };
-    // SAFETY: Both outcomes of promotion return the source's live Arc.
-    unsafe { self.clone_compact_vec(owner) }
-  }
-
-  // This general path can promote a raw owner with a nonzero high length
-  // byte. Keep its allocation and unwind frame off ordinary compact clones.
-  #[cfg(smol_slice_atomic)]
-  #[cold]
-  #[inline(never)]
-  fn clone_long_compact(&self) -> Self {
-    self.clone_shared()
+  unsafe fn clone_compact_tagged(&self, owner: *const ()) -> Self {
+    if vector::raw(owner) {
+      // SAFETY: The source pins this window and its raw geometry. Promotion
+      // returns a reference for the peer, even when another clone wins.
+      let owner = unsafe {
+        vector::promote::<T>(
+          self.layout.owner_slot(),
+          owner,
+          self.layout.data(),
+          self.layout.external_len(),
+        )
+      };
+      return unsafe { self.copy_compact_vec(owner) };
+    }
+    if arc::is_arc(owner) {
+      // SAFETY: The enclosing handle keeps the original Arc alive.
+      unsafe { arc::retain::<T>(owner, self.layout.data(), self.layout.external_len()) };
+    } else if owner != STATIC_OWNER {
+      // SAFETY: The caller supplied a tagged pointer and excluded raw geometry.
+      unsafe { (owner::managed_operations::<T>(owner).clone)(owner) };
+    }
+    // SAFETY: Both managed and static descriptors have immutable owner slots.
+    unsafe { ptr::read(self) }
   }
 
   // On AArch64 the call boundary keeps a compact handle's transfer together
@@ -545,29 +640,23 @@ impl<T, S: InlineSize> Slice<T, S> {
   pub(crate) fn clone_compact(&self) -> Self {
     #[cfg(smol_slice_atomic)]
     if self.layout.uses_external_owner() {
-      if self.layout.tag == COMPACT_VEC {
-        let owner = self
+      let owner = if vector::AVAILABLE {
+        self
           .layout
           .owner_slot()
-          .load(core::sync::atomic::Ordering::Acquire);
-        // SAFETY: This tag always denotes a Vec. Its only transition through
-        // &self is from raw geometry to a direct Arc, observed with Acquire.
-        unsafe {
-          if owner.addr() & 1 != 0 {
-            return self.first_compact_vec_clone(owner);
-          }
-          return self.clone_compact_vec(owner);
-        }
-      }
-      if self.layout.tag.get() > EXTERNAL {
-        return self.clone_long_compact();
-      }
-      let owner = self.layout.owner();
-      // SAFETY: This live external handle owns a reference to the backing storage.
+          .load(core::sync::atomic::Ordering::Acquire)
+          .cast_const()
+      } else {
+        self.layout.owner()
+      };
+      // SAFETY: After excluding tagged owners and raw markers, only actual
+      // vector headers remain. Acquire observes any published promotion.
       unsafe {
-        if !owner::retain_direct::<T>(owner) {
-          return self.clone_compact_managed(owner);
+        if owner.addr() & 1 != 0 || vector::raw(owner) {
+          return self.clone_compact_tagged(owner);
         }
+        vector::Vector::<T>::retain(owner);
+        return self.copy_compact_vec(owner);
       }
     }
     // SAFETY: An immutable inline window admits elements under a Copy proof
@@ -578,50 +667,24 @@ impl<T, S: InlineSize> Slice<T, S> {
   }
 
   pub(crate) fn clone_shared(&self) -> Self {
-    let owner = self.layout.shared_owner();
-    let prefix = ExternalPrefix {
-      data: self.layout.data(),
-      owner,
-      len_low: self.layout.len_low(),
-    };
-    let tag = self.layout.tag;
-    #[cfg(smol_slice_atomic)]
-    let tag = if Layout::<T, S>::COMPACT_EXTERNAL && tag == COMPACT_VEC {
-      NonZeroU8::new(EXTERNAL).unwrap()
-    } else {
-      tag
-    };
-    let layout = Layout::external(prefix, self.layout.cursor.as_ref()[0], tag);
-    #[cfg(smol_slice_atomic)]
-    // SAFETY: The source handle keeps this window and its owner live.
-    unsafe {
-      Self::retain(owner);
-    };
+    let data = self.layout.data().cast();
+    let len = self.layout.external_len();
+    let owner = self.layout.retain_owner(0, 0);
+    let layout = Layout::external(data, owner, len, Layout::<T, S>::external_kind(owner));
     Self { layout }
   }
 }
 
 #[cfg(smol_slice_atomic)]
 impl<T, S: InlineSize> Drop for Slice<T, S> {
-  #[inline]
+  #[inline(always)]
   fn drop(&mut self) {
     if self.layout.uses_external_owner() {
-      let owner = self.layout.external_prefix_mut().owner;
-      if vector::raw(owner) {
-        // SAFETY: Exclusive access confirms this descriptor never published a
-        // shared owner. Recover its entire buffer, including both hidden ends.
-        unsafe {
-          drop(vector::Vector::<T>::take_raw(
-            owner,
-            self.layout.data(),
-            self.len(),
-          ))
-        };
-        return;
-      }
-      // SAFETY: Each handle holds one reference to its original owner. Advancing
-      // changes only the window. Release exactly the reference held by this handle.
-      unsafe { owner::release_owner::<T>(owner) };
+      let prefix = *self.layout.external_prefix_mut();
+      let len = self.layout.external_len();
+      // SAFETY: This handle transfers the external owner reference and the
+      // window it describes. No concurrent promotion can access this slot.
+      unsafe { owner::release_owner::<T>(prefix.owner, prefix.data, len) };
     }
   }
 }
