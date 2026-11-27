@@ -1,5 +1,5 @@
 use bytora::{
-  AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Slice, SliceMut, SliceMutN, SliceN,
+  AssocInlineSize, InlineSize, MAX_HANDLE_BYTES, Vector, VectorMut, VectorMutN, VectorN,
   typenum::{Sum, U0, U8, U24, U4096, Unsigned},
 };
 
@@ -8,28 +8,28 @@ fn generic_sizes_work_with_both_handles() {
   fn size<S: Unsigned + core::fmt::Debug>() -> usize {
     S::USIZE
   }
-  fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<Slice<T, S>> {
-    assert_eq!(size_of::<Slice<T, S>>(), S::HANDLE_BYTES);
-    Slice::try_from_slice(values)
+  fn read<T: Copy, S: InlineSize>(values: &[T]) -> Option<Vector<T, S>> {
+    assert_eq!(size_of::<Vector<T, S>>(), S::HANDLE_BYTES);
+    Vector::try_from_slice(values)
   }
-  fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<SliceMut<T, S>> {
-    assert_eq!(size_of::<SliceMut<T, S>>(), S::HANDLE_BYTES);
-    SliceMut::try_from_slice(values)
+  fn write<T: Copy, S: InlineSize>(values: &[T]) -> Option<VectorMut<T, S>> {
+    assert_eq!(size_of::<VectorMut<T, S>>(), S::HANDLE_BYTES);
+    VectorMut::try_from_slice(values)
   }
 
   assert_eq!(size::<U0>(), 0);
   assert_eq!(size::<U24>(), 24);
   assert!(read::<u8, U0>(&[]).unwrap().is_empty());
   assert!(write::<u8, U0>(&[]).unwrap().is_empty());
-  let mut read: SliceN<u8, 24> = read::<_, U24>(b"abc").unwrap();
+  let mut read: VectorN<u8, 24> = read::<_, U24>(b"abc").unwrap();
   read.advance(1);
-  let read: Slice<u8, U24> = read;
+  let read: Vector<u8, U24> = read;
   assert_eq!(read.as_slice(), b"bc");
 
-  let mut write: SliceMutN<u8, 24> = write::<_, U24>(b"abc").unwrap();
+  let mut write: VectorMutN<u8, 24> = write::<_, U24>(b"abc").unwrap();
   write.advance(1);
   write.as_mut_slice().make_ascii_uppercase();
-  let write: SliceMut<u8, U24> = write;
+  let write: VectorMut<u8, U24> = write;
   assert_eq!(write.as_slice(), b"BC");
 }
 
@@ -37,12 +37,12 @@ fn generic_sizes_work_with_both_handles() {
 fn zero_budget_has_no_inline_elements_and_an_aligned_const_empty_window() {
   #[repr(align(128))]
   struct Aligned(core::marker::PhantomData<core::cell::Cell<u8>>);
-  let empty = const { SliceN::<Aligned, 0>::empty() };
-  assert_eq!(SliceN::<Aligned, 0>::INLINE_CAPACITY, 0);
-  assert_eq!(SliceN::<u8, 0>::INLINE_CAPACITY, 0);
-  assert_eq!(SliceN::<(), 0>::INLINE_CAPACITY, 0);
-  assert!(SliceN::<(), 0>::try_from_slice(&[()]).is_none());
-  assert_eq!(size_of::<Slice<Aligned, U0>>(), size_of::<bytes::Bytes>());
+  let empty = const { VectorN::<Aligned, 0>::empty() };
+  assert_eq!(VectorN::<Aligned, 0>::INLINE_CAPACITY, 0);
+  assert_eq!(VectorN::<u8, 0>::INLINE_CAPACITY, 0);
+  assert_eq!(VectorN::<(), 0>::INLINE_CAPACITY, 0);
+  assert!(VectorN::<(), 0>::try_from_slice(&[()]).is_none());
+  assert_eq!(size_of::<Vector<Aligned, U0>>(), size_of::<bytes::Bytes>());
   assert!(empty.clone().slice(..).is_empty());
   assert!(empty.as_slice().as_ptr().is_aligned());
 }
@@ -55,14 +55,14 @@ fn default_and_zero_budget_handles_and_options_match_bytes() {
   }
   assert_eq!(size_of::<bytes::Bytes>(), 4 * size_of::<usize>());
   assert_eq!(U0::HANDLE_BYTES, size_of::<bytes::Bytes>());
-  check::<Slice<u8>>();
-  check::<SliceN<u8, 0>>();
-  check::<SliceMut<u8>>();
-  check::<SliceMutN<u8, 0>>();
+  check::<Vector<u8>>();
+  check::<VectorN<u8, 0>>();
+  check::<VectorMut<u8>>();
+  check::<VectorMutN<u8, 0>>();
   #[cfg(any(feature = "std", feature = "alloc"))]
   {
-    check::<bytora::LocalSlice<u8>>();
-    check::<bytora::LocalSliceN<u8, 0>>();
+    check::<bytora::LocalVector<u8>>();
+    check::<bytora::LocalVectorN<u8, 0>>();
   }
 }
 
@@ -73,7 +73,7 @@ fn zero_budget_shares_the_original_atomics_across_threads() {
 
   let counters = vec![AtomicUsize::new(3), AtomicUsize::new(7)];
   let ptr = counters.as_ptr();
-  let values: Slice<AtomicUsize, U0> = SliceN::<AtomicUsize, 0>::try_from(counters).unwrap();
+  let values: Vector<AtomicUsize, U0> = VectorN::<AtomicUsize, 0>::try_from(counters).unwrap();
   assert_eq!(values.as_slice().as_ptr(), ptr);
   let mut tail = values.clone();
   tail.advance(1);
@@ -101,12 +101,12 @@ fn zero_budget_keeps_all_owned_elements_until_the_last_empty_window_drops() {
   let drops = [const { AtomicUsize::new(0) }; 3];
   let owned: Vec<_> = drops.iter().map(CountDrop).collect();
   let ptr = owned.as_ptr();
-  let whole = SliceN::<_, 0>::try_from(owned).ok().unwrap();
+  let whole = VectorN::<_, 0>::try_from(owned).ok().unwrap();
   assert_eq!(whole.as_slice().as_ptr(), ptr);
   let mut tail = whole.slice(1..);
   assert_eq!(tail.as_slice().as_ptr(), ptr.wrapping_add(1));
   tail.advance(2);
-  let mut last = SliceN::<_, 0>::empty();
+  let mut last = VectorN::<_, 0>::empty();
   last.clone_from(&tail);
   drop(whole);
   drop(tail);
@@ -121,13 +121,13 @@ fn zero_budget_keeps_all_owned_elements_until_the_last_empty_window_drops() {
 #[test]
 fn zero_budget_owned_vectors_respect_the_external_length_limit() {
   let max = isize::MAX as usize;
-  let mut largest = SliceN::<(), 0>::try_from(vec![(); max]).unwrap();
+  let mut largest = VectorN::<(), 0>::try_from(vec![(); max]).unwrap();
   assert_eq!(largest.len(), max);
   largest.advance(max - 1);
   assert_eq!(largest.clone().as_slice(), &[()]);
   let oversized = vec![(); max + 1];
   let original = (oversized.as_ptr(), oversized.len(), oversized.capacity());
-  let returned = SliceN::<(), 0>::try_from(oversized).err().unwrap();
+  let returned = VectorN::<(), 0>::try_from(oversized).err().unwrap();
   assert_eq!(
     (returned.as_ptr(), returned.len(), returned.capacity()),
     original
@@ -136,45 +136,48 @@ fn zero_budget_owned_vectors_respect_the_external_length_limit() {
 
 #[test]
 fn const_sizes_match_typenum_arithmetic_across_the_full_range() {
-  fn read<const N: usize>(values: &[u8]) -> Option<SliceN<u8, N>>
+  fn read<const N: usize>(values: &[u8]) -> Option<VectorN<u8, N>>
   where
     [u8; N]: AssocInlineSize,
   {
-    Slice::try_from_slice(values)
+    Vector::try_from_slice(values)
   }
 
   // Typenum computes this size but does not name it or map it from a const.
   type Budget = Sum<U4096, U8>;
-  let typed: Slice<u8, Budget> = read::<4104>(b"size").unwrap();
-  let numeric: SliceN<u8, 4104> = typed;
+  let typed: Vector<u8, Budget> = read::<4104>(b"size").unwrap();
+  let numeric: VectorN<u8, 4104> = typed;
   assert_eq!(numeric.as_slice(), b"size");
-  let typed: SliceMut<u8, Budget> = SliceMutN::<u8, 4104>::try_from_slice(b"size").unwrap();
-  let mut numeric: SliceMutN<u8, 4104> = typed;
+  let typed: VectorMut<u8, Budget> = VectorMutN::<u8, 4104>::try_from_slice(b"size").unwrap();
+  let mut numeric: VectorMutN<u8, 4104> = typed;
   numeric.as_mut_slice()[0] = b'S';
   assert_eq!(numeric.as_slice(), b"Size");
-  assert_eq!(size_of::<Option<Slice<u8, Budget>>>(), 4104);
-  assert_eq!(size_of::<Option<SliceMut<u8, Budget>>>(), 4104);
+  assert_eq!(size_of::<Option<Vector<u8, Budget>>>(), 4104);
+  assert_eq!(size_of::<Option<VectorMut<u8, Budget>>>(), 4104);
 }
 
 #[test]
 fn default_handles_match_bytes_and_have_the_four_word_size_type() {
   const FOUR_WORDS: usize = 4 * size_of::<usize>();
-  let read: Slice<u8> = SliceN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
-  let write: SliceMut<u8> = SliceMutN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
-  let read: SliceN<u8, FOUR_WORDS> = read;
-  let write: SliceMutN<u8, FOUR_WORDS> = write;
+  let read: Vector<u8> = VectorN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
+  let write: VectorMut<u8> = VectorMutN::<u8, FOUR_WORDS>::try_from_slice(b"a").unwrap();
+  let read: VectorN<u8, FOUR_WORDS> = read;
+  let write: VectorMutN<u8, FOUR_WORDS> = write;
   assert_eq!(read.as_slice(), b"a");
   assert_eq!(write.as_slice(), b"a");
-  assert_eq!(Slice::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
-  assert_eq!(SliceMut::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
+  assert_eq!(Vector::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
+  assert_eq!(VectorMut::<u8>::INLINE_CAPACITY, FOUR_WORDS - 2);
   let full = [7; FOUR_WORDS - 2];
-  assert_eq!(Slice::<u8>::try_from_slice(&full).unwrap().as_slice(), full);
   assert_eq!(
-    SliceMut::<u8>::try_from_slice(&full).unwrap().as_slice(),
+    Vector::<u8>::try_from_slice(&full).unwrap().as_slice(),
     full
   );
-  assert!(Slice::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
-  assert!(SliceMut::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
+  assert_eq!(
+    VectorMut::<u8>::try_from_slice(&full).unwrap().as_slice(),
+    full
+  );
+  assert!(Vector::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
+  assert!(VectorMut::<u8>::try_from_slice(&[7; FOUR_WORDS - 1]).is_none());
 }
 
 #[test]
@@ -187,25 +190,25 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
   struct NonCopy(u16);
 
   fn check_layout<T>() {
-    assert_eq!(size_of::<SliceN<T, MAX_HANDLE_BYTES>>(), MAX_HANDLE_BYTES);
+    assert_eq!(size_of::<VectorN<T, MAX_HANDLE_BYTES>>(), MAX_HANDLE_BYTES);
     assert_eq!(
-      size_of::<Option<SliceN<T, MAX_HANDLE_BYTES>>>(),
+      size_of::<Option<VectorN<T, MAX_HANDLE_BYTES>>>(),
       MAX_HANDLE_BYTES
     );
     assert_eq!(
-      size_of::<SliceMutN<T, MAX_HANDLE_BYTES>>(),
+      size_of::<VectorMutN<T, MAX_HANDLE_BYTES>>(),
       MAX_HANDLE_BYTES
     );
     assert_eq!(
-      size_of::<Option<SliceMutN<T, MAX_HANDLE_BYTES>>>(),
+      size_of::<Option<VectorMutN<T, MAX_HANDLE_BYTES>>>(),
       MAX_HANDLE_BYTES
     );
     assert_eq!(
-      align_of::<SliceN<T, MAX_HANDLE_BYTES>>(),
+      align_of::<VectorN<T, MAX_HANDLE_BYTES>>(),
       align_of::<usize>()
     );
     assert_eq!(
-      align_of::<SliceMutN<T, MAX_HANDLE_BYTES>>(),
+      align_of::<VectorMutN<T, MAX_HANDLE_BYTES>>(),
       align_of::<usize>()
     );
   }
@@ -214,24 +217,24 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
   check_layout::<Wrapped>();
   check_layout::<NonCopy>();
   assert_eq!(NonCopy(7).0, 7);
-  assert_eq!(SliceN::<u16, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
-  assert_eq!(SliceN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(VectorN::<u16, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(VectorN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
   assert_eq!(
-    SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
+    VectorMutN::<Wrapped, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
     4094
   );
-  assert_eq!(SliceN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
+  assert_eq!(VectorN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY, 4094);
   assert_eq!(
-    SliceMutN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
+    VectorMutN::<NonCopy, MAX_HANDLE_BYTES>::INLINE_CAPACITY,
     4094
   );
 
   let source = core::array::from_fn::<_, 4095, _>(|i| Wrapped(i as u16));
   let snapshot = source;
-  assert!(SliceN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  assert!(SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
-  let mut read = SliceN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
-  let mut write = SliceMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
+  assert!(VectorN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  assert!(VectorMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source).is_none());
+  let mut read = VectorN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
+  let mut write = VectorMutN::<Wrapped, MAX_HANDLE_BYTES>::try_from_slice(&source[..4094]).unwrap();
   read.advance(1);
   write.advance(1024);
   let read = core::hint::black_box(Some(read)).unwrap();
@@ -247,8 +250,8 @@ fn downstream_transparent_types_use_the_same_layout_as_u16() {
 #[test]
 fn handles_own_their_copied_elements() {
   let mut source = [2, 3, 5, 7];
-  let mut read = SliceN::<u32, 24>::try_from_slice(&source).unwrap();
-  let mut write = SliceMutN::<u32, 24>::try_from_slice(&source).unwrap();
+  let mut read = VectorN::<u32, 24>::try_from_slice(&source).unwrap();
+  let mut write = VectorMutN::<u32, 24>::try_from_slice(&source).unwrap();
   source.fill(0);
   read.advance(2);
   write.advance(1);
@@ -263,7 +266,7 @@ fn failed_advances_leave_the_window_intact() {
   where
     [u8; BYTES]: AssocInlineSize,
   {
-    let mut values = SliceMutN::<u8, BYTES>::try_from_slice(source).unwrap();
+    let mut values = VectorMutN::<u8, BYTES>::try_from_slice(source).unwrap();
     values.advance(start);
     for count in [values.len() + 1, usize::MAX] {
       assert!(
@@ -284,8 +287,8 @@ fn failed_advances_leave_the_window_intact() {
 fn owned_ranges_validate_both_bounds_against_the_current_window() {
   use core::ops::Bound::{Excluded, Included, Unbounded};
 
-  let inline = SliceN::<u8, 32>::try_from_slice(b"abcdef").unwrap();
-  let external = SliceN::<u8, 32>::try_from_static(b"abcdef").unwrap();
+  let inline = VectorN::<u8, 32>::try_from_slice(b"abcdef").unwrap();
+  let external = VectorN::<u8, 32>::try_from_static(b"abcdef").unwrap();
   for mut source in [inline, external] {
     source.advance(2);
     for bounds in [

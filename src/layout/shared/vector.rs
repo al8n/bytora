@@ -20,7 +20,7 @@ const NO_HIDDEN_ELEMENTS: *const () = ptr::without_provenance(GEOMETRY_TAG);
 const BITS: u32 = (usize::BITS - 2) / 2;
 const MASK: usize = (1 << BITS) - 1;
 
-// Every real Vector<T> contains a pointer, including headers placed in spare
+// Every real VecHeader<T> contains a pointer, including headers placed in spare
 // capacity. Four-byte pointer alignment leaves both low bits free. On some
 // 32-bit ABIs the handle also provides less alignment than atomic pointers need.
 pub(super) const AVAILABLE: bool = align_of::<*const ()>() >= 4
@@ -85,7 +85,7 @@ pub(super) fn place_header<T>(values: Vec<T>) -> (*mut T, *const ()) {
 // One spare element cannot hold a header when the element itself is smaller.
 #[inline]
 fn single_spare_needs_box<T>(values: &Vec<T>) -> bool {
-  size_of::<T>() < size_of::<Vector<T>>() && values.capacity() - values.len() == 1
+  size_of::<T>() < size_of::<VecHeader<T>>() && values.capacity() - values.len() == 1
 }
 
 #[inline(always)]
@@ -98,7 +98,7 @@ fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   };
   // SAFETY: The exclusive Vec owns these aligned bytes beyond all of its
   // initialized elements. Its raw base retains the original provenance.
-  unsafe { header.write(Vector::new(base, len | IN_TAIL, capacity, 1)) };
+  unsafe { header.write(VecHeader::new(base, len | IN_TAIL, capacity, 1)) };
   core::mem::forget(values);
   (base, header.cast())
 }
@@ -106,22 +106,22 @@ fn from_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
 #[inline(always)]
 fn box_vec<T>(mut values: Vec<T>) -> (*mut T, *const ()) {
   // Keep the input live until allocation succeeds, including on unwind.
-  let header = Box::<Vector<T>>::new_uninit();
+  let header = Box::<VecHeader<T>>::new_uninit();
   let base = values.as_mut_ptr();
-  let owner = Box::into_raw(header).cast::<Vector<T>>();
+  let owner = Box::into_raw(header).cast::<VecHeader<T>>();
   // SAFETY: The fresh box has the layout of the entire header.
-  unsafe { owner.write(Vector::new(base, values.len(), values.capacity(), 1)) };
+  unsafe { owner.write(VecHeader::new(base, values.len(), values.capacity(), 1)) };
   core::mem::forget(values);
   (base, owner.cast())
 }
 
-fn tail_header<T>(base: *mut T, len: usize, capacity: usize) -> Option<*mut Vector<T>> {
+fn tail_header<T>(base: *mut T, len: usize, capacity: usize) -> Option<*mut VecHeader<T>> {
   // Non-ZST Vec allocations are at most isize::MAX bytes. ZSTs contribute
   // zero bytes even though Vec reports usize::MAX capacity for them.
   let spare_bytes = (capacity - len) * size_of::<T>();
-  let available = spare_bytes.checked_sub(size_of::<Vector<T>>())?;
+  let available = spare_bytes.checked_sub(size_of::<VecHeader<T>>())?;
   let tail = base.wrapping_add(len).cast::<u8>();
-  let padding = tail.align_offset(align_of::<Vector<T>>());
+  let padding = tail.align_offset(align_of::<VecHeader<T>>());
   (padding <= available).then(|| tail.wrapping_add(padding).cast())
 }
 
@@ -136,14 +136,14 @@ pub(super) fn narrow(owner: *const (), front: usize, back: usize) -> Option<*con
 
 // Only a published header owns the buffer. A losing promotion candidate
 // contains inert raw parts and can be dropped without touching any T.
-pub(super) struct Vector<T> {
+pub(super) struct VecHeader<T> {
   strong: AtomicUsize,
   pub(super) base: *const T,
   len: usize,
   capacity: usize,
 }
 
-impl<T> Vector<T> {
+impl<T> VecHeader<T> {
   pub(super) fn new(base: *const T, len: usize, capacity: usize, strong: usize) -> Self {
     Self {
       strong: AtomicUsize::new(strong),
@@ -242,7 +242,7 @@ extern "C" fn refcount_overflow() -> ! {
 }
 
 pub(super) fn box_raw<T>(owner: *const (), data: *const (), len: usize) -> *const () {
-  Box::into_raw(Box::new(Vector::<T>::parts(owner, data, len, 1))).cast()
+  Box::into_raw(Box::new(VecHeader::<T>::parts(owner, data, len, 1))).cast()
 }
 
 // Publish both the source and peer counts in one step. Even if a contender
@@ -254,7 +254,7 @@ pub(super) unsafe fn promote<T>(
   len: usize,
 ) -> *const () {
   // SAFETY: The candidate represents this source plus the caller's new peer.
-  unsafe { publish(slot, owner, Vector::<T>::parts(owner, data, len, 2)) }
+  unsafe { publish(slot, owner, VecHeader::<T>::parts(owner, data, len, 2)) }
 }
 
 // The expected word belongs to the borrowed source. Its replacement must
@@ -262,7 +262,7 @@ pub(super) unsafe fn promote<T>(
 pub(super) unsafe fn publish<T>(
   slot: &AtomicPtr<()>,
   expected: *const (),
-  candidate: Vector<T>,
+  candidate: VecHeader<T>,
 ) -> *const () {
   let candidate = Box::into_raw(Box::new(candidate));
   let published = candidate.cast::<()>();
@@ -278,7 +278,7 @@ pub(super) unsafe fn publish<T>(
       // pins the winning header and this clone needs its own reference.
       unsafe {
         drop(Box::from_raw(candidate));
-        Vector::<T>::retain(winner);
+        VecHeader::<T>::retain(winner);
       }
       winner
     }
@@ -288,7 +288,7 @@ pub(super) unsafe fn publish<T>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::Slice;
+  use crate::Vector;
 
   #[test]
   fn full_length_markers_respect_the_encoding_and_alignment_limits() {
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(counts(narrow(owner, front, back).unwrap()), (front, back));
       }
     }
-    let header = Vector::<u8>::new(core::ptr::null(), 0, 0, 1);
+    let header = VecHeader::<u8>::new(core::ptr::null(), 0, 0, 1);
     let owner = core::ptr::from_ref(&header).cast();
     assert!(!raw(owner));
     assert_eq!(full_len(owner), None);
@@ -321,7 +321,7 @@ mod tests {
     let base = bytes.0.as_mut_ptr().wrapping_add(1);
     assert_eq!(base.addr() & 1, 1);
     let raw = encode(2, 1).unwrap();
-    let parts = Vector::<u8>::parts(raw, base.wrapping_add(2).cast(), 3, 1);
+    let parts = VecHeader::<u8>::parts(raw, base.wrapping_add(2).cast(), 3, 1);
     assert_eq!(
       (parts.base, parts.len, parts.capacity),
       (base.cast_const(), 6, 6)
@@ -330,8 +330,8 @@ mod tests {
 
   #[test]
   fn an_embedded_header_fits_only_in_aligned_spare_bytes_and_releases_them() {
-    let bytes = size_of::<Vector<u8>>();
-    let align = align_of::<Vector<u8>>();
+    let bytes = size_of::<VecHeader<u8>>();
+    let align = align_of::<VecHeader<u8>>();
     for len in (0..align).chain(core::iter::once(64)) {
       for spare in [1, bytes - 1, bytes, bytes + align - 1] {
         let mut values = Vec::with_capacity(len + spare);
@@ -340,7 +340,7 @@ mod tests {
         let spare = capacity - len;
         let tail = base.wrapping_add(len);
         let padding = tail.align_offset(align);
-        let source = Slice::<u8>::try_from_shared_vec(values).unwrap();
+        let source = Vector::<u8>::try_from_shared_vec(values).unwrap();
         let owner = source.layout.owner();
         assert!(!raw(owner));
         if padding <= spare && bytes <= spare - padding {
@@ -371,7 +371,7 @@ mod tests {
     // a header exactly when its bytes span one. A single spare element does so
     // only when the element is at least as large as the header.
     fn check<T: Copy>(element: T) {
-      assert!(align_of::<T>() >= align_of::<Vector<T>>());
+      assert!(align_of::<T>() >= align_of::<VecHeader<T>>());
       for len in [0, 1, 6] {
         for spare in [0, 1, 3, 4, 9] {
           let mut values = Vec::with_capacity(len + spare);
@@ -382,17 +382,17 @@ mod tests {
           let (data, owner) = place_header(values);
           assert_eq!(data, base);
           assert!(!raw(owner));
-          let header = owner.cast::<Vector<T>>();
+          let header = owner.cast::<VecHeader<T>>();
           // SAFETY: The new header is live, and this test holds its only reference.
           let (recorded, parts, strong) = unsafe {
             (
               (*header).len,
               ((*header).base, (*header).capacity),
-              Vector::<T>::strong_count(owner),
+              VecHeader::<T>::strong_count(owner),
             )
           };
           assert_eq!((parts, strong), ((base.cast_const(), capacity), 1));
-          let embedded = spare * size_of::<T>() >= size_of::<Vector<T>>();
+          let embedded = spare * size_of::<T>() >= size_of::<VecHeader<T>>();
           assert_eq!(recorded, if embedded { len | IN_TAIL } else { len });
           let offset = owner.addr().wrapping_sub(base.addr());
           if embedded {
@@ -402,7 +402,7 @@ mod tests {
             assert!(offset >= capacity * size_of::<T>());
           }
           // SAFETY: The only reference moves into the returned vector.
-          let mut original = unsafe { Vector::<T>::try_take(owner) }.unwrap();
+          let mut original = unsafe { VecHeader::<T>::try_take(owner) }.unwrap();
           assert_eq!(
             (original.as_mut_ptr(), original.len(), original.capacity()),
             (base, len, capacity)
@@ -413,7 +413,7 @@ mod tests {
         }
       }
     }
-    const { assert!(size_of::<[usize; 4]>() == size_of::<Vector<[usize; 4]>>()) };
+    const { assert!(size_of::<[usize; 4]>() == size_of::<VecHeader<[usize; 4]>>()) };
     check(usize::MAX / 3);
     check([usize::MAX / 3; 4]);
     check([usize::MAX / 3; 5]);
@@ -424,7 +424,7 @@ mod tests {
     let (data, owner) = place_header(slots);
     assert_eq!(data.cast_const(), base);
     assert!(!raw(owner));
-    let header = owner.cast::<Vector<()>>();
+    let header = owner.cast::<VecHeader<()>>();
     // SAFETY: The boxed header is live, and its only reference moves into the
     // returned vector.
     let recovered = unsafe {
@@ -432,7 +432,7 @@ mod tests {
         ((*header).base, (*header).len, (*header).capacity),
         (base, 5, usize::MAX)
       );
-      Vector::<()>::try_take(owner)
+      VecHeader::<()>::try_take(owner)
     }
     .unwrap();
     assert_eq!((recovered.as_ptr(), recovered.len()), (base, 5));
@@ -454,7 +454,7 @@ mod tests {
     for trim_front in [false, true] {
       let input = std::vec![3u8; MASK + 4];
       let (base, capacity) = (input.as_ptr(), input.capacity());
-      let mut source = Slice::<u8>::try_from_shared_vec(input).unwrap();
+      let mut source = Vector::<u8>::try_from_shared_vec(input).unwrap();
       assert_eq!(raw(source.layout.owner()), AVAILABLE);
       if trim_front {
         source.advance(MASK + 1);

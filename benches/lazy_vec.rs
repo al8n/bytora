@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(bytora_atomic)]
 mod ownership {
   use bytes::Bytes;
-  use bytora::{InlineSize, Slice, SliceN};
+  use bytora::{InlineSize, Vector, VectorN};
   use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime};
   use std::{
     hint::black_box,
@@ -21,29 +21,35 @@ mod ownership {
   const OUTPUT_BYTES: usize = 32;
   const BATCH: BatchSize = BatchSize::NumIterations(64);
   const DIRECT_BATCH: usize = 64;
-  type DefaultSlice = Slice<u8>;
-  type ZeroSlice = Slice<u8, typenum::U0>;
-  type PackedSlice = SliceN<u8, { 3 * size_of::<usize>() }>;
-  type WideSlice = SliceN<u8, 32>;
+  type DefaultVector = Vector<u8>;
+  type ZeroVector = Vector<u8, typenum::U0>;
+  type PackedVector = VectorN<u8, { 3 * size_of::<usize>() }>;
+  type WideVector = VectorN<u8, 32>;
   const PACKED_LABEL: &str = if cfg!(target_pointer_width = "32") {
-    "slice_12"
+    "vector_12"
   } else {
-    "slice_24"
+    "vector_24"
   };
 
   // All construction and clone results use the same output stride.
   // Round trips all return a Vec directly.
   const _: () = {
-    assert!(size_of::<DefaultSlice>() <= OUTPUT_BYTES);
-    assert!(size_of::<WideSlice>() == OUTPUT_BYTES);
+    assert!(size_of::<DefaultVector>() <= OUTPUT_BYTES);
+    assert!(size_of::<WideVector>() == OUTPUT_BYTES);
     assert!(size_of::<Bytes>() <= OUTPUT_BYTES);
     assert!(
-      size_of::<(DefaultSlice, [u8; OUTPUT_BYTES - size_of::<DefaultSlice>()])>() == OUTPUT_BYTES
+      size_of::<(
+        DefaultVector,
+        [u8; OUTPUT_BYTES - size_of::<DefaultVector>()]
+      )>()
+        == OUTPUT_BYTES
     );
-    assert!(size_of::<(WideSlice, [u8; OUTPUT_BYTES - size_of::<WideSlice>()])>() == OUTPUT_BYTES);
+    assert!(
+      size_of::<(WideVector, [u8; OUTPUT_BYTES - size_of::<WideVector>()])>() == OUTPUT_BYTES
+    );
     assert!(size_of::<(Bytes, [u8; OUTPUT_BYTES - size_of::<Bytes>()])>() == OUTPUT_BYTES);
-    assert!(DefaultSlice::INLINE_CAPACITY < LEN);
-    assert!(WideSlice::INLINE_CAPACITY < LEN);
+    assert!(DefaultVector::INLINE_CAPACITY < LEN);
+    assert!(WideVector::INLINE_CAPACITY < LEN);
   };
 
   #[derive(Clone, Copy)]
@@ -83,16 +89,16 @@ mod ownership {
     }
   }
 
-  fn slice_preflight<S: InlineSize>(kind: Capacity) {
+  fn vector_preflight<S: InlineSize>(kind: Capacity) {
     let values = input(kind);
     let pointer = values.as_ptr();
     let capacity = values.capacity();
     check_input(&values, capacity, kind);
-    let slice = Slice::<u8, S>::try_from_vec(values).unwrap();
-    assert_eq!(slice.as_slice(), CONTENTS);
-    assert_eq!(slice.as_slice().as_ptr(), pointer);
-    assert!(slice.is_unique());
-    let values = slice.try_into_vec().ok().expect("unique slice");
+    let vector = Vector::<u8, S>::try_from_vec(values).unwrap();
+    assert_eq!(vector.as_slice(), CONTENTS);
+    assert_eq!(vector.as_slice().as_ptr(), pointer);
+    assert!(vector.is_unique());
+    let values = vector.try_into_vec().ok().expect("unique vector");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(values, CONTENTS);
@@ -100,17 +106,17 @@ mod ownership {
     let values = input(kind);
     let pointer = values.as_ptr();
     let capacity = values.capacity();
-    let slice = Slice::<u8, S>::try_from_vec(values).unwrap();
-    let cloned = slice.clone();
+    let vector = Vector::<u8, S>::try_from_vec(values).unwrap();
+    let cloned = vector.clone();
     assert_eq!(cloned.as_slice(), CONTENTS);
     assert_eq!(cloned.as_slice().as_ptr(), pointer);
-    let warmed = slice.clone();
+    let warmed = vector.clone();
     assert_eq!(warmed.as_slice(), CONTENTS);
     assert_eq!(warmed.as_slice().as_ptr(), pointer);
     drop(warmed);
-    let slice = slice.try_into_vec().expect_err("slice is shared");
+    let vector = vector.try_into_vec().expect_err("vector is shared");
     drop(cloned);
-    let values = slice.try_into_vec().ok().expect("slice is unique again");
+    let values = vector.try_into_vec().ok().expect("vector is unique again");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(values, CONTENTS);
@@ -164,8 +170,8 @@ mod ownership {
     let values: Vec<_> = (0..LEN).map(|_| DropProbe(drops.clone())).collect();
     let pointer = values.as_ptr();
     let capacity = values.capacity();
-    let slice = Slice::<DropProbe, S>::try_from_shared_vec(values).expect("shared slice fits");
-    let values = slice.try_into_vec().ok().expect("unique slice");
+    let vector = Vector::<DropProbe, S>::try_from_shared_vec(values).expect("shared vector fits");
+    let values = vector.try_into_vec().ok().expect("unique vector");
     assert_eq!(values.as_ptr(), pointer);
     assert_eq!(values.capacity(), capacity);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -173,9 +179,9 @@ mod ownership {
     assert_eq!(drops.load(Ordering::Relaxed), LEN);
 
     let values: Vec<_> = (0..LEN).map(|_| DropProbe(drops.clone())).collect();
-    let slice = Slice::<DropProbe, S>::try_from_shared_vec(values).expect("shared slice fits");
-    let cloned = slice.clone();
-    drop(slice);
+    let vector = Vector::<DropProbe, S>::try_from_shared_vec(values).expect("shared vector fits");
+    let cloned = vector.clone();
+    drop(vector);
     assert_eq!(drops.load(Ordering::Relaxed), LEN);
     drop(cloned);
     assert_eq!(drops.load(Ordering::Relaxed), LEN * 2);
@@ -311,7 +317,7 @@ mod ownership {
     #[cfg(not(feature = "extra-platforms"))]
     type AtomicPtr = std::sync::atomic::AtomicPtr<()>;
 
-    let bytes = size_of::<Slice<u8, S>>();
+    let bytes = size_of::<Vector<u8, S>>();
     let word = size_of::<usize>();
     bytes >= 3 * word
       || (bytes == 2 * word
@@ -321,45 +327,45 @@ mod ownership {
         && size_of::<*mut ()>() % align_of::<AtomicPtr>() == 0)
   }
 
-  fn short_slice_cases<S: InlineSize, const PAD: usize>(
+  fn short_vector_cases<S: InlineSize, const PAD: usize>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     label: &str,
   ) {
     let values = short_input();
     assert_eq!(values.capacity(), SHORT_LEN);
     let pointer = values.as_ptr();
-    let slice = Slice::<u8, S>::try_from_vec(values).unwrap();
-    assert_eq!(slice.as_slice(), &CONTENTS[..SHORT_LEN]);
-    assert!(slice.is_unique());
+    let vector = Vector::<u8, S>::try_from_vec(values).unwrap();
+    assert_eq!(vector.as_slice(), &CONTENTS[..SHORT_LEN]);
+    assert!(vector.is_unique());
     if short_vec_is_adopted::<S>() {
-      assert_eq!(slice.as_slice().as_ptr(), pointer);
-      let values = slice.try_into_vec().ok().expect("unique slice");
+      assert_eq!(vector.as_slice().as_ptr(), pointer);
+      let values = vector.try_into_vec().ok().expect("unique vector");
       assert_eq!(values.as_ptr(), pointer);
       assert_eq!(values.capacity(), SHORT_LEN);
       assert_eq!(values, &CONTENTS[..SHORT_LEN]);
     } else {
-      assert_ne!(slice.as_slice().as_ptr(), pointer);
+      assert_ne!(vector.as_slice().as_ptr(), pointer);
     }
-    short_construct::<Slice<u8, S>, PAD>(group, format!("from_vec/{label}"), |values| {
-      Slice::<u8, S>::try_from_vec(values).unwrap()
+    short_construct::<Vector<u8, S>, PAD>(group, format!("from_vec/{label}"), |values| {
+      Vector::<u8, S>::try_from_vec(values).unwrap()
     });
 
     let values = short_input();
     let pointer = values.as_ptr();
-    let shared = Slice::<u8, S>::try_from_shared_vec(values);
+    let shared = Vector::<u8, S>::try_from_shared_vec(values);
     if short_vec_is_adopted::<S>() {
-      let shared = shared.expect("external slice fits");
+      let shared = shared.expect("external vector fits");
       assert_eq!(shared.as_slice(), &CONTENTS[..SHORT_LEN]);
       assert_eq!(shared.as_slice().as_ptr(), pointer);
       assert!(shared.is_unique());
-      let values = shared.try_into_vec().ok().expect("unique slice");
+      let values = shared.try_into_vec().ok().expect("unique vector");
       assert_eq!(values.as_ptr(), pointer);
       assert_eq!(values.capacity(), SHORT_LEN);
-      short_construct::<Slice<u8, S>, PAD>(group, format!("from_shared_vec/{label}"), |values| {
-        Slice::<u8, S>::try_from_shared_vec(values).unwrap()
+      short_construct::<Vector<u8, S>, PAD>(group, format!("from_shared_vec/{label}"), |values| {
+        Vector::<u8, S>::try_from_shared_vec(values).unwrap()
       });
     } else {
-      let values = shared.err().expect("external slice does not fit");
+      let values = shared.err().expect("external vector does not fit");
       assert_eq!(values, &CONTENTS[..SHORT_LEN]);
       assert_eq!(values.capacity(), SHORT_LEN);
     }
@@ -378,33 +384,38 @@ mod ownership {
     assert_eq!(values.capacity(), SHORT_LEN);
 
     let mut group = c.benchmark_group("short_vec");
-    short_slice_cases::<typenum::U8, { OUTPUT_BYTES - size_of::<SliceN<u8, 8>>() }>(
-      &mut group, "slice_8",
+    short_vector_cases::<typenum::U8, { OUTPUT_BYTES - size_of::<VectorN<u8, 8>>() }>(
+      &mut group, "vector_8",
     );
-    short_slice_cases::<typenum::U16, { OUTPUT_BYTES - size_of::<SliceN<u8, 16>>() }>(
-      &mut group, "slice_16",
+    short_vector_cases::<typenum::U16, { OUTPUT_BYTES - size_of::<VectorN<u8, 16>>() }>(
+      &mut group,
+      "vector_16",
     );
-    short_slice_cases::<
-      <DefaultSlice as SliceSize>::Size,
-      { OUTPUT_BYTES - size_of::<DefaultSlice>() },
-    >(&mut group, "slice_default");
-    short_slice_cases::<
-      <PackedSlice as SliceSize>::Size,
-      { OUTPUT_BYTES - size_of::<PackedSlice>() },
+    short_vector_cases::<
+      <DefaultVector as VectorSize>::Size,
+      { OUTPUT_BYTES - size_of::<DefaultVector>() },
+    >(&mut group, "vector_default");
+    short_vector_cases::<
+      <PackedVector as VectorSize>::Size,
+      { OUTPUT_BYTES - size_of::<PackedVector>() },
     >(&mut group, PACKED_LABEL);
-    short_slice_cases::<typenum::U32, { OUTPUT_BYTES - size_of::<WideSlice>() }>(
-      &mut group, "slice_32",
+    short_vector_cases::<typenum::U32, { OUTPUT_BYTES - size_of::<WideVector>() }>(
+      &mut group,
+      "vector_32",
     );
     #[cfg(target_pointer_width = "32")]
     {
-      short_slice_cases::<typenum::U20, { OUTPUT_BYTES - size_of::<SliceN<u8, 20>>() }>(
-        &mut group, "slice_20",
+      short_vector_cases::<typenum::U20, { OUTPUT_BYTES - size_of::<VectorN<u8, 20>>() }>(
+        &mut group,
+        "vector_20",
       );
-      short_slice_cases::<typenum::U24, { OUTPUT_BYTES - size_of::<SliceN<u8, 24>>() }>(
-        &mut group, "slice_24",
+      short_vector_cases::<typenum::U24, { OUTPUT_BYTES - size_of::<VectorN<u8, 24>>() }>(
+        &mut group,
+        "vector_24",
       );
-      short_slice_cases::<typenum::U28, { OUTPUT_BYTES - size_of::<SliceN<u8, 28>>() }>(
-        &mut group, "slice_28",
+      short_vector_cases::<typenum::U28, { OUTPUT_BYTES - size_of::<VectorN<u8, 28>>() }>(
+        &mut group,
+        "vector_28",
       );
     }
     short_construct::<Bytes, { OUTPUT_BYTES - size_of::<Bytes>() }>(
@@ -417,83 +428,83 @@ mod ownership {
 
   pub fn benchmarks(c: &mut Criterion) {
     for kind in [Capacity::Exact, Capacity::OneSpare, Capacity::Spare] {
-      slice_preflight::<<DefaultSlice as SliceSize>::Size>(kind);
-      slice_preflight::<typenum::U0>(kind);
-      slice_preflight::<<PackedSlice as SliceSize>::Size>(kind);
-      slice_preflight::<<WideSlice as SliceSize>::Size>(kind);
+      vector_preflight::<<DefaultVector as VectorSize>::Size>(kind);
+      vector_preflight::<typenum::U0>(kind);
+      vector_preflight::<<PackedVector as VectorSize>::Size>(kind);
+      vector_preflight::<<WideVector as VectorSize>::Size>(kind);
       #[cfg(target_pointer_width = "32")]
       {
-        slice_preflight::<typenum::U16>(kind);
-        slice_preflight::<typenum::U20>(kind);
-        slice_preflight::<typenum::U24>(kind);
-        slice_preflight::<typenum::U28>(kind);
+        vector_preflight::<typenum::U16>(kind);
+        vector_preflight::<typenum::U20>(kind);
+        vector_preflight::<typenum::U24>(kind);
+        vector_preflight::<typenum::U28>(kind);
       }
       bytes_preflight(kind);
     }
-    drop_preflight::<<DefaultSlice as SliceSize>::Size>();
+    drop_preflight::<<DefaultVector as VectorSize>::Size>();
     drop_preflight::<typenum::U0>();
-    drop_preflight::<<PackedSlice as SliceSize>::Size>();
-    drop_preflight::<<WideSlice as SliceSize>::Size>();
+    drop_preflight::<<PackedVector as VectorSize>::Size>();
+    drop_preflight::<<WideVector as VectorSize>::Size>();
 
     let mut group = c.benchmark_group("lazy_vec");
     for kind in [Capacity::Exact, Capacity::OneSpare, Capacity::Spare] {
-      cases::<DefaultSlice, { OUTPUT_BYTES - size_of::<DefaultSlice>() }>(
+      cases::<DefaultVector, { OUTPUT_BYTES - size_of::<DefaultVector>() }>(
         &mut group,
-        "slice_default",
+        "vector_default",
         kind,
-        |values| DefaultSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
+        |values| DefaultVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
       );
-      cases::<ZeroSlice, { OUTPUT_BYTES - size_of::<ZeroSlice>() }>(
+      cases::<ZeroVector, { OUTPUT_BYTES - size_of::<ZeroVector>() }>(
         &mut group,
-        "slice_zero",
+        "vector_zero",
         kind,
-        |values| ZeroSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
+        |values| ZeroVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
       );
-      cases::<PackedSlice, { OUTPUT_BYTES - size_of::<PackedSlice>() }>(
+      cases::<PackedVector, { OUTPUT_BYTES - size_of::<PackedVector>() }>(
         &mut group,
         PACKED_LABEL,
         kind,
-        |values| PackedSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
+        |values| PackedVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
       );
-      cases::<WideSlice, { OUTPUT_BYTES - size_of::<WideSlice>() }>(
+      cases::<WideVector, { OUTPUT_BYTES - size_of::<WideVector>() }>(
         &mut group,
-        "slice_32",
+        "vector_32",
         kind,
-        |values| WideSlice::try_from_vec(values).unwrap(),
-        |slice| slice.try_into_vec().ok().expect("unique slice"),
+        |values| WideVector::try_from_vec(values).unwrap(),
+        |vector| vector.try_into_vec().ok().expect("unique vector"),
       );
       #[cfg(target_pointer_width = "32")]
       {
-        cases::<SliceN<u8, 16>, { OUTPUT_BYTES - size_of::<SliceN<u8, 16>>() }>(
+        cases::<VectorN<u8, 16>, { OUTPUT_BYTES - size_of::<VectorN<u8, 16>>() }>(
           &mut group,
-          "slice_16",
+          "vector_16",
           kind,
-          |values| SliceN::<u8, 16>::try_from_vec(values).unwrap(),
-          |slice| slice.try_into_vec().ok().expect("unique slice"),
+          |values| VectorN::<u8, 16>::try_from_vec(values).unwrap(),
+          |vector| vector.try_into_vec().ok().expect("unique vector"),
         );
-        cases::<SliceN<u8, 20>, { OUTPUT_BYTES - size_of::<SliceN<u8, 20>>() }>(
+        cases::<VectorN<u8, 20>, { OUTPUT_BYTES - size_of::<VectorN<u8, 20>>() }>(
           &mut group,
-          "slice_20",
+          "vector_20",
           kind,
-          |values| SliceN::<u8, 20>::try_from_vec(values).unwrap(),
-          |slice| slice.try_into_vec().ok().expect("unique slice"),
+          |values| VectorN::<u8, 20>::try_from_vec(values).unwrap(),
+          |vector| vector.try_into_vec().ok().expect("unique vector"),
         );
-        cases::<SliceN<u8, 24>, { OUTPUT_BYTES - size_of::<SliceN<u8, 24>>() }>(
+        cases::<VectorN<u8, 24>, { OUTPUT_BYTES - size_of::<VectorN<u8, 24>>() }>(
           &mut group,
-          "slice_24",
+          "vector_24",
           kind,
-          |values| SliceN::<u8, 24>::try_from_vec(values).unwrap(),
-          |slice| slice.try_into_vec().ok().expect("unique slice"),
+          |values| VectorN::<u8, 24>::try_from_vec(values).unwrap(),
+          |vector| vector.try_into_vec().ok().expect("unique vector"),
         );
-        cases::<SliceN<u8, 28>, { OUTPUT_BYTES - size_of::<SliceN<u8, 28>>() }>(
+        cases::<VectorN<u8, 28>, { OUTPUT_BYTES - size_of::<VectorN<u8, 28>>() }>(
           &mut group,
-          "slice_28",
+          "vector_28",
           kind,
-          |values| SliceN::<u8, 28>::try_from_vec(values).unwrap(),
-          |slice| slice.try_into_vec().ok().expect("unique slice"),
+          |values| VectorN::<u8, 28>::try_from_vec(values).unwrap(),
+          |vector| vector.try_into_vec().ok().expect("unique vector"),
         );
       }
       cases::<Bytes, { OUTPUT_BYTES - size_of::<Bytes>() }>(
@@ -508,12 +519,12 @@ mod ownership {
     short_benchmarks(c);
   }
 
-  // Extract the sealed type-level size from each public Slice alias.
-  trait SliceSize {
+  // Extract the sealed type-level size from each public Vector alias.
+  trait VectorSize {
     type Size: InlineSize;
   }
 
-  impl<T, S: InlineSize> SliceSize for Slice<T, S> {
+  impl<T, S: InlineSize> VectorSize for Vector<T, S> {
     type Size = S;
   }
 }

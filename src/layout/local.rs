@@ -18,21 +18,21 @@ use std::rc::Rc;
 ///
 /// ```compile_fail
 /// fn send<T: Send>() {}
-/// send::<bytora::LocalSlice<u8>>();
+/// send::<bytora::LocalVector<u8>>();
 /// ```
 ///
 /// ```compile_fail
 /// fn sync<T: Sync>() {}
-/// sync::<bytora::LocalSlice<u8>>();
+/// sync::<bytora::LocalVector<u8>>();
 /// ```
 #[repr(transparent)]
-pub struct LocalSlice<T, S: InlineSize = DefaultSize> {
+pub struct LocalVector<T, S: InlineSize = DefaultSize> {
   layout: Layout<T, S>,
   _owner: PhantomData<Rc<[T]>>,
 }
 
-/// A thread-local shared slice with byte budget `N`.
-pub type LocalSliceN<T, const N: usize> = LocalSlice<T, <[u8; N] as AssocInlineSize>::Size>;
+/// A thread-local shared vector with byte budget `N`.
+pub type LocalVectorN<T, const N: usize> = LocalVector<T, <[u8; N] as AssocInlineSize>::Size>;
 
 // Odd owner words encode the hidden prefix and suffix of a directly held
 // Rc<[T]>. Even words are real Rc::into_raw pointers to aligned metadata.
@@ -52,7 +52,7 @@ enum Backing<T> {
   Indirect(*const Owner<T>),
 }
 
-impl<T> LocalSlice<T> {
+impl<T> LocalVector<T> {
   /// Takes a reference to the original `Rc` allocation in a four-word handle.
   ///
   /// # Panics
@@ -64,7 +64,7 @@ impl<T> LocalSlice<T> {
   }
 }
 
-impl<T, S: InlineSize> LocalSlice<T, S> {
+impl<T, S: InlineSize> LocalVector<T, S> {
   /// Adopts an existing strong reference without copying or allocating.
   /// Returns the original `Rc` if the handle is smaller than three words
   /// or the slice contains more than `isize::MAX` elements.
@@ -85,7 +85,7 @@ impl<T, S: InlineSize> LocalSlice<T, S> {
   }
 
   fn owner_word(&self) -> *const () {
-    // SAFETY: LocalSlice only constructs external descriptors. Its owner
+    // SAFETY: LocalVector only constructs external descriptors. Its owner
     // word never changes through a shared reference.
     unsafe { (*self.layout.external_ptr()).owner }
   }
@@ -211,7 +211,7 @@ impl<T, S: InlineSize> LocalSlice<T, S> {
   }
 }
 
-impl<T, S: InlineSize> TryFrom<Rc<[T]>> for LocalSlice<T, S> {
+impl<T, S: InlineSize> TryFrom<Rc<[T]>> for LocalVector<T, S> {
   type Error = Rc<[T]>;
 
   fn try_from(values: Rc<[T]>) -> Result<Self, Self::Error> {
@@ -219,7 +219,7 @@ impl<T, S: InlineSize> TryFrom<Rc<[T]>> for LocalSlice<T, S> {
   }
 }
 
-impl<T, S: InlineSize> Clone for LocalSlice<T, S> {
+impl<T, S: InlineSize> Clone for LocalVector<T, S> {
   fn clone(&self) -> Self {
     // SAFETY: The source pins the allocation that produced this raw pointer.
     // The new descriptor owns exactly the additional reference taken here.
@@ -236,7 +236,7 @@ impl<T, S: InlineSize> Clone for LocalSlice<T, S> {
   }
 }
 
-impl<T, S: InlineSize> Drop for LocalSlice<T, S> {
+impl<T, S: InlineSize> Drop for LocalVector<T, S> {
   fn drop(&mut self) {
     // SAFETY: This descriptor owns exactly one reference of the selected
     // type. Releasing the original Rc drops all of its initialized elements.

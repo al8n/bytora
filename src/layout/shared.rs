@@ -1,7 +1,7 @@
 #[cfg(any(feature = "std", feature = "alloc"))]
 use super::mutable::Window;
 use super::{COMPACT_STATIC, EXTERNAL, ExternalPrefix, InlineSize, Layout};
-use crate::{Slice, SliceMut};
+use crate::{Vector, VectorMut};
 use core::{mem::ManuallyDrop, num::NonZeroU8, ops::Range, ptr, slice};
 #[cfg(all(bytora_atomic, feature = "extra-platforms"))]
 pub(super) use portable_atomic_util::Arc;
@@ -193,7 +193,7 @@ impl<T, S: InlineSize> Layout<T, S> {
         return vector::publish(
           self.owner_slot(),
           owner,
-          vector::Vector::<T>::new(data.cast(), full_len, full_len, 2),
+          vector::VecHeader::<T>::new(data.cast(), full_len, full_len, 2),
         );
       }
       if vector::raw(owner) {
@@ -249,7 +249,7 @@ impl<T, S: InlineSize> Layout<T, S> {
   }
 }
 
-impl<T> Slice<T, typenum::U0> {
+impl<T> Vector<T, typenum::U0> {
   /// Creates an empty four-word handle with zero inline capacity.
   /// This uses only `core` and works for every element type.
   pub const fn empty() -> Self {
@@ -264,12 +264,12 @@ impl<T> Slice<T, typenum::U0> {
 /// Shares a vector's buffer with zero inline capacity. An allocated input
 /// keeps its original pointer and capacity, even when its length is zero.
 /// Clones and ranges share the elements. An empty vector without an
-/// allocation yields [`Slice::empty`].
+/// allocation yields [`Vector::empty`].
 ///
 /// Returns the original vector if it contains more than `isize::MAX` elements.
 /// `Send + Sync` allows the owning handles to be cloned and used across threads.
 #[cfg(bytora_atomic)]
-impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
+impl<T: Send + Sync> TryFrom<Vec<T>> for Vector<T, typenum::U0> {
   type Error = Vec<T>;
 
   fn try_from(values: Vec<T>) -> Result<Self, Self::Error> {
@@ -281,7 +281,7 @@ impl<T: Send + Sync> TryFrom<Vec<T>> for Slice<T, typenum::U0> {
 }
 
 #[cfg(bytora_atomic)]
-impl<T: Send + Sync, S: InlineSize> TryFrom<Box<[T]>> for Slice<T, S> {
+impl<T: Send + Sync, S: InlineSize> TryFrom<Box<[T]>> for Vector<T, S> {
   type Error = Box<[T]>;
 
   fn try_from(values: Box<[T]>) -> Result<Self, Self::Error> {
@@ -291,21 +291,21 @@ impl<T: Send + Sync, S: InlineSize> TryFrom<Box<[T]>> for Slice<T, S> {
 
 /// Transfers a movable window or clones the visible elements of a shared one.
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl<T: Clone, S: InlineSize> From<Slice<T, S>> for Vec<T> {
-  fn from(slice: Slice<T, S>) -> Self {
-    slice.into_vec()
+impl<T: Clone, S: InlineSize> From<Vector<T, S>> for Vec<T> {
+  fn from(vector: Vector<T, S>) -> Self {
+    vector.into_vec()
   }
 }
 
 /// Transfers a mutable window or clones the visible elements of a shared one.
 #[cfg(any(feature = "std", feature = "alloc"))]
-impl<T: Clone, S: InlineSize> From<Slice<T, S>> for SliceMut<T, S> {
-  fn from(slice: Slice<T, S>) -> Self {
-    slice.into_mut()
+impl<T: Clone, S: InlineSize> From<Vector<T, S>> for VectorMut<T, S> {
+  fn from(vector: Vector<T, S>) -> Self {
+    vector.into_mut()
   }
 }
 
-impl<T> Slice<T> {
+impl<T> Vector<T> {
   /// Borrows an owner's slice without copying and drops the owner after all
   /// clones and subranges are gone.
   ///
@@ -338,7 +338,7 @@ impl<T> Slice<T> {
   }
 }
 
-impl<T, S: InlineSize> Slice<T, S> {
+impl<T, S: InlineSize> Vector<T, S> {
   /// Reports whether the current window can become mutable without copying.
   /// An inline handle owns its elements. A vector or frozen mutable window
   /// must have a single immutable owner. Static slices, Arc slices and custom
@@ -361,12 +361,12 @@ impl<T, S: InlineSize> Slice<T, S> {
     false
   }
 
-  fn into_inline_mut(self) -> SliceMut<T, S> {
+  fn into_inline_mut(self) -> VectorMut<T, S> {
     debug_assert!(self.layout.is_inline());
     let this = ManuallyDrop::new(self);
     // SAFETY: Transfer the inline elements and cursor exactly once. The move
     // does not require the current T to be Copy after a subtype coercion.
-    SliceMut::from_inline_layout(unsafe { ptr::read(&this.layout) })
+    VectorMut::from_inline_layout(unsafe { ptr::read(&this.layout) })
   }
 
   #[cfg(bytora_atomic)]
@@ -387,11 +387,11 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Returns the original handle if another immutable view shares the backing
   /// or the storage was supplied by a static slice, Arc slice or custom owner.
   ///
-  /// Thawing an empty inline slice, including one created by [`Self::new`],
+  /// Thawing an empty inline vector, including one created by [`Self::new`],
   /// gives the mutable handle zero capacity. Growing that handle requires a
-  /// budget and feature set that support heap storage. `SliceMut::new`
+  /// budget and feature set that support heap storage. `VectorMut::new`
   /// starts with writable inline capacity for positive budgets and `Copy` elements.
-  pub fn try_into_mut(self) -> Result<SliceMut<T, S>, Self> {
+  pub fn try_into_mut(self) -> Result<VectorMut<T, S>, Self> {
     if self.layout.is_inline() {
       return Ok(self.into_inline_mut());
     }
@@ -405,7 +405,7 @@ impl<T, S: InlineSize> Slice<T, S> {
       let (owner, data, len) = (prefix.owner, prefix.data, this.layout.external_len());
       // SAFETY: The reference is restored only if the take callback returns None.
       match unsafe { Self::take_external(owner, data, len, |ops| ops.into_mut) } {
-        Some(window) => Ok(SliceMut::from_window(window)),
+        Some(window) => Ok(VectorMut::from_window(window)),
         None => Err(ManuallyDrop::into_inner(this)),
       }
     }
@@ -416,13 +416,13 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// Takes exclusive access to the current window, cloning its elements only
   /// when the backing is read-only or another immutable view shares it.
   #[cfg(any(feature = "std", feature = "alloc"))]
-  pub fn into_mut(self) -> SliceMut<T, S>
+  pub fn into_mut(self) -> VectorMut<T, S>
   where
     T: Clone,
   {
     self
       .try_into_mut()
-      .unwrap_or_else(|shared| SliceMut::from_window(Window::from_vec(shared.as_slice().to_vec())))
+      .unwrap_or_else(|shared| VectorMut::from_window(Window::from_vec(shared.as_slice().to_vec())))
   }
 
   /// Moves the current window into a vector without cloning elements. An
@@ -567,10 +567,10 @@ impl<T, S: InlineSize> Slice<T, S> {
   ///
   /// ```compile_fail
   /// use core::cell::Cell;
-  /// use bytora::Slice;
+  /// use bytora::Vector;
   ///
-  /// fn handle(cells: &'static [Cell<u8>]) -> Slice<Cell<u8>> {
-  ///     Slice::from_static(cells)
+  /// fn handle(cells: &'static [Cell<u8>]) -> Vector<Cell<u8>> {
+  ///     Vector::from_static(cells)
   /// }
   /// ```
   pub const fn try_from_static(values: &'static [T]) -> Option<Self>
@@ -667,7 +667,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   /// the allocation even if the elements would fit inline. On eligible targets,
   /// exact-capacity vectors of non-zero-sized elements defer allocating an owner
   /// until first shared or until their hidden ends outgrow the descriptor.
-  /// Vectors with spare capacity store their owner in the aligned tail of the
+  /// `Vec`s with spare capacity store their owner in the aligned tail of the
   /// allocation when it fits, or allocate a separate owner at construction.
   /// Zero-sized vectors keep an owner that records their original pointer and
   /// logical offsets.
@@ -684,7 +684,7 @@ impl<T, S: InlineSize> Slice<T, S> {
   where
     T: Send + Sync,
   {
-    const { assert!(align_of::<vector::Vector<T>>() >= 2) };
+    const { assert!(align_of::<vector::VecHeader<T>>() >= 2) };
     let len = values.len();
     if Layout::<T, S>::fits_two_word_vec(len) {
       return Ok(Self {
@@ -791,7 +791,7 @@ impl<T, S: InlineSize> Slice<T, S> {
           return unsafe { self.slice_tagged_owner(owner, range, len) };
         }
         // SAFETY: Only an initialized, pinned Vec header has both low bits clear.
-        unsafe { vector::Vector::<T>::retain(owner) };
+        unsafe { vector::VecHeader::<T>::retain(owner) };
         (owner.cast_const(), NonZeroU8::new(EXTERNAL).unwrap())
       } else {
         // A short static window has this tag in either descriptor size.
@@ -959,7 +959,7 @@ impl<T, S: InlineSize> Slice<T, S> {
           vector::publish(
             slot,
             owner,
-            vector::Vector::<T>::new(data.cast(), len, len, 2),
+            vector::VecHeader::<T>::new(data.cast(), len, len, 2),
           )
         } else {
           vector::promote::<T>(slot, owner, data, self.layout.external_len())
@@ -1006,7 +1006,7 @@ impl<T, S: InlineSize> Slice<T, S> {
         if owner.addr() & 1 != 0 || vector::raw(owner) {
           return self.clone_tagged_owner(owner);
         }
-        vector::Vector::<T>::retain(owner);
+        vector::VecHeader::<T>::retain(owner);
         return self.copy_retained_descriptor(owner);
       }
     }
@@ -1064,7 +1064,7 @@ impl<T, S: InlineSize> Slice<T, S> {
 }
 
 #[cfg(bytora_atomic)]
-impl<T, S: InlineSize> Drop for Slice<T, S> {
+impl<T, S: InlineSize> Drop for Vector<T, S> {
   #[inline(always)]
   fn drop(&mut self) {
     if self.layout.is_two_word_vec() {

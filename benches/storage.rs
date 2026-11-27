@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use bytora::{AssocInlineSize, InlineSize, Slice, SliceN};
+use bytora::{AssocInlineSize, InlineSize, Vector, VectorN};
 use criterion::{
   Bencher, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
@@ -123,11 +123,11 @@ fn clone_preflight<T: Clone>(source: &T, method: CloneMethod, empty: fn() -> T) 
   }
 }
 
-fn empty_slice<S: InlineSize>() -> Slice<u8, S> {
-  Slice::<u8, S>::try_from_slice(&[]).unwrap()
+fn empty_vector<S: InlineSize>() -> Vector<u8, S> {
+  Vector::<u8, S>::try_from_slice(&[]).unwrap()
 }
 
-fn slice_bytes<const N: usize>(source: &SliceN<u8, N>) -> &[u8]
+fn vector_bytes<const N: usize>(source: &VectorN<u8, N>) -> &[u8]
 where
   [u8; N]: AssocInlineSize,
 {
@@ -183,41 +183,41 @@ where
   [u8; N]: AssocInlineSize,
 {
   let expected = if N == 0 { size_of::<Bytes>() } else { N };
-  assert_eq!(size_of::<SliceN<u8, N>>(), expected);
-  assert_eq!(size_of::<Option<SliceN<u8, N>>>(), expected);
+  assert_eq!(size_of::<VectorN<u8, N>>(), expected);
+  assert_eq!(size_of::<Option<VectorN<u8, N>>>(), expected);
 }
 
 fn budget<const N: usize>(group: &mut BenchmarkGroup<'_, WallTime>)
 where
   [u8; N]: AssocInlineSize,
 {
-  let label = format!("n_{N}_handle_{}", size_of::<SliceN<u8, N>>());
-  let empty = empty_slice::<<[u8; N] as AssocInlineSize>::Size>;
+  let label = format!("n_{N}_handle_{}", size_of::<VectorN<u8, N>>());
+  let empty = empty_vector::<<[u8; N] as AssocInlineSize>::Size>;
   let contents = &PAYLOAD[..7];
-  if let Some(source) = SliceN::<u8, N>::try_from_slice(contents) {
+  if let Some(source) = VectorN::<u8, N>::try_from_slice(contents) {
     register_case(
       group,
       "inline",
       &label,
       &source,
       empty,
-      slice_bytes::<N>,
+      vector_bytes::<N>,
       contents,
       None,
     );
   } else {
-    assert!(SliceN::<u8, N>::INLINE_CAPACITY < contents.len());
+    assert!(VectorN::<u8, N>::INLINE_CAPACITY < contents.len());
     eprintln!("storage: inline/{label} unsupported; skipped");
   }
 
-  if let Some(source) = SliceN::<u8, N>::try_from_static(&PAYLOAD) {
+  if let Some(source) = VectorN::<u8, N>::try_from_static(&PAYLOAD) {
     register_case(
       group,
       "static",
       &label,
       &source,
       empty,
-      slice_bytes::<N>,
+      vector_bytes::<N>,
       &PAYLOAD,
       Some(PAYLOAD.as_ptr()),
     );
@@ -225,10 +225,10 @@ where
     eprintln!("storage: static/{label} unsupported; skipped");
   }
 
-  assert!(PAYLOAD.len() > SliceN::<u8, N>::INLINE_CAPACITY);
+  assert!(PAYLOAD.len() > VectorN::<u8, N>::INLINE_CAPACITY);
   let values = PAYLOAD.to_vec();
   let pointer = values.as_ptr();
-  match SliceN::<u8, N>::try_from_vec(values) {
+  match VectorN::<u8, N>::try_from_vec(values) {
     Ok(owner) => {
       assert_eq!(owner.as_slice(), &PAYLOAD);
       assert_eq!(owner.as_slice().as_ptr(), pointer);
@@ -241,7 +241,7 @@ where
         &label,
         &source,
         empty,
-        slice_bytes::<N>,
+        vector_bytes::<N>,
         &PAYLOAD,
         Some(pointer),
       );

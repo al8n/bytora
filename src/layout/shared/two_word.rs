@@ -1,5 +1,5 @@
-use super::vector::{self, AtomicPtr, Vector};
-use super::{HandleWord, InlineSize, Layout, Slice, SliceMut, Window};
+use super::vector::{self, AtomicPtr, VecHeader};
+use super::{HandleWord, InlineSize, Layout, Vector, VectorMut, Window};
 use core::{
   mem::{ManuallyDrop, MaybeUninit},
   num::NonZeroU8,
@@ -120,15 +120,15 @@ impl<T, S: InlineSize> Layout<T, S> {
     layout
   }
 
-  fn two_word_header(state: *mut (), meta: usize, strong: usize) -> Vector<T> {
+  fn two_word_header(state: *mut (), meta: usize, strong: usize) -> VecHeader<T> {
     let len = meta & MAX_LEN;
-    Vector::new(raw_base(state, meta), len, len, strong)
+    VecHeader::new(raw_base(state, meta), len, len, strong)
   }
 
   pub(super) fn two_word_unique(&self) -> bool {
     let state = self.two_word_slot().load(Ordering::Acquire);
     // SAFETY: An even pointer identifies the header pinned by this handle.
-    state.addr() & 1 != 0 || unsafe { Vector::<T>::strong_count(state) == 1 }
+    state.addr() & 1 != 0 || unsafe { VecHeader::<T>::strong_count(state) == 1 }
   }
 
   pub(super) fn two_word_slice(&self) -> &[T] {
@@ -138,7 +138,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       raw_base(state, meta)
     } else {
       // SAFETY: Acquire observes a fully initialized live header.
-      unsafe { (*state.cast::<Vector<T>>()).base }
+      unsafe { (*state.cast::<VecHeader<T>>()).base }
     };
     // SAFETY: The checked, immutable window stays within the original
     // allocation, which remains pinned across a concurrent promotion.
@@ -157,7 +157,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       unsafe { vector::publish(slot, state, Self::two_word_header(state, meta, 2)) }
     } else {
       // SAFETY: This source pins a published header. Retain it for the peer.
-      unsafe { Vector::<T>::retain(state) };
+      unsafe { VecHeader::<T>::retain(state) };
       state.cast_const()
     };
     Self::two_words(owner.cast_mut(), new_meta)
@@ -185,7 +185,7 @@ impl<T, S: InlineSize> Layout<T, S> {
       return Some(unsafe { Vec::from_raw_parts(raw_base(state, meta), len, len) });
     }
     // SAFETY: Only a successful take consumes this strong reference.
-    unsafe { Vector::<T>::try_take(state) }
+    unsafe { VecHeader::<T>::try_take(state) }
   }
 
   pub(super) unsafe fn drop_two_word(&mut self) {
@@ -197,12 +197,12 @@ impl<T, S: InlineSize> Layout<T, S> {
       unsafe { drop(Vec::<T>::from_raw_parts(raw_base(state, meta), len, len)) };
     } else {
       // SAFETY: The descriptor transfers its owned reference to the header.
-      unsafe { Vector::<T>::release(state) };
+      unsafe { VecHeader::<T>::release(state) };
     }
   }
 }
 
-impl<T, S: InlineSize> Slice<T, S> {
+impl<T, S: InlineSize> Vector<T, S> {
   #[inline]
   pub(super) fn take_two_word_vec(self) -> Result<Vec<T>, Self> {
     let mut this = ManuallyDrop::new(self);
@@ -279,7 +279,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     Some(original)
   }
 
-  pub(super) fn take_two_word_mut(self) -> Result<SliceMut<T, S>, Self> {
+  pub(super) fn take_two_word_mut(self) -> Result<VectorMut<T, S>, Self> {
     let mut this = ManuallyDrop::new(self);
     let meta = this.layout.two_word_meta();
     // SAFETY: On success, the mutable window owns the complete original
@@ -289,7 +289,7 @@ impl<T, S: InlineSize> Slice<T, S> {
     };
     let start = start(meta);
     let range = start..start + (meta & MAX_LEN);
-    Ok(SliceMut::from_window(
+    Ok(VectorMut::from_window(
       Window::from_vec(original).keep_range(range),
     ))
   }
@@ -298,10 +298,10 @@ impl<T, S: InlineSize> Slice<T, S> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::SliceN;
+  use crate::VectorN;
   use std::vec;
 
-  type TwoWord<T> = SliceN<T, { 2 * size_of::<usize>() }>;
+  type TwoWord<T> = VectorN<T, { 2 * size_of::<usize>() }>;
 
   #[test]
   fn two_word_full_take_preserves_the_input_allocation() {
@@ -323,13 +323,13 @@ mod tests {
       let mut values = Vec::with_capacity(len + spare);
       values.extend(0..len);
       let (base, capacity) = (values.as_ptr(), values.capacity());
-      let mut slice = TwoWord::try_from_vec(values).unwrap();
-      assert_eq!(slice.layout.exclusive_state().addr() & 1 != 0, spare == 0);
-      slice.advance(0);
-      slice.truncate(len);
-      assert!(slice.is_unique());
-      assert_eq!(slice.as_slice().as_ptr(), base);
-      let mut slot = Some(slice);
+      let mut vector = TwoWord::try_from_vec(values).unwrap();
+      assert_eq!(vector.layout.exclusive_state().addr() & 1 != 0, spare == 0);
+      vector.advance(0);
+      vector.truncate(len);
+      assert!(vector.is_unique());
+      assert_eq!(vector.as_slice().as_ptr(), base);
+      let mut slot = Some(vector);
       let returned = core::hint::black_box(slot.take().unwrap())
         .try_into_vec()
         .ok()
@@ -399,15 +399,15 @@ mod tests {
               // SAFETY: An even state is the live header this handle owns.
               let (held, strong) = unsafe {
                 (
-                  (*state.cast::<Vector<T>>()).base,
-                  Vector::<T>::strong_count(state),
+                  (*state.cast::<VecHeader<T>>()).base,
+                  VecHeader::<T>::strong_count(state),
                 )
               };
               assert_eq!((held, strong), (base, 1));
               let offset = state.addr().wrapping_sub(base.addr());
-              if spare * size_of::<T>() >= size_of::<Vector<T>>() {
+              if spare * size_of::<T>() >= size_of::<VecHeader<T>>() {
                 // Nothing pads a word-aligned tail.
-                assert!(align_of::<T>() >= align_of::<Vector<T>>());
+                assert!(align_of::<T>() >= align_of::<VecHeader<T>>());
                 assert_eq!(offset, len * size_of::<T>());
               } else {
                 // A box lies outside every byte of the vector's allocation.
@@ -430,7 +430,7 @@ mod tests {
         }
       }
     }
-    const { assert!(size_of::<[usize; 4]>() == size_of::<Vector<[usize; 4]>>()) };
+    const { assert!(size_of::<[usize; 4]>() == size_of::<VecHeader<[usize; 4]>>()) };
     for shared in [false, true] {
       check(usize::MAX / 3, shared);
       // One spare element of this size holds the header itself.
@@ -722,7 +722,7 @@ mod tests {
       assert_eq!((returned.as_ptr(), returned.capacity()), (base, capacity));
     }
     let mut head =
-      crate::SliceMutN::<_, { 2 * size_of::<usize>() }>::try_from_vec(b"abcd".to_vec()).unwrap();
+      crate::VectorMutN::<_, { 2 * size_of::<usize>() }>::try_from_vec(b"abcd".to_vec()).unwrap();
     let tail = head.split_off(2);
     let tail_base = tail.as_slice().as_ptr();
     drop(head);
