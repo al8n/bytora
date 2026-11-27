@@ -5,10 +5,6 @@
 #![deny(missing_docs)]
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
-#[allow(
-  unused_extern_crates,
-  reason = "atomics-free targets only use alloc in layout assertions"
-)]
 extern crate alloc as std;
 
 #[cfg(feature = "std")]
@@ -143,60 +139,17 @@ impl<T, S: InlineSize> Clone for Slice<T, S> {
   }
 }
 
-/// An owned slice whose inline `Copy` elements can be borrowed mutably.
+/// An owned slice with exclusive access to its elements.
 ///
-/// The byte budget `S` follows the same sizing rules as [`Slice`]. It defaults
-/// to three machine words, the size of a `Vec<T>`. Use [`SliceMutN`] for a numeric byte budget.
-#[repr(transparent)]
-pub struct SliceMut<T, S: InlineSize = DefaultSize> {
-  layout: Layout<T, S>,
-}
+/// Positive budgets store `Copy` elements inline. [`typenum::U0`] disables
+/// inline elements and can own a vector of any element type with `alloc` or
+/// `std`. The default budget is three machine words, the size of a `Vec<T>`.
+/// Use [`SliceMutN`] for a numeric byte budget.
+pub type SliceMut<T, S = DefaultSize> =
+  layout::mutable::Mutable<T, S, <S as InlineSize>::Mutable<T>>;
 
 /// A [`SliceMut`] with byte budget `N`. Zero disables inline elements.
 pub type SliceMutN<T, const N: usize> = SliceMut<T, <[u8; N] as AssocInlineSize>::Size>;
-
-impl<T, S: InlineSize> SliceMut<T, S> {
-  /// The maximum number of inline elements, as in [`Slice::INLINE_CAPACITY`].
-  pub const INLINE_CAPACITY: usize = Slice::<T, S>::INLINE_CAPACITY;
-
-  /// Copies `values` inline. Returns `None` if their length exceeds [`Self::INLINE_CAPACITY`].
-  pub fn try_from_slice(values: &[T]) -> Option<Self>
-  where
-    T: Copy,
-  {
-    Layout::try_inline(values).map(|layout| Self { layout })
-  }
-
-  /// Borrows the remaining elements.
-  pub fn as_slice(&self) -> &[T] {
-    self.layout.as_slice()
-  }
-
-  /// Mutably borrows the remaining elements.
-  pub fn as_mut_slice(&mut self) -> &mut [T] {
-    self.layout.as_mut_slice()
-  }
-
-  /// Returns the number of remaining elements.
-  pub fn len(&self) -> usize {
-    self.layout.len()
-  }
-
-  /// Returns whether the remaining slice is empty.
-  pub fn is_empty(&self) -> bool {
-    self.len() == 0
-  }
-
-  /// Skips the first `count` remaining elements.
-  ///
-  /// # Panics
-  ///
-  /// Panics if `count` exceeds [`Self::len`].
-  #[track_caller]
-  pub fn advance(&mut self, count: usize) {
-    self.layout.advance(count);
-  }
-}
 
 const _: () = {
   assert!(size_of::<Slice<u32>>() == 3 * size_of::<usize>());
