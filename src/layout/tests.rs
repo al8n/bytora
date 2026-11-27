@@ -89,3 +89,10 @@ fn external_descriptors_cannot_be_borrowed_as_inline_elements() {
   let repr = Layout::<u8, U24>::try_external(ptr::null(), ptr::null(), 1).unwrap();
   let _ = repr.as_slice();
 }
+
+#[test]
+#[should_panic(expected = "expected inline storage")]
+fn external_descriptors_cannot_be_cloned_as_inline_elements() {
+  let repr = Layout::<u8, U24>::try_external(ptr::null(), ptr::null(), 1).unwrap();
+  let _ = repr.clone_inline();
+}
