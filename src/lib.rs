@@ -131,7 +131,10 @@ impl<T, S: InlineSize> Vector<T, S> {
 impl<T, S: InlineSize> Clone for Vector<T, S> {
   #[inline]
   fn clone(&self) -> Self {
-    if Layout::<T, S>::COMPACT_EXTERNAL || Layout::<T, S>::SPARSE_CLONE {
+    if Layout::<T, S>::COMPACT_EXTERNAL {
+      return self.clone_compact();
+    }
+    if Layout::<T, S>::SPARSE_CLONE {
       return self.clone_descriptor();
     }
     if !self.layout.is_inline() {
