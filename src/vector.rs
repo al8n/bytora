@@ -96,7 +96,6 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// Returns [`OutOfBounds`] if `at` exceeds [`Self::len`], and leaves `self`
   /// unchanged.
-  #[inline]
   pub fn try_split_off(&mut self, at: usize) -> Result<Self, OutOfBounds> {
     let len = self.len();
     if at > len {
@@ -146,7 +145,6 @@ impl<T, S: InlineSize> Vector<T, S> {
   ///
   /// Returns [`OutOfBounds`] if `at` exceeds [`Self::len`], and leaves `self`
   /// unchanged.
-  #[inline]
   pub fn try_split_to(&mut self, at: usize) -> Result<Self, OutOfBounds> {
     let len = self.len();
     if at > len {

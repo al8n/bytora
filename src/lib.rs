@@ -175,11 +175,22 @@ impl<T, S: InlineSize> Vector<T, S> {
   /// Skips the first `count` remaining elements, or returns an error where
   /// [`Self::advance`] panics.
   pub fn try_advance(&mut self, count: usize) -> Result<(), OutOfBounds> {
+    // The layout is tested first, as advance tests it, and each arm prechecks
+    // the length its own assert reads. A check before the dispatch stays a
+    // second compare in every arm.
+    if !self.layout.is_inline() {
+      let len = self.len();
+      if count > len {
+        return Err(OutOfBounds::new(count, len));
+      }
+      self.advance_shared(count);
+      return Ok(());
+    }
     let len = self.len();
     if count > len {
       return Err(OutOfBounds::new(count, len));
     }
-    self.advance(count);
+    self.layout.advance(count);
     Ok(())
   }
 }

@@ -401,11 +401,25 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   /// Skips the first `count` elements, or returns an error where
   /// [`Self::advance`] panics.
   pub fn try_advance(&mut self, count: usize) -> Result<(), OutOfBounds> {
+    // The storage is tested first, as advance tests it, and each arm prechecks
+    // the length its own assert reads. A check before the dispatch stays a
+    // second compare in every arm.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if let Some(window) = self.window_mut() {
+      let len = window.len();
+      if count > len {
+        return Err(OutOfBounds::new(count, len));
+      }
+      window.advance(count);
+      return Ok(());
+    }
     let len = self.len();
     if count > len {
       return Err(OutOfBounds::new(count, len));
     }
-    self.advance(count);
+    if count != 0 {
+      self.storage.layout_mut().advance(count);
+    }
     Ok(())
   }
 
@@ -782,7 +796,6 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// Returns [`OutOfBounds`] if `at` exceeds the current length, and leaves
   /// the buffer unchanged.
-  #[inline]
   pub fn try_split_to(&mut self, at: usize) -> Result<Self, OutOfBounds> {
     let len = self.len();
     if at > len {
