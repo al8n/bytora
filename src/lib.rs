@@ -15,6 +15,7 @@ extern crate alloc as std;
 extern crate std;
 
 mod layout;
+use core::ops::{Bound, RangeBounds};
 use layout::Layout;
 pub use layout::{AssocInlineSize, InlineSize, MAX_HANDLE_BYTES};
 pub use typenum;
@@ -57,6 +58,35 @@ impl<T, S: InlineSize> Slice<T, S> {
       return self.shared_slice();
     }
     self.layout.as_slice()
+  }
+
+  /// Returns an independent view of a range of the remaining elements.
+  ///
+  /// Static and heap-backed ranges share their original storage, including
+  /// empty ranges. Slicing an inline value copies the handle.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the range starts after its end, exceeds [`Self::len`], or
+  /// cannot be represented as a half-open range.
+  #[track_caller]
+  pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
+    let start = match range.start_bound() {
+      Bound::Included(&start) => start,
+      Bound::Excluded(&start) => start.checked_add(1).expect("slice start overflow"),
+      Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+      Bound::Included(&end) => end.checked_add(1).expect("slice end overflow"),
+      Bound::Excluded(&end) => end,
+      Bound::Unbounded => self.len(),
+    };
+    if !self.layout.is_inline() {
+      return self.slice_shared(start..end);
+    }
+    Self {
+      layout: self.layout.slice_inline(start..end),
+    }
   }
 
   /// Returns the number of remaining elements.

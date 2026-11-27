@@ -120,11 +120,14 @@ struct CustomSize;
 impl InlineSize for CustomSize {}
 ```
 
-## Cloning and shared storage
+## Cloning, slicing, and shared storage
 
 Cloning an inline `Slice` copies the entire handle, including its cursor.
+`Slice::slice(range)` returns an independent window relative to the current
+view. It copies an inline handle once. A static or heap-backed window keeps
+pointing into the original storage, even if the range is short or empty.
 `Slice::from_static` borrows a `&'static [T]` directly, even for short inputs.
-Construction, cloning, and dropping use no allocations or reference counts.
+Constructing, slicing, cloning, and dropping static handles use no allocations or reference counts.
 Static storage works with just `core` on targets with or without atomics.
 Elements can be any `Sync` type, including types with no `Clone` implementation.
 
@@ -132,8 +135,7 @@ Elements can be any `Sync` type, including types with no `Clone` implementation.
 use smol_slice::{Slice, SliceN};
 
 static HEADER: Slice<u8> = Slice::from_static(b"content-type");
-let mut field = HEADER.clone();
-field.advance(8);
+let field = HEADER.slice(8..);
 assert_eq!(field.as_slice(), b"type");
 assert_eq!(field.as_slice().as_ptr(), HEADER.as_slice()[8..].as_ptr());
 assert!(SliceN::<u8, 8>::try_from_static(b"id").is_none());
@@ -146,7 +148,7 @@ below three words or its length exceeds `isize::MAX` elements. The default
 With the `std` or `alloc` feature on targets with pointer-width atomics,
 `Slice::try_from_vec` takes a `Vec<T>` of `Copy + Send + Sync` elements. It
 copies short inputs inline. For larger inputs it retains the vector's buffer
-and allocates a shared owner. Each clone increments the owner's atomic
+and allocates a shared owner. Each clone or range increments the owner's atomic
 reference count and keeps its own cursor. Dropping the last handle frees the
 owner and the vector.
 
