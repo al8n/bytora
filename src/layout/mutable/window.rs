@@ -42,27 +42,41 @@ impl<T> Allocation<T> {
     unsafe { Vec::from_raw_parts(allocation.base.as_ptr(), len, allocation.capacity) }
   }
 
+  // The capacity grow asks for: Vec's amortized growth, twice the capacity
+  // and at least the required length and Vec's smallest non-zero capacity,
+  // but capped at the length limit, as grown_capacity is. The caller keeps
+  // `len + additional` within the limit.
+  fn grown_capacity(&self, len: usize, additional: usize) -> usize {
+    grown_capacity::<T>(self.capacity, len + additional)
+      .max(min_non_zero_capacity::<T>().min(max_len::<T>()))
+  }
+
+  // Makes room for `additional` slots after the first `len`, which it keeps.
+  // The caller keeps `len + additional` within the length limit.
   fn grow(&mut self, len: usize, additional: usize) {
-    // SAFETY: The window has exclusive use of the whole allocation. MaybeUninit
-    // has T's layout and permits moving all the slots, including their padding.
-    // On capacity overflow reserve panics with the original Vec still intact;
-    // ManuallyDrop leaves ownership with self on that path too.
-    let mut buffer = ManuallyDrop::new(unsafe {
-      Vec::from_raw_parts(
-        self.base.as_ptr().cast::<MaybeUninit<T>>(),
-        len,
-        self.capacity,
-      )
-    });
-    buffer.reserve(additional);
-    self.base = NonNull::new(buffer.as_mut_ptr().cast()).unwrap();
-    self.capacity = buffer.capacity();
+    if additional <= self.capacity - len {
+      return;
+    }
+    let capacity = self.grown_capacity(len, additional);
+    self.grow_to(len, capacity);
   }
 
   // grow's twin: on failure the allocation and its contents are untouched.
   fn try_grow(&mut self, len: usize, additional: usize) -> Result<(), TryReserveError> {
-    // SAFETY: As in grow. On failure try_reserve leaves the Vec intact, and
-    // ManuallyDrop leaves ownership with self.
+    if additional <= self.capacity - len {
+      return Ok(());
+    }
+    let capacity = self.grown_capacity(len, additional);
+    self.try_grow_to(len, capacity)
+  }
+
+  // Grows the allocation to exactly `capacity` slots, keeping the first `len`
+  // in place. The caller keeps `len <= capacity <= max_len`.
+  fn grow_to(&mut self, len: usize, capacity: usize) {
+    // SAFETY: The window has exclusive use of the whole allocation. MaybeUninit
+    // has T's layout and permits moving all the slots, including their padding.
+    // On capacity overflow reserve_exact panics with the original Vec still
+    // intact; ManuallyDrop leaves ownership with self on that path too.
     let mut buffer = ManuallyDrop::new(unsafe {
       Vec::from_raw_parts(
         self.base.as_ptr().cast::<MaybeUninit<T>>(),
@@ -70,10 +84,25 @@ impl<T> Allocation<T> {
         self.capacity,
       )
     });
-    let capacity = buffer.capacity();
+    buffer.reserve_exact(capacity - len);
+    self.base = NonNull::new(buffer.as_mut_ptr().cast()).unwrap();
+    self.capacity = buffer.capacity();
+  }
+
+  // grow_to's twin: on failure the allocation and its contents are untouched.
+  fn try_grow_to(&mut self, len: usize, capacity: usize) -> Result<(), TryReserveError> {
+    // SAFETY: As in grow_to. On failure try_reserve_exact leaves the Vec intact,
+    // and ManuallyDrop leaves ownership with self.
+    let mut buffer = ManuallyDrop::new(unsafe {
+      Vec::from_raw_parts(
+        self.base.as_ptr().cast::<MaybeUninit<T>>(),
+        len,
+        self.capacity,
+      )
+    });
     buffer
-      .try_reserve(additional)
-      .map_err(|_| amortized_error::<T>(len, additional, capacity))?;
+      .try_reserve_exact(capacity - len)
+      .map_err(|_| exact_error::<T>(capacity))?;
     self.base = NonNull::new(buffer.as_mut_ptr().cast()).unwrap();
     self.capacity = buffer.capacity();
     Ok(())
@@ -82,7 +111,7 @@ impl<T> Allocation<T> {
 
 // The most elements an allocation can hold: isize::MAX bytes, or any number of
 // zero-sized elements.
-const fn max_len<T>() -> usize {
+pub(super) const fn max_len<T>() -> usize {
   if size_of::<T>() == 0 {
     usize::MAX
   } else {
@@ -101,14 +130,22 @@ pub(super) fn exact_error<T>(required: usize) -> TryReserveError {
   }
 }
 
-// An amortized request asks for at least twice the capacity, so it overflows
-// where the requested length alone would not, as reserve's panic does.
-fn amortized_error<T>(len: usize, additional: usize, capacity: usize) -> TryReserveError {
-  match len.checked_add(additional) {
-    Some(required) if required.max(capacity.saturating_mul(2)) <= max_len::<T>() => {
-      TryReserveError::AllocError
-    }
-    _ => TryReserveError::CapacityOverflow,
+// The capacity an amortized growth asks for: twice the old capacity, and at
+// least the required length, but never past the length limit. Vec doubles
+// past it and then refuses, which made reserve panic, and its twin fail, on a
+// length that fits. `required` must not exceed the limit.
+fn grown_capacity<T>(capacity: usize, required: usize) -> usize {
+  required.max(capacity.saturating_mul(2).min(max_len::<T>()))
+}
+
+// Vec's smallest non-zero capacity, the floor of its amortized growth.
+const fn min_non_zero_capacity<T>() -> usize {
+  if size_of::<T>() == 1 {
+    8
+  } else if size_of::<T>() <= 1024 {
+    4
+  } else {
+    1
   }
 }
 
@@ -277,6 +314,11 @@ impl<T> Window<T> {
     self.reclaim(additional, false)
   }
 
+  // Makes room in place where it can. An amortized reserve compacts only once
+  // the consumed prefix is at least as long as the elements, which pays for
+  // the move: sliding a full buffer forward one element at a time must not
+  // move the whole active range at each append. An explicit try_reclaim can
+  // always take that tradeoff.
   fn reclaim(&mut self, additional: usize, amortized: bool) -> bool {
     if additional <= self.limit - self.end {
       return true;
@@ -300,9 +342,6 @@ impl<T> Window<T> {
 
   #[track_caller]
   pub(super) fn reserve(&mut self, additional: usize) {
-    // Sliding a full buffer forward one element at a time must not move the
-    // whole active range at each append. Rebase only once the freed prefix
-    // pays for the move. Explicit try_reclaim can always take that tradeoff.
     if self.reclaim(additional, true) {
       return;
     }
@@ -316,54 +355,71 @@ impl<T> Window<T> {
       isize::MAX as usize / size_of::<T>()
     };
     assert!(required <= max, "capacity overflow");
+    let (len, end) = (self.len(), self.end);
     if let Some(allocation) = self.buffer.exclusive() {
-      // Preserve the cursor so Vec's geometric growth leaves room after it.
-      // If the offset itself would exceed the allocation limit (notably for
-      // a near-maximum ZST length), compact once to make the request fit.
-      if additional > max - self.end {
-        let capacity = allocation.capacity;
-        self.compact(0, capacity);
+      if additional <= max - end {
+        // Preserve the cursor so the geometric growth leaves room after it.
+        allocation.grow(end, additional);
+        self.limit = allocation.capacity;
+        return;
       }
-      let allocation = self.buffer.exclusive().unwrap();
-      allocation.grow(self.end, additional);
-      self.limit = allocation.capacity;
+      // The offset would put a growth in place past the length limit
+      // (notably for a near-maximum ZST length). Grow, where the allocation
+      // cannot already hold the request, with the slots kept in place, and
+      // then compact. try_reserve takes the same steps, so that its refused
+      // growth leaves the window as it was.
+      if additional > allocation.capacity - len {
+        let capacity = allocation.grown_capacity(len, additional);
+        allocation.grow_to(end, capacity);
+      }
+      let capacity = allocation.capacity;
+      self.compact(0, capacity);
     } else {
-      let capacity = required.max(self.capacity().saturating_mul(2).min(max));
+      let capacity = grown_capacity::<T>(self.capacity(), required);
       let mut values = Vec::with_capacity(capacity);
       self.move_visible(&mut values);
       *self = Self::from_vec(values);
     }
   }
 
-  // reserve's twin: an error where reserve panics or the allocation fails. On
-  // an error the window's elements are unchanged; a compaction it made first
-  // only moves them within their allocation.
+  // reserve's twin: an error where reserve panics or the allocation fails, and
+  // on an error the window is as it was.
   pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
     if self.reclaim(additional, true) {
       return Ok(());
     }
     let max = max_len::<T>();
-    let required = match self.len().checked_add(additional) {
+    let (len, end, visible) = (self.len(), self.end, self.capacity());
+    let required = match len.checked_add(additional) {
       Some(required) if required <= max => required,
       _ => return Err(TryReserveError::CapacityOverflow),
     };
     if let Some(allocation) = self.buffer.exclusive() {
-      if additional > max - self.end {
-        let capacity = allocation.capacity;
-        self.compact(0, capacity);
+      if additional <= max - end {
+        allocation.try_grow(end, additional)?;
+        self.limit = allocation.capacity;
+        return Ok(());
       }
-      let allocation = self.buffer.exclusive().unwrap();
-      allocation.try_grow(self.end, additional)?;
-      self.limit = allocation.capacity;
-    } else {
-      let capacity = required.max(self.capacity().saturating_mul(2).min(max));
-      let mut values = Vec::new();
-      values
-        .try_reserve_exact(capacity)
-        .map_err(|_| exact_error::<T>(capacity))?;
-      self.move_visible(&mut values);
-      *self = Self::from_vec(values);
+      // As reserve: grow where the allocation cannot already hold the
+      // request, then compact. A refused growth leaves the window as it was.
+      if additional > allocation.capacity - len {
+        let capacity = allocation.grown_capacity(len, additional);
+        allocation.try_grow_to(end, capacity)?;
+      }
+      let capacity = allocation.capacity;
+      self.compact(0, capacity);
+      return Ok(());
     }
+    // A shared allocation: the elements move to a new allocation of the
+    // capacity reserve makes. It is made first, so a refusal leaves this
+    // window as it was.
+    let capacity = grown_capacity::<T>(visible, required);
+    let mut values = Vec::new();
+    values
+      .try_reserve_exact(capacity)
+      .map_err(|_| exact_error::<T>(capacity))?;
+    self.move_visible(&mut values);
+    *self = Self::from_vec(values);
     Ok(())
   }
 
@@ -478,3 +534,6 @@ impl<T> Drop for Window<T> {
     unsafe { self.drop_elements(self.owned_start..self.end) };
   }
 }
+
+#[cfg(test)]
+mod tests;
