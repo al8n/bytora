@@ -1,5 +1,8 @@
 use super::{EXTERNAL, Layout};
-use crate::{AssocInlineSize, DefaultSize, InlineSize, checked_range};
+use crate::{
+  AssocInlineSize, DefaultSize, InlineSize, OutOfBounds, RangeOutOfBounds, checked_range,
+  try_checked_range,
+};
 use core::{
   marker::PhantomData,
   num::NonZeroU8,
@@ -162,7 +165,8 @@ impl<T, S: InlineSize> LocalVector<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if the range is outside the current window.
+  /// Panics if the range is outside the current window. [`Self::try_slice`]
+  /// returns an error instead.
   #[track_caller]
   pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
     let range = checked_range(range, self.len());
@@ -171,17 +175,36 @@ impl<T, S: InlineSize> LocalVector<T, S> {
     peer
   }
 
+  /// Shares a subrange with an independent cursor, or returns an error where
+  /// [`Self::slice`] panics.
+  pub fn try_slice(&self, range: impl RangeBounds<usize>) -> Result<Self, RangeOutOfBounds> {
+    let range = try_checked_range(range, self.len())?;
+    Ok(self.slice(range))
+  }
+
   /// Skips `count` elements at the front.
   ///
   /// # Panics
   ///
-  /// Panics if `count` exceeds the current length.
+  /// Panics if `count` exceeds the current length. [`Self::try_advance`]
+  /// returns an error instead.
   #[track_caller]
   pub fn advance(&mut self, count: usize) {
     assert!(count <= self.len(), "advance past end");
     if count != 0 {
       self.keep_range(count..self.len());
     }
+  }
+
+  /// Skips `count` elements at the front, or returns an error where
+  /// [`Self::advance`] panics.
+  pub fn try_advance(&mut self, count: usize) -> Result<(), OutOfBounds> {
+    let len = self.len();
+    if count > len {
+      return Err(OutOfBounds::new(count, len));
+    }
+    self.advance(count);
+    Ok(())
   }
 
   /// Keeps the first `len` elements, or the whole window when it is shorter.

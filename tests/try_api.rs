@@ -305,3 +305,193 @@ fn errors_convert_into_io_errors() {
   assert_eq!(put.kind(), ErrorKind::Other);
   assert!(put.get_ref().is_some_and(|inner| inner.is::<TryPutError>()));
 }
+
+#[test]
+fn ranged_twins_err_exactly_where_the_ranged_methods_panic() {
+  use core::ops::Bound::{Excluded, Unbounded};
+
+  fn check<S: InlineSize>(source: Vector<u8, S>) {
+    let len = source.len();
+    for start in 0..=len + 1 {
+      for end in 0..=len + 1 {
+        match source.try_slice(start..end) {
+          Ok(range) => assert_eq!(range, source.slice(start..end)),
+          Err(error) => {
+            assert_eq!(error, RangeOutOfBounds::new(start, end, len));
+            let message = panic_message(|| {
+              let _ = source.slice(start..end);
+            });
+            assert_eq!(message, "slice range out of bounds");
+          }
+        }
+      }
+    }
+    // An endpoint past usize::MAX is reported as usize::MAX.
+    assert_eq!(
+      source
+        .try_slice((Excluded(usize::MAX), Unbounded))
+        .unwrap_err(),
+      RangeOutOfBounds::new(usize::MAX, len, len)
+    );
+    assert_eq!(
+      source.try_slice(..=usize::MAX).unwrap_err(),
+      RangeOutOfBounds::new(0, usize::MAX, len)
+    );
+  }
+  check(VectorN::<u8, 32>::try_from_slice(b"abcdef").unwrap());
+  check(Vector::<u8>::from_static(b"static window"));
+
+  let mut buffer = VectorMut::<u8>::new();
+  buffer.extend_from_slice(b"abc");
+  assert_eq!(
+    buffer.try_extend_from_within(2..5).unwrap_err(),
+    ByteEditError::Range(RangeOutOfBounds::new(2, 5, 3))
+  );
+  assert_eq!(buffer.as_slice(), b"abc");
+  buffer.try_extend_from_within(1..3).unwrap();
+  assert_eq!(buffer.as_slice(), b"abcbc");
+}
+
+#[test]
+fn advance_twins_err_exactly_where_advance_panics() {
+  fn check<S: InlineSize>(source: Vector<u8, S>) {
+    let len = source.len();
+    for count in 0..=len + 1 {
+      let mut fallible = source.clone();
+      let mut panicking = source.clone();
+      if count <= len {
+        panicking.advance(count);
+        fallible.try_advance(count).unwrap();
+        assert_eq!(fallible, panicking);
+      } else {
+        assert_eq!(
+          fallible.try_advance(count).unwrap_err(),
+          OutOfBounds::new(count, len)
+        );
+        assert_eq!(fallible, source);
+        assert_eq!(
+          panic_message(|| panicking.advance(count)),
+          "advance past end"
+        );
+      }
+    }
+  }
+  check(VectorN::<u8, 32>::try_from_slice(b"abcdef").unwrap());
+  check(Vector::<u8>::from_static(b"static window"));
+
+  let mut buffer = VectorMut::<u8>::new();
+  buffer.extend_from_slice(b"abc");
+  assert_eq!(buffer.try_advance(4).unwrap_err(), OutOfBounds::new(4, 3));
+  assert_eq!(buffer.as_slice(), b"abc");
+  buffer.try_advance(2).unwrap();
+  assert_eq!(buffer.as_slice(), b"c");
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[test]
+fn local_twins_err_exactly_where_the_local_methods_panic() {
+  use bytora::LocalVector;
+  let source = LocalVector::<u8>::from_rc(std::rc::Rc::from(&b"abcdef"[..]));
+  let len = source.len();
+  for start in 0..=len + 1 {
+    for end in 0..=len + 1 {
+      match source.try_slice(start..end) {
+        Ok(range) => assert_eq!(range.as_slice(), source.slice(start..end).as_slice()),
+        Err(error) => assert_eq!(error, RangeOutOfBounds::new(start, end, len)),
+      }
+    }
+  }
+  let mut fallible = source.clone();
+  assert_eq!(
+    fallible.try_advance(len + 1).unwrap_err(),
+    OutOfBounds::new(len + 1, len)
+  );
+  assert_eq!(fallible.as_slice(), source.as_slice());
+  fallible.try_advance(2).unwrap();
+  assert_eq!(fallible.as_slice(), b"cdef");
+}
+
+#[test]
+fn mutable_split_off_twin_errs_exactly_past_capacity() {
+  let mut source = VectorMut::<u8>::new();
+  source.extend_from_slice(b"abcd");
+  let capacity = source.capacity();
+  for at in [0, 2, 4, capacity] {
+    let mut panicking = source.clone();
+    let mut fallible = source.clone();
+    let expected = panicking.split_off(at);
+    let suffix = fallible.try_split_off(at).unwrap();
+    assert_eq!(
+      (suffix.as_slice(), fallible.as_slice()),
+      (expected.as_slice(), panicking.as_slice())
+    );
+  }
+  let mut fallible = source.clone();
+  assert_eq!(
+    fallible.try_split_off(capacity + 1).unwrap_err(),
+    OutOfBounds::new(capacity + 1, capacity)
+  );
+  assert_eq!(fallible.as_slice(), b"abcd");
+}
+
+// try_reserve errs exactly where reserve panics, and on either outcome the
+// elements are unchanged. Requests stay small or overflow, so that no reserve
+// reaches an allocation the allocator would refuse, which aborts.
+#[test]
+fn try_reserve_errs_exactly_where_reserve_panics() {
+  fn check<S: InlineSize>(buffer: VectorMut<u8, S>) {
+    let len = buffer.len();
+    for additional in [0, 1, 7, 64, 4096, usize::MAX - len, usize::MAX] {
+      let mut fallible = buffer.clone();
+      let result = fallible.try_reserve(additional);
+      let mut panicking = buffer.clone();
+      let panicked = catch_unwind(AssertUnwindSafe(|| panicking.reserve(additional))).is_err();
+      assert_eq!(result.is_err(), panicked, "additional {additional}");
+      assert_eq!(fallible.as_slice(), buffer.as_slice());
+      match result {
+        Ok(()) => assert!(fallible.capacity() - fallible.len() >= additional),
+        Err(TryReserveError::Bounded(error)) => assert_eq!(error.requested, additional),
+        Err(error) => assert_eq!(error, TryReserveError::CapacityOverflow),
+      }
+    }
+  }
+  let mut inline = VectorMut::<u8>::new();
+  inline.extend_from_slice(b"abc");
+  check(inline.clone());
+  let mut narrow = VectorMutN::<u8, 16>::new();
+  narrow.extend_from_slice(b"abc");
+  check(narrow);
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  {
+    // A heap buffer reserves through its window.
+    let mut heap = VectorMut::<u8>::with_capacity(256);
+    heap.extend_from_slice(b"heap bytes");
+    heap.advance(5);
+    check(heap);
+  }
+}
+
+#[test]
+fn allocating_twins_return_what_the_allocating_methods_return() {
+  for len in [0, 3, 40, 1000] {
+    match VectorMut::<u8>::try_with_capacity(len) {
+      Ok(buffer) => assert!(buffer.capacity() >= len && buffer.is_empty()),
+      Err(error) => assert!(matches!(error, TryReserveError::Bounded(_))),
+    }
+    match VectorMut::<u8>::try_zeroed(len) {
+      Ok(zeros) => assert_eq!(zeros.as_slice(), VectorMut::<u8>::zeroed(len).as_slice()),
+      Err(error) => assert!(matches!(error, TryReserveError::Bounded(_))),
+    }
+    let mut fallible = VectorMut::<u8>::new();
+    let elements = vec![7u8; len];
+    match fallible.try_extend_from_slice(&elements) {
+      Ok(()) => assert_eq!(fallible.as_slice(), &elements[..]),
+      Err(error) => {
+        assert!(matches!(error, TryReserveError::Bounded(_)));
+        assert!(fallible.is_empty());
+      }
+    }
+  }
+  assert!(VectorMut::<u8>::try_with_capacity(usize::MAX).is_err());
+  assert!(VectorMut::<u8>::try_zeroed(usize::MAX).is_err());
+}

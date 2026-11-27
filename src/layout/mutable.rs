@@ -1,5 +1,9 @@
 use super::{InlineSize, Layout};
-use crate::{Vector, VectorMut, error::OutOfBounds};
+use crate::{
+  Vector, VectorMut,
+  error::{ByteEditError, OutOfBounds, TryPutError, TryReserveError},
+  try_checked_range,
+};
 use core::{
   marker::PhantomData,
   mem::{self, MaybeUninit},
@@ -301,6 +305,7 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// Panics if the requested capacity cannot be represented. Without an
   /// allocator, or with a one-word budget, only the inline capacity is available.
+  /// [`Self::try_with_capacity`] returns an error instead, allocation failure included.
   #[track_caller]
   pub fn with_capacity(capacity: usize) -> Self
   where
@@ -309,6 +314,17 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     let mut result = Self::new();
     result.reserve(capacity);
     result
+  }
+
+  /// Creates an empty buffer with space for at least `capacity` elements, or
+  /// returns an error where [`Self::with_capacity`] panics or the allocation fails.
+  pub fn try_with_capacity(capacity: usize) -> Result<Self, TryReserveError>
+  where
+    S: WritableSize<T>,
+  {
+    let mut result = Self::new();
+    result.try_reserve(capacity)?;
+    Ok(result)
   }
 
   /// Copies `values` inline, returning `None` when they exceed the inline capacity.
@@ -368,7 +384,8 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `count` exceeds the current length.
+  /// Panics if `count` exceeds the current length. [`Self::try_advance`]
+  /// returns an error instead.
   #[track_caller]
   pub fn advance(&mut self, count: usize) {
     #[cfg(any(feature = "std", feature = "alloc"))]
@@ -379,6 +396,17 @@ impl<T, S: InlineSize> VectorMut<T, S> {
       assert!(count <= self.len(), "advance past end");
       self.storage.layout_mut().advance(count);
     }
+  }
+
+  /// Skips the first `count` elements, or returns an error where
+  /// [`Self::advance`] panics.
+  pub fn try_advance(&mut self, count: usize) -> Result<(), OutOfBounds> {
+    let len = self.len();
+    if count > len {
+      return Err(OutOfBounds::new(count, len));
+    }
+    self.advance(count);
+    Ok(())
   }
 
   /// Shortens the initialized view to at most `len` elements and drops its tail.
@@ -453,6 +481,7 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   /// # Panics
   ///
   /// Panics on capacity overflow, or when a bounded buffer cannot fit the request.
+  /// [`Self::try_reserve`] returns an error instead, allocation failure included.
   #[track_caller]
   pub fn reserve(&mut self, additional: usize) {
     #[cfg(any(feature = "std", feature = "alloc"))]
@@ -466,20 +495,62 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     if Layout::<T, S>::FITS_WINDOW {
       let len = self.len();
       let required = len.checked_add(additional).expect("capacity overflow");
-      let mut values = Vec::with_capacity(required);
-      *self = Self::from_window_with(|| {
-        // SAFETY: The new allocation is large enough and distinct. Move the
-        // initialized elements; the old inline range is retired immediately.
-        unsafe {
-          ptr::copy_nonoverlapping(self.as_slice().as_ptr(), values.as_mut_ptr(), len);
-          values.set_len(len);
-          self.set_len(0);
-        }
-        Window::from_vec(values)
-      });
+      let values = Vec::with_capacity(required);
+      // SAFETY: A fresh, empty allocation with room for `required >= len` elements.
+      unsafe { self.adopt_inline_into(values, len) };
       return;
     }
     panic!("requested capacity exceeds bounded inline storage");
+  }
+
+  /// Ensures space for `additional` elements after the current length, or
+  /// returns an error where [`Self::reserve`] panics or the allocation fails.
+  pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if let Some(window) = self.window_mut() {
+      return window.try_reserve(additional);
+    }
+    if self.try_reclaim(additional) {
+      return Ok(());
+    }
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    if Layout::<T, S>::FITS_WINDOW {
+      let len = self.len();
+      let required = len
+        .checked_add(additional)
+        .ok_or(TryReserveError::CapacityOverflow)?;
+      let mut values = Vec::new();
+      values
+        .try_reserve_exact(required)
+        .map_err(|_| window::exact_error::<T>(required))?;
+      // SAFETY: A fresh, empty allocation with room for `required >= len` elements.
+      unsafe { self.adopt_inline_into(values, len) };
+      return Ok(());
+    }
+    let layout = self.storage.layout_mut();
+    Err(TryReserveError::Bounded(TryPutError {
+      requested: additional,
+      available: layout.inline_limit() - layout.writable_range().len(),
+    }))
+  }
+
+  // Moves the inline elements into `values` and makes it this buffer's window.
+  //
+  // SAFETY: `values` must be empty and distinct from this buffer, with capacity
+  // for at least `len` elements, and `len` must be this buffer's length.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline(always)]
+  unsafe fn adopt_inline_into(&mut self, mut values: Vec<T>, len: usize) {
+    *self = Self::from_window_with(|| {
+      // SAFETY: The new allocation is large enough and distinct. Move the
+      // initialized elements; the old inline range is retired immediately.
+      unsafe {
+        ptr::copy_nonoverlapping(self.as_slice().as_ptr(), values.as_mut_ptr(), len);
+        values.set_len(len);
+        self.set_len(0);
+      }
+      Window::from_vec(values)
+    });
   }
 
   /// Copies `elements` onto the end of the buffer.
@@ -502,11 +573,26 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     }
   }
 
+  /// Copies `elements` onto the end of the buffer, or returns an error where
+  /// [`Self::extend_from_slice`] panics or the allocation fails. On an error
+  /// the buffer is unchanged.
+  pub fn try_extend_from_slice(&mut self, elements: &[T]) -> Result<(), TryReserveError>
+  where
+    T: Copy,
+  {
+    // Once the room is reserved, extend_from_slice's own reserve finds it and
+    // neither allocates nor panics.
+    self.try_reserve(elements.len())?;
+    self.extend_from_slice(elements);
+    Ok(())
+  }
+
   /// Copies the elements in `range` onto the end of the buffer.
   ///
   /// # Panics
   ///
   /// Panics if the range falls outside the current view or growth exceeds capacity limits.
+  /// [`Self::try_extend_from_within`] returns an error instead.
   #[track_caller]
   pub fn extend_from_within(&mut self, range: impl RangeBounds<usize>)
   where
@@ -522,6 +608,24 @@ impl<T, S: InlineSize> VectorMut<T, S> {
       ptr::copy_nonoverlapping(base.add(range.start), base.add(len), range.len());
       self.set_len(len + range.len());
     }
+  }
+
+  /// Copies the elements in `range` onto the end of the buffer, or returns an
+  /// error where [`Self::extend_from_within`] panics or the allocation fails.
+  /// On an error the buffer is unchanged.
+  pub fn try_extend_from_within(
+    &mut self,
+    range: impl RangeBounds<usize>,
+  ) -> Result<(), ByteEditError>
+  where
+    T: Copy,
+  {
+    let range = try_checked_range(range, self.len())?;
+    // With the range checked and the room reserved, extend_from_within's own
+    // check and reserve can no longer fail.
+    self.try_reserve(range.len())?;
+    self.extend_from_within(range);
+    Ok(())
   }
 
   // Appends one element, growing the storage as `reserve` does.
@@ -563,7 +667,8 @@ impl<T, S: InlineSize> VectorMut<T, S> {
   ///
   /// # Panics
   ///
-  /// Panics if `at` exceeds the current capacity.
+  /// Panics if `at` exceeds the current capacity. [`Self::try_split_off`]
+  /// returns an error instead.
   #[must_use]
   #[track_caller]
   pub fn split_off(&mut self, at: usize) -> Self {
@@ -594,6 +699,16 @@ impl<T, S: InlineSize> VectorMut<T, S> {
     // so its implicit end-of-capacity is exactly the split boundary.
     layout.move_inline(range.start, Self::INLINE_CAPACITY - at, range.len().min(at));
     Self::wrap(right)
+  }
+
+  /// Splits at an index relative to the current start, as [`Self::split_off`]
+  /// does, or returns an error where it panics.
+  pub fn try_split_off(&mut self, at: usize) -> Result<Self, OutOfBounds> {
+    let capacity = self.capacity();
+    if at > capacity {
+      return Err(OutOfBounds::new(at, capacity));
+    }
+    Ok(self.split_off(at))
   }
 
   /// Removes and returns the first `at` initialized elements.
@@ -840,16 +955,40 @@ impl<T, S: InlineSize> VectorMut<T, S> {
 
 impl<S: InlineSize> VectorMut<u8, S> {
   /// Creates a buffer of `len` initialized zero bytes.
+  ///
+  /// # Panics
+  ///
+  /// Panics where [`Self::reserve`] does. [`Self::try_zeroed`] returns an error
+  /// instead, allocation failure included.
   #[track_caller]
   pub fn zeroed(len: usize) -> Self {
     let mut result = Self::blank();
     result.reserve(len);
-    // SAFETY: reserve provided len u8 slots, and all-zero is a valid byte.
-    unsafe {
-      result.spare_capacity_mut().as_mut_ptr().write_bytes(0, len);
-      result.set_len(len);
-    }
+    // SAFETY: The buffer is empty, and reserve provided len u8 slots.
+    unsafe { result.fill_zeros(len) };
     result
+  }
+
+  /// Creates a buffer of `len` initialized zero bytes, or returns an error
+  /// where [`Self::zeroed`] panics or the allocation fails.
+  pub fn try_zeroed(len: usize) -> Result<Self, TryReserveError> {
+    let mut result = Self::blank();
+    result.try_reserve(len)?;
+    // SAFETY: The buffer is empty, and try_reserve provided len u8 slots.
+    unsafe { result.fill_zeros(len) };
+    Ok(result)
+  }
+
+  // Writes `len` zero bytes and makes them the buffer's elements.
+  //
+  // SAFETY: The buffer must be empty, with at least `len` spare slots.
+  #[inline(always)]
+  unsafe fn fill_zeros(&mut self, len: usize) {
+    // SAFETY: The caller provides len spare u8 slots, and all-zero is a valid byte.
+    unsafe {
+      self.spare_capacity_mut().as_mut_ptr().write_bytes(0, len);
+      self.set_len(len);
+    }
   }
 }
 

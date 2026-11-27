@@ -371,7 +371,7 @@ fn zero_sized_windows_use_indices_for_adjacency() {
   head.try_unsplit(mid).ok().unwrap();
   head.try_unsplit(tail).ok().unwrap();
   assert_eq!(head.len(), usize::MAX);
-  let head = head.try_freeze().err().expect("immutable length limit");
+  let head = head.try_freeze().expect_err("immutable length limit");
   assert_eq!(head.into_vec().len(), usize::MAX);
 }
 
