@@ -319,7 +319,7 @@ jobs:
           done
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-${{ matrix.os }}
           path: |
@@ -370,7 +370,7 @@ jobs:
           ls -l timed timed/head
       - name: Upload the timed binaries
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: timed-${{ matrix.os }}
           path: timed
@@ -389,7 +389,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download every platform's artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bench-*
           path: artifacts
@@ -401,7 +401,7 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the combined CSV
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-summary
           path: bench-summary.csv
@@ -649,7 +649,7 @@ jobs:
           exit "$status"
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codecheck-${{ matrix.os }}
           path: codecheck
@@ -667,7 +667,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download every platform's artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: codecheck-*
           path: codecheck-artifacts
@@ -724,7 +724,7 @@ jobs:
           done
       - name: Upload the combined CSV
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: callgrind-summary
           path: callgrind_ops_all.csv
